@@ -1,0 +1,14 @@
+Manifest-Version: 1.0
+MicroEdition-Configuration: CLDC-1.0
+MicroEdition-Profile: MIDP-1.0
+MIDlet-1: 危城无双, i64x64.png, CMidlet
+MIDlet-Icon: i64x64.png
+MIDlet-Version: 1.0
+MIDlet-Description: 三国城池防御战
+MIDlet-Name: 危城无双
+MIDlet-Vendor: 雪鲤鱼科技
+MIDlet-Jar-URL: wcwszsgqypjb.jar
+MIDlet-Jar-Size: 225957
+display_width: 1080
+display_height: 1920
+display_orientation: auto

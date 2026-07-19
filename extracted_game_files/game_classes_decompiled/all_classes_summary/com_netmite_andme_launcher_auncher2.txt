@@ -1,0 +1,48 @@
+Class: Lcom/netmite/andme/launcher/Launcher2;
+Superclass: Lcom/netmite/andme/launcher/Launcher;
+Access: public
+
+Fields:
+   Landroid/content/Context; andmecontext
+   Ljava/lang/ClassLoader; clloader
+  public Z launchinpackageprocess
+   Ljava/lang/Class; m_runnerclass
+   Landroid/app/Activity; m_runnerobj
+
+Methods:
+  public constructor <init>()V
+   checkRunnerVersion()Z
+  public getApkPath()Ljava/lang/String;
+  public getAppClass()Ljava/lang/String;
+  public getAppName()Ljava/lang/String;
+  public getAppUrl()Ljava/lang/String;
+  public getResources()Landroid/content/res/Resources;
+  public getResources2()Landroid/content/res/Resources;
+  public launch(Landroid/os/Bundle;)V
+  public launch2(Landroid/os/Bundle;)V
+  public onActivityResult(I I Landroid/content/Intent;)V
+  public onConfigurationChanged(Landroid/content/res/Configuration;)V
+  public onContextItemSelected(Landroid/view/MenuItem;)Z
+  public onContextMenuClosed(Landroid/view/Menu;)V
+  public onCreate(Landroid/os/Bundle;)V
+  public onCreateContextMenu(Landroid/view/ContextMenu; Landroid/view/View; Landroid/view/ContextMenu$ContextMenuInfo;)V
+  public onCreateDialog(I)Landroid/app/Dialog;
+  public onCreateOptionsMenu(Landroid/view/Menu;)Z
+  public onCreateView(Ljava/lang/String; Landroid/content/Context; Landroid/util/AttributeSet;)Landroid/view/View;
+  public onDestroy()V
+  public onKeyDown(I Landroid/view/KeyEvent;)Z
+  public onKeyMultiple(I I Landroid/view/KeyEvent;)Z
+  public onKeyUp(I Landroid/view/KeyEvent;)Z
+  public onLowMemory()V
+  public onNewIntent(Landroid/content/Intent;)V
+  public onOptionsItemSelected(Landroid/view/MenuItem;)Z
+  public onOptionsMenuClosed(Landroid/view/Menu;)V
+  public onPause()V
+  public onPrepareDialog(I Landroid/app/Dialog;)V
+  public onPrepareOptionsMenu(Landroid/view/Menu;)Z
+  public onRestart()V
+  public onRestoreInstanceState(Landroid/os/Bundle;)V
+  public onResume()V
+  public onSaveInstanceState(Landroid/os/Bundle;)V
+  public onStart()V
+  public onStop()V

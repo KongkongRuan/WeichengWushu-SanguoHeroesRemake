@@ -1,0 +1,9 @@
+Class: Lcom/netmite/andme/test/TestContact;
+Superclass: Ljava/lang/Object;
+Access: public
+
+Fields:
+
+Methods:
+  public constructor <init>()V
+  public testAddContact2(Landroid/content/Context;)V
