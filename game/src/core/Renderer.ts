@@ -101,6 +101,90 @@ export class Renderer {
   }
 
   /**
+   * 绘制水平/垂直翻转的图片 (对应原版 DirectGraphics MIRROR 变换)
+   */
+  drawImageFlipped(img: HTMLImageElement | HTMLCanvasElement, x: number, y: number, flipH: boolean, flipV: boolean = false): void {
+    const ctx = this.virtualCtx;
+    ctx.save();
+    ctx.translate(
+      Math.floor(x) + (flipH ? img.width : 0),
+      Math.floor(y) + (flipV ? img.height : 0),
+    );
+    ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+    ctx.drawImage(img, 0, 0);
+    ctx.restore();
+  }
+
+  /**
+   * 绘制旋转90°的图片 (对应原版 DirectGraphics ROT90/ROT270 变换)
+   * quarterTurns: 1=顺时针90°, -1=逆时针90°; 锚点为近似处理 (原版锚点简化)
+   */
+  drawImageRotated(img: HTMLImageElement | HTMLCanvasElement, x: number, y: number, quarterTurns: number): void {
+    const ctx = this.virtualCtx;
+    ctx.save();
+    ctx.translate(Math.floor(x), Math.floor(y));
+    ctx.rotate(quarterTurns * Math.PI / 2);
+    ctx.drawImage(img, 0, 0);
+    ctx.restore();
+  }
+
+  /**
+   * 绘制带变换的图集帧 (对应原版 a(Image,int×8) 行11291 + DirectGraphics.drawImage 行11150)
+   * transform 为原版索引 (a1001 表, a.java:378-389):
+   *   0=无 1=水平翻转 2=垂直翻转 3=旋转180 4=水平翻转+旋转270 5=旋转270 6=旋转90 7=水平翻转+旋转90
+   * (dx,dy) = 变换后包围盒左上角 (Nokia DirectGraphics anchor=TOP|LEFT 语义);
+   * 旋转类变换 (4-7) 包围盒宽高互换 (h×w)
+   */
+  drawSpriteTransform(
+    img: HTMLImageElement | HTMLCanvasElement,
+    sx: number, sy: number, sw: number, sh: number,
+    dx: number, dy: number,
+    transform: number,
+  ): void {
+    const ctx = this.virtualCtx;
+    const x = Math.floor(dx);
+    const y = Math.floor(dy);
+    ctx.save();
+    switch (transform) {
+      case 1: // 水平翻转
+        ctx.translate(x + sw, y);
+        ctx.scale(-1, 1);
+        break;
+      case 2: // 垂直翻转
+        ctx.translate(x, y + sh);
+        ctx.scale(1, -1);
+        break;
+      case 3: // 旋转180
+        ctx.translate(x + sw, y + sh);
+        ctx.scale(-1, -1);
+        break;
+      case 4: // 水平翻转+旋转270: (px,py)->(py,px)
+        ctx.translate(x, y);
+        ctx.rotate(Math.PI / 2);
+        ctx.scale(-1, 1);
+        break;
+      case 5: // 旋转270 (逆时针90°): 原左上 -> 左下
+        ctx.translate(x, y + sw);
+        ctx.rotate(-Math.PI / 2);
+        break;
+      case 6: // 旋转90 (顺时针): 原左上 -> 右上
+        ctx.translate(x + sh, y);
+        ctx.rotate(Math.PI / 2);
+        break;
+      case 7: // 水平翻转+旋转90: (px,py)->(sh-py, sw-px)
+        ctx.translate(x + sh, y + sw);
+        ctx.rotate(Math.PI / 2);
+        ctx.scale(1, -1);
+        break;
+      default: // 0=无变换
+        ctx.translate(x, y);
+        break;
+    }
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+    ctx.restore();
+  }
+
+  /**
    * 绘制瓦片
    */
   drawTile(img: HTMLImageElement | HTMLCanvasElement, tileIndex: number, x: number, y: number, tilesPerRow: number, tileSize: number = TILE_SIZE): void {

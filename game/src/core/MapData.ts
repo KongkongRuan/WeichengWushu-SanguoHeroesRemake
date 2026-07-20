@@ -9,15 +9,22 @@
  *     Layer 2-3: 重复数据 (未使用)
  *
  *   mapsp 文件 (4层, 仅关卡1-8):
- *     Layer 0 (F1164): pathLayer  - 路径瓦片索引 (0=空, 1/2=入口, 3=路径, 5/6=出口, 7+=其他路径)
- *     Layer 1 (G1165): pathFlipLayer - 路径翻转模式
+ *     Layer 0 (F1164): pathLayer  - mapsp 叠加装饰瓦片索引 (0=无装饰)
+ *     Layer 1 (G1165): pathFlipLayer - 装饰瓦片翻转模式 (SpriteTransform 0-7)
  *     Layer 2-3: 重复数据 (未使用)
+ *
+ *   mapdata 文件 (1层):
+ *     terrainLayer (E1163): 属性层, 每字节语义:
+ *       0/2/4/6: 路径格, 方向=值>>1 (0上1右2下3左, 配合 DIRECTIONS_K1081)
+ *       奇数:    运行时被敌人占用的路径格 (敌人进入时+1, 离开-1,
+ *                见原版 a(int,int,boolean) 行11058-11085)
+ *       8: 可建造草地; 9: 障碍/装饰; 10: 敌城格(出生侧); 11: 我城格(终点); >=12: 塔占用
  *
  * 原版渲染 (a.java 行22260+, ak()方法):
  *   - 相机系统: bA/bC=当前相机XY, bP/bQ=目标相机XY (跟随建筑方框)
  *   - 可视区域: 240x276 像素 (y偏移13px)
  *   - 只渲染可见区域的瓦片 (19列 x 18行)
- *   - 路径层叠加在背景层之上
+ *   - mapsp 装饰层叠加在背景层之上 (w(int,int,int) 行25959-26143)
  *
  * 原版相机跟随 (a.java an()方法):
  *   - 建筑方框 bN/bO 在地图中移动
@@ -25,12 +32,15 @@
  *   - 边缘阈值: X=112px, Y=130px
  */
 import { Renderer } from './Renderer';
+import { SpriteLoader } from './SpriteLoader';
 import {
   TILE_SIZE,
   MAP_TOP_BAR_H,
   MAP_VIEW_H,
   MAP_VIEW_W,
-  LOGICAL_HEIGHT,
+  TILESET_MAP_M1075,
+  OVERLAY_ATLAS_N1076,
+  SPAWN_POINTS_B1069,
 } from '../data/gameData';
 
 export interface LevelMapData {
@@ -39,43 +49,48 @@ export interface LevelMapData {
   height: number;         // 地图高度 (瓦片数, 对应 bH)
   tileLayer: number[];    // 背景瓦片索引 (对应 B1160)
   flipLayer: number[];    // 瓦片翻转模式 (对应 C1161, 值0-7)
-  pathLayer: number[];    // 路径瓦片索引 (对应 F1164, 0=空)
-  pathFlipLayer?: number[]; // 路径翻转模式 (对应 G1165)
+  pathLayer: number[];    // mapsp 装饰瓦片索引 (对应 F1164, 0=无装饰)
+  pathFlipLayer?: number[]; // 装饰瓦片翻转模式 (对应 G1165)
+  terrainLayer?: number[];  // 属性层 (对应 E1163)
   spawnPoints?: { x: number; y: number; type: number }[];
 }
 
-// 路径层值含义 (原版 F1164 的值)
-export const PATH_EMPTY = 0;       // 空地
-export const PATH_ENTRY_1 = 1;     // 入口类型1 (敌人生成点)
-export const PATH_ENTRY_2 = 2;     // 入口类型2
-export const PATH_WAYPOINT = 3;    // 路径点
-export const PATH_ROAD_4 = 4;     // 路路瓦片4
-export const PATH_EXIT_1 = 5;      // 出口类型1 (敌人终点)
-export const PATH_EXIT_2 = 6;      // 出口类型2
-export const PATH_ROAD_7 = 7;     // 路路瓦片7
-export const PATH_BUILDABLE = 15;  // 可建造标记 (原版 tileLayer 中的值15, 关卡0用作路径标记)
-
-// 原版关卡0不加载 mapsp 文件 (a.java 行7452: if (n != 0) { ... this.D(n); })
-// 关卡0的路径数据直接嵌入在 tileLayer (B1160) 中
-// 当 aN==0 (无mapsp) 时, 原版使用 tileLayer 值作为路径值 (a.java 行22286-22290)
-// tileLayer 中值为 1,2,3,5,6,15 的瓦片即为路径瓦片
+// 属性层 (E1163) 值语义
+export const TERRAIN_PATH_MAX = 7;   // <8 为路径格 (偶数值>>1=方向)
+export const TERRAIN_BUILDABLE = 8;  // 可建造草地
+export const TERRAIN_OBSTACLE = 9;   // 障碍/装饰
+export const TERRAIN_ENEMY_CASTLE = 10; // 敌城格 (出生侧)
+export const TERRAIN_OUR_CASTLE = 11;   // 我城格 (终点)
 
 /**
- * 原版 m1075 数组: 关卡索引 → map图集索引
- * m1075 = [0,1,2,3,4,5,6,4,3] (9个元素, 对应关卡0-8)
+ * 原版 m1075 数组: 关卡索引 → map图集索引 (gameData.TILESET_MAP_M1075)
  * bL = m1075[level] + 5 → map图集在 a1013 中的索引
  * H5中直接用 m1075[level] 作为 map0-6.png 的索引
+ *
+ * 原版 n1076 数组: 关卡索引 → mapsp 装饰图集 (gameData.OVERLAY_ATLAS_N1076)
+ * bM = n1076[level] + 33 (原版 E() 行7253-7255), 资源表 a1014:
+ *   33=/end 34=/sp0 35=/sp1 36=/sp2 37=/sp3
+ *   即 H5 文件名 = sp{n1076[level]-1}_0_*.png (n1076>=1; 关卡0不绘制装饰层)
  */
-const MAP_ATLAS_INDEX: number[] = [0, 1, 2, 3, 4, 5, 6, 4, 3];
-
 export class MapData {
   private renderer: Renderer;
   private mapData: LevelMapData | null = null;
+  private spriteLoader: SpriteLoader | null = null;
 
   // 原版 map 图集 (map0.png ~ map6.png)
   private mapAtlases: Map<number, HTMLImageElement> = new Map();
   private currentAtlas: HTMLImageElement | null = null;
   private currentLevel: number = 0;
+  private currentMapLevel: number = 0;
+
+  // 运行时属性层 (E1163, 占用标记会直接改在这里, 与原版一致)
+  private terrain: number[] = [];
+
+  // 城锚点 (像素坐标 = 瓦片坐标*16, 对应原版 aK/aL(我城) aI/aJ(敌城), N() 行8469-8516)
+  private ourCastleX: number = 0;
+  private ourCastleY: number = 0;
+  private enemyCastleX: number = 0;
+  private enemyCastleY: number = 0;
 
   // 相机系统 (对应原版 bA/bC/bP/bQ)
   private camX: number = 0;     // 当前相机X (像素)
@@ -89,6 +104,10 @@ export class MapData {
 
   constructor(renderer: Renderer) {
     this.renderer = renderer;
+  }
+
+  setSpriteLoader(loader: SpriteLoader): void {
+    this.spriteLoader = loader;
   }
 
   /**
@@ -124,6 +143,7 @@ export class MapData {
   async loadLevel(level: number): Promise<void> {
     this.currentLevel = level;
     const mapLevel = this.resolveMapLevel(level);
+    this.currentMapLevel = mapLevel;
 
     // 加载地图数据 JSON
     try {
@@ -136,13 +156,26 @@ export class MapData {
       this.mapData = this.createDefaultMap(level);
     }
 
-    // 设置当前关卡对应的 map 图集
-    const atlasIdx = MAP_ATLAS_INDEX[mapLevel] ?? 0;
+    // 初始化运行时属性层 (E1163 副本; 敌人占用标记 +1/-1 直接作用于副本)
+    const src = this.mapData.terrainLayer;
+    const total = this.mapData.width * this.mapData.height;
+    if (src && src.length === total) {
+      this.terrain = src.slice();
+    } else {
+      // 无属性层数据时全部视为障碍 (兜底, 正常不会发生)
+      this.terrain = new Array(total).fill(TERRAIN_OBSTACLE);
+    }
+
+    // 扫描城锚点 (对应原版 N())
+    this.scanCastleAnchors();
+
+    // 设置当前关卡对应的 map 图集 (m1075)
+    const atlasIdx = TILESET_MAP_M1075[mapLevel] ?? 0;
     this.currentAtlas = this.mapAtlases.get(atlasIdx) ?? null;
 
     // 初始化建筑方框位置 (对应原版 c1070)
-    this.boxX = this.getBuildingBoxInit(level, 0);
-    this.boxY = this.getBuildingBoxInit(level, 1);
+    this.boxX = this.getBuildingBoxInit(mapLevel, 0);
+    this.boxY = this.getBuildingBoxInit(mapLevel, 1);
 
     // 初始化相机 (对应原版 y1155=true 时的全量重绘)
     this.updateCameraTarget();
@@ -180,7 +213,185 @@ export class MapData {
     const tileLayer = new Array(tiles).fill(9);
     const flipLayer = new Array(tiles).fill(0);
     const pathLayer = new Array(tiles).fill(0);
-    return { level, width: w, height: h, tileLayer, flipLayer, pathLayer };
+    const terrainLayer = new Array(tiles).fill(TERRAIN_OBSTACLE);
+    return { level, width: w, height: h, tileLayer, flipLayer, pathLayer, terrainLayer };
+  }
+
+  // ============================================================
+  // 属性层 (E1163) API
+  // ============================================================
+
+  /**
+   * 读取属性层原始字节 (含运行时占用标记)
+   * 越界返回 9 (障碍)
+   */
+  getTerrain(tx: number, ty: number): number {
+    if (!this.mapData) return TERRAIN_OBSTACLE;
+    if (tx < 0 || ty < 0 || tx >= this.mapData.width || ty >= this.mapData.height) {
+      return TERRAIN_OBSTACLE;
+    }
+    return this.terrain[ty * this.mapData.width + tx];
+  }
+
+  /**
+   * 像素坐标 → 瓦片索引 (对应原版 a(int,int) 行10001: (y>>4)*bG + (x>>4))
+   */
+  private tileIndexAtPixel(px: number, py: number): number {
+    const w = this.mapData?.width ?? 0;
+    const h = this.mapData?.height ?? 0;
+    let tx = px >> 4;
+    let ty = py >> 4;
+    // 原版 c(int,int) 行16925 会把像素坐标钳制在地图范围内 (bI/bJ)
+    if (tx < 0) tx = 0;
+    if (ty < 0) ty = 0;
+    if (tx >= w) tx = w - 1;
+    if (ty >= h) ty = h - 1;
+    return ty * w + tx;
+  }
+
+  /**
+   * 像素坐标处属性层值 (对应原版 c(int,int) 行16925 的钳制读取, 未>>1)
+   */
+  getTerrainAtPixel(px: number, py: number): number {
+    if (this.terrain.length === 0) return TERRAIN_OBSTACLE;
+    return this.terrain[this.tileIndexAtPixel(px, py)];
+  }
+
+  /**
+   * 像素坐标处路径方向 (对应原版 c(int,int) 行16925: E1163[...] >> 1)
+   * 非路径格时返回值 >=4, 调用方自行判断
+   */
+  getPathDirAtPixel(px: number, py: number): number {
+    return this.getTerrainAtPixel(px, py) >> 1;
+  }
+
+  /**
+   * 瓦片路径方向 (v<8 时返回 0-3, 否则 -1)
+   */
+  getPathDir(tx: number, ty: number): number {
+    const v = this.getTerrain(tx, ty);
+    return v < 8 ? v >> 1 : -1;
+  }
+
+  /**
+   * 瓦片是否为空闲路径 (对应原版 b(int,int) 行16868:
+   *   E1163[idx]&1==0 (未被占用) 且 E1163[idx]<8 (路径) 且 D1162[idx]<6)
+   * H5简化: 塔只能建在 terrain==8 的草地上, 不会压占路径,
+   *         故省略 D1162 塔效果层判断 (注释标注)
+   */
+  isPathFree(tx: number, ty: number): boolean {
+    const v = this.getTerrain(tx, ty);
+    return (v & 1) === 0 && v < 8;
+  }
+
+  /**
+   * 像素坐标处是否为空闲路径 (对应原版 b(int,int) 行16868)
+   */
+  isPathFreeAtPixel(px: number, py: number): boolean {
+    const v = this.getTerrainAtPixel(px, py);
+    return (v & 1) === 0 && v < 8;
+  }
+
+  /**
+   * 像素坐标处是否为我城格 (对应原版 c(int,int) 行17868: E1163==11)
+   */
+  isOurCastleAtPixel(px: number, py: number): boolean {
+    return this.getTerrainAtPixel(px, py) === TERRAIN_OUR_CASTLE;
+  }
+
+  isOurCastle(tx: number, ty: number): boolean {
+    return this.getTerrain(tx, ty) === TERRAIN_OUR_CASTLE;
+  }
+
+  isEnemyCastle(tx: number, ty: number): boolean {
+    return this.getTerrain(tx, ty) === TERRAIN_ENEMY_CASTLE;
+  }
+
+  /**
+   * 占用/释放路径格 (对应原版 a(int,int,boolean) 行11058-11085)
+   * occupy=true: 仅当该格可进入(b()为真)才 +1
+   * occupy=false: 仅当该格当前不可进入(已被占用)才 -1
+   * 防止重复占用/重复释放
+   */
+  private setOccupiedAtPixel(px: number, py: number, occupy: boolean): void {
+    const free = this.isPathFreeAtPixel(px, py);
+    if (occupy) {
+      if (!free) return;
+    } else {
+      if (free) return;
+    }
+    const idx = this.tileIndexAtPixel(px, py);
+    this.terrain[idx] += occupy ? 1 : -1;
+  }
+
+  occupyTileAtPixel(px: number, py: number): void {
+    this.setOccupiedAtPixel(px, py, true);
+  }
+
+  releaseTileAtPixel(px: number, py: number): void {
+    this.setOccupiedAtPixel(px, py, false);
+  }
+
+  /**
+   * 扫描我城/敌城锚点 (对应原版 N() 行8469-8516)
+   * 行优先扫描第一个 11(我城)/10(敌城) 格, 锚点 = 瓦片坐标*16 (像素)
+   */
+  scanCastleAnchors(): void {
+    if (!this.mapData) return;
+    const w = this.mapData.width;
+    const total = this.terrain.length;
+    for (let i = 0; i < total; i++) {
+      if (this.terrain[i] === TERRAIN_OUR_CASTLE) {
+        this.ourCastleX = (i % w) << 4;
+        this.ourCastleY = ((i / w) | 0) << 4;
+        break;
+      }
+    }
+    for (let i = 0; i < total; i++) {
+      if (this.terrain[i] === TERRAIN_ENEMY_CASTLE) {
+        this.enemyCastleX = (i % w) << 4;
+        this.enemyCastleY = ((i / w) | 0) << 4;
+        break;
+      }
+    }
+  }
+
+  /** 我城锚点 (像素, 瓦片左上) */
+  get ourCastlePos(): { x: number; y: number } {
+    return { x: this.ourCastleX, y: this.ourCastleY };
+  }
+
+  /** 敌城锚点 (像素, 瓦片左上) */
+  get enemyCastlePos(): { x: number; y: number } {
+    return { x: this.enemyCastleX, y: this.enemyCastleY };
+  }
+
+  /**
+   * 敌人出生点像素坐标 (原版 b1069[mapLevel], 16k+8 = 格中心)
+   */
+  getSpawnPixel(): { x: number; y: number } {
+    const sp = SPAWN_POINTS_B1069[this.currentMapLevel] ?? SPAWN_POINTS_B1069[0];
+    return { x: sp[0], y: sp[1] };
+  }
+
+  /**
+   * 出生空闲检查的像素坐标 (原版 l(int) 行22826: b(b1069[aN][0], b1069[aN][1]+13)
+   * 即检查出生点下方13px处的格子是否可进入)
+   */
+  getSpawnCheckPixel(): { x: number; y: number } {
+    const sp = this.getSpawnPixel();
+    return { x: sp.x, y: sp.y + 13 };
+  }
+
+  /**
+   * 当前关卡的 mapsp 装饰图集 (n1076>=1 时为 sp{n1076-1}_0, 否则 null)
+   * 关卡0 (aN==0) 原版不绘制装饰层 (w() 行26039: aN!=0 && var15!=0)
+   */
+  private getOverlayAtlas(): HTMLImageElement | null {
+    if (this.currentMapLevel === 0) return null;
+    const n = OVERLAY_ATLAS_N1076[this.currentMapLevel] ?? 0;
+    if (n < 1 || !this.spriteLoader) return null;
+    return this.spriteLoader.getByPrefix(`sp${n - 1}`, 0);
   }
 
   // ============================================================
@@ -244,7 +455,6 @@ export class MapData {
 
   /**
    * 移动建筑方框 (对应原版 al() 方法中的输入处理)
-   * 返回是否需要重绘
    */
   moveBox(dirX: number, dirY: number): void {
     if (!this.mapData) return;
@@ -265,73 +475,6 @@ export class MapData {
     if (!this.mapData) return 0;
     const idx = y * this.mapData.width + x;
     return this.mapData.tileLayer[idx] ?? 0;
-  }
-
-  /**
-   * 获取路径瓦片值 (F1164)
-   * 关卡0: 使用 tileLayer (B1160) 作为路径 (原版 aN==0 时回退)
-   * 其他关卡: 使用 pathLayer (F1164)
-   */
-  getPathTile(x: number, y: number): number {
-    if (!this.mapData) return PATH_EMPTY;
-    if (x < 0 || y < 0 || x >= this.mapData.width || y >= this.mapData.height) return PATH_EMPTY;
-    const idx = y * this.mapData.width + x;
-    
-    if (this.useTileAsPath()) {
-      // 关卡0: 使用 tileLayer 值作为路径
-      // 原版中 tileLayer 的值 1,2,3,5,6,15 是路径标记
-      const tileVal = this.mapData.tileLayer[idx] ?? 0;
-      // 只返回路径相关值 (1,2,3,5,6,15), 其他视为空
-      if (tileVal === 1 || tileVal === 2 || tileVal === 3 || 
-          tileVal === 5 || tileVal === 6 || tileVal === 15) {
-        return tileVal;
-      }
-      return PATH_EMPTY;
-    }
-    
-    return this.mapData.pathLayer[idx] ?? PATH_EMPTY;
-  }
-
-  /**
-   * 是否为敌人可行走路径 (非零路径瓦片)
-   * 关卡0: 使用 tileLayer 值作为路径 (原版 aN==0 时回退到 B1160)
-   * 其他关卡: 使用 pathLayer (F1164)
-   */
-  isWalkable(x: number, y: number): boolean {
-    return this.getPathTile(x, y) !== PATH_EMPTY;
-  }
-
-  /**
-   * 检查当前关卡是否使用 tileLayer 作为路径数据 (关卡0)
-   * 原版: 当 aN==0 (无mapsp加载) 时, 使用 B1160 (tileLayer) 作为路径
-   */
-  private useTileAsPath(): boolean {
-    if (!this.mapData) return false;
-    // 检查 pathLayer 是否全为零 (关卡0没有mapsp数据)
-    const { pathLayer } = this.mapData;
-    if (!pathLayer || pathLayer.length === 0) return true;
-    // 快速检查: 如果前100个元素都是0, 很可能没有路径数据
-    let hasPathData = false;
-    for (let i = 0; i < Math.min(pathLayer.length, 200); i++) {
-      if (pathLayer[i] !== 0) { hasPathData = true; break; }
-    }
-    return !hasPathData;
-  }
-
-  /**
-   * 是否为入口点 (敌人生成位置)
-   */
-  isEntryPoint(x: number, y: number): boolean {
-    const v = this.getPathTile(x, y);
-    return v === PATH_ENTRY_1 || v === PATH_ENTRY_2;
-  }
-
-  /**
-   * 是否为出口点 (敌人终点)
-   */
-  isExitPoint(x: number, y: number): boolean {
-    const v = this.getPathTile(x, y);
-    return v === PATH_EXIT_1 || v === PATH_EXIT_2;
   }
 
   get width(): number {
@@ -409,7 +552,8 @@ export class MapData {
 
   /**
    * 渲染地图 (只渲染可见区域)
-   * 对应原版 ak() 方法 + w() 方法
+   * 对应原版 ak() 方法 (行14159-14453) + w() 方法 (行25959-26143)
+   * H5直接按可见区绘制, 不使用原版的 256x304 离屏缓存
    */
   render(): void {
     if (!this.mapData) return;
@@ -450,22 +594,22 @@ export class MapData {
       }
     }
 
-    // 渲染路径层 (F1164 + G1165) - 叠加在背景层之上
-    if (pathLayer && this.currentAtlas) {
+    // 渲染 mapsp 装饰层 (F1164 + G1165) - 叠加在背景层之上
+    // 原版 w(): 仅当 aN!=0 (关卡0无mapsp) 且装饰值非0 时绘制
+    // 图集 = sp{n1076[level]-1}_0 (bM = n1076+33, 见 E() 行7253-7255)
+    const overlayAtlas = this.getOverlayAtlas();
+    if (pathLayer && overlayAtlas) {
       for (let y = startRow; y < endRow; y++) {
         for (let x = startCol; x < endCol; x++) {
           const idx = y * width + x;
-          const pathIdx = pathLayer[idx] & 0xFF;
-          if (pathIdx === 0) continue; // 空路径不绘制
+          const overlayIdx = pathLayer[idx] & 0xFF;
+          if (overlayIdx === 0) continue; // 无装饰不绘制
 
-          const pathFlip = pathFlipLayer?.[idx] ?? 0;
+          const overlayFlip = pathFlipLayer?.[idx] ?? 0;
           const px = x * TILE_SIZE - this.camX;
           const py = y * TILE_SIZE - this.camY + MAP_TOP_BAR_H;
 
-          // 路径层使用相同的图集, 瓦片索引偏移到路径区域
-          // 原版使用 bM = n1076[level] + 33 作为路径图集
-          // H5简化: 路径瓦片使用同一图集的不同区域
-          this.drawTileWithFlip(this.currentAtlas, pathIdx, pathFlip, px, py, TILES_PER_ROW);
+          this.drawTileWithFlip(overlayAtlas, overlayIdx, overlayFlip, px, py, TILES_PER_ROW);
         }
       }
     }
@@ -496,7 +640,8 @@ export class MapData {
 
   /**
    * 绘制瓦片 (带翻转/旋转模式)
-   * 100%还原原版 a.java 的 a(Image, int, int, int, int, int, int, int) 方法
+   * 100%还原原版 a.java 的 a(Image, int, int, int, int, int, int, int) 方法 (行11211)
+   * 源瓦片: srcX=(v&3)*16, srcY=(v>>2)*16; flipMode 对应 DirectGraphics 变换 a1001[0-7]
    */
   private drawTileWithFlip(
     img: HTMLImageElement,
@@ -578,10 +723,11 @@ export class MapData {
 
   /**
    * 渲染路径高亮 (建造模式)
+   * 改为基于属性层 (E1163): 高亮所有路径格 (v<8)
    */
   renderPathOverlay(): void {
     if (!this.mapData) return;
-    const { width, height, pathLayer } = this.mapData;
+    const { width, height } = this.mapData;
 
     const startCol = Math.floor(this.camX / TILE_SIZE);
     const startRow = Math.floor(this.camY / TILE_SIZE);
@@ -596,8 +742,8 @@ export class MapData {
 
     for (let y = startRow; y < endRow; y++) {
       for (let x = startCol; x < endCol; x++) {
-        const val = pathLayer[y * width + x];
-        if (val !== PATH_EMPTY) {
+        const val = this.terrain[y * width + x];
+        if (val < 8) {
           const px = x * TILE_SIZE - this.camX;
           const py = y * TILE_SIZE - this.camY + MAP_TOP_BAR_H;
           vctx.strokeStyle = 'rgba(255, 255, 0, 0.3)';
@@ -612,19 +758,10 @@ export class MapData {
 
   /**
    * 检查瓦片是否可建造塔
-   * 原版 b(int n, int n2) 方法: 检查 E1163 和 D1162 属性
-   * H5简化: 不可建造在路径瓦片上, 不可建造在已有塔位置
-   * 路径瓦片: pathLayer值非0 或 (关卡0) tileLayer值为1,2,3,5,6,15
+   * 原版 b(int n, int n2) 判定基于 E1163/D1162 属性
+   * H5实现: 属性层 E1163 == 8 (可建造草地)
    */
-  isBuildable(x: number, y: number): boolean {
-    if (!this.mapData) return false;
-    if (x < 0 || y < 0 || x >= this.mapData.width || y >= this.mapData.height) return false;
-    // 不能建造在路径上
-    if (this.isWalkable(x, y)) return false;
-    return true;
+  isBuildableAt(x: number, y: number): boolean {
+    return this.getTerrain(x, y) === TERRAIN_BUILDABLE;
   }
-
-  // ====== 旧接口兼容 (已废弃) ======
-  setTileset(_img: HTMLImageElement, _tilesPerRow: number): void {}
-  getPathType(x: number, y: number): number { return this.getPathTile(x, y); }
 }

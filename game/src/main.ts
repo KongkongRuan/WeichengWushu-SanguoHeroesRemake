@@ -7,6 +7,9 @@ import { Game } from './core/Game';
 const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
 const game = new Game(canvas);
 
+// 调试句柄 (e2e 验证用)
+(window as any).__game = game;
+
 // 启动游戏
 game.start().then(() => {
   console.log('Game started');

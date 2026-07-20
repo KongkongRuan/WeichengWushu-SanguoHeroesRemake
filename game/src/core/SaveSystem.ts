@@ -7,6 +7,8 @@
  * - 科技树状态: 已解锁效果、分支进度
  * - 武将觉醒状态
  * - 游戏设置: 音量等
+ * - 战役进度: factionX/upgradeAc/gameModeT/campaignAO/unlockedBattles
+ * - 科技建筑层 (任务B): techBuildings(a1056)/castleParts(b1059)/unlockedTowers(e1105)
  */
 import { STORY_LEVEL_SEQUENCE } from '../data/gameData';
 import { HEROES, Faction } from '../data/heroes';
@@ -48,6 +50,18 @@ export interface SaveData {
   totalKills: number;
   totalGoldEarned: number;
   playTime: number; // 秒
+
+  // ====== 战役进度 (对应原版 X/ac/T/aO/d1073, 新增字段, 旧存档缺省) ======
+  factionX?: number;          // X: 选择的国家 0蜀/1魏/2吴
+  upgradeAc?: number;         // ac: 升级模式 0武系/1文系
+  gameModeT?: number;         // T: 游戏模式 0王者之路/1自由模式
+  campaignAO?: number;        // aO: 王者之路已通关战役数 (0-7)
+  unlockedBattles?: boolean[]; // d1073: 9个战役的解锁表
+
+  // ====== 科技建筑层 (对应原版 a1056/b1059/e1105, 任务B-4, 旧存档缺省) ======
+  techBuildings?: boolean[];   // a1056[5]: 5种科技建筑已建
+  castleParts?: boolean[];     // b1059[10]: 我城部件可见 (城堡外观)
+  unlockedTowers?: boolean[];  // e1105[11]: 塔解锁表
 }
 
 // ============================================================
@@ -285,6 +299,10 @@ export class SaveSystem {
       hp: t.hp,
       maxHp: t.maxHp,
       debuffTimer: 0,
+      // 动画状态 (不存档, 按初始值)
+      frame: 0,
+      orientation: 0,
+      attackAnim: 0,
     }));
   }
 
