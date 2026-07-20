@@ -1,0 +1,31 @@
+Class: Lcom/netmite/util/Debug;
+Superclass: Ljava/lang/Object;
+Access: public
+
+Fields:
+  private static final Ljava/lang/String; TAG
+  static Ljava/util/Hashtable; aligns
+  static Ljava/lang/StringBuffer; buffer
+  static Ljava/util/Vector; debugMatchVector
+  static I debugMatchVectorlen
+  static Ljava/lang/String; debugThread
+  public static Z debugon
+  static Ljava/io/PrintStream; outstream
+
+Methods:
+  static constructor <clinit>()V
+  public constructor <init>()V
+  public static addMatchVector(Ljava/lang/Object;)I
+  public static clearMatchVector()V
+  public static debug(I)V
+  public static debug(Ljava/lang/Object;)V
+  public static debug(Ljava/lang/Object; Ljava/lang/Object;)V
+  public static flush()V
+  public static isDebugOn()Z
+  public static log(Ljava/lang/Object;)V
+  public static log(Ljava/lang/Object; Ljava/lang/Object;)V
+  public static printStackTrace(Ljava/lang/Throwable;)V
+  public static println(Ljava/lang/String;)V
+  public static setDebug(Z)V
+  public static setOut(Ljava/io/PrintStream;)V
+  public static toggle()Z

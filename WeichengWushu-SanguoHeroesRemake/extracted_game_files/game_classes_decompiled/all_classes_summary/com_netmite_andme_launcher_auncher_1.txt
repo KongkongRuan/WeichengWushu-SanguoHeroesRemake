@@ -1,0 +1,10 @@
+Class: Lcom/netmite/andme/launcher/Launcher$1;
+Superclass: Ljava/lang/Object;
+Access: 0x0
+
+Fields:
+  final synthetic Lcom/netmite/andme/launcher/Launcher; this$0
+
+Methods:
+  constructor <init>(Lcom/netmite/andme/launcher/Launcher;)V
+  public onClick(Landroid/content/DialogInterface; I)V

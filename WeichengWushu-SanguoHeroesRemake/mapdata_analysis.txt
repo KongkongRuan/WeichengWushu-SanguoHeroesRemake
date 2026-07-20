@@ -1,0 +1,349 @@
+============================================================
+MAP DATA LEVEL FILES (mapdatalv)
+============================================================
+
+=== mapdatalv0 (size=4084) ===
+  Width(bG)=30, Height(bH)=34, Tiles=1020
+  Expected size: 4 + 1020*2 = 2044
+  Actual size: 4084
+  Extra bytes: 2040
+  File has 4080 data bytes after header
+  Possible 4 layers of size 1020 (remainder=0)
+  Trying other dimensions:
+    1x4080 = 4080 tiles, 1 layers
+    2x2040 = 4080 tiles, 1 layers
+    3x1360 = 4080 tiles, 1 layers
+    4x1020 = 4080 tiles, 1 layers
+    5x816 = 4080 tiles, 1 layers
+    6x680 = 4080 tiles, 1 layers
+    8x510 = 4080 tiles, 1 layers
+    10x408 = 4080 tiles, 1 layers
+    12x340 = 4080 tiles, 1 layers
+    15x272 = 4080 tiles, 1 layers
+    16x255 = 4080 tiles, 1 layers
+    17x240 = 4080 tiles, 1 layers
+    20x204 = 4080 tiles, 1 layers
+    24x170 = 4080 tiles, 1 layers
+    30x136 = 4080 tiles, 1 layers
+    34x120 = 4080 tiles, 1 layers
+    40x102 = 4080 tiles, 1 layers
+    48x85 = 4080 tiles, 1 layers
+    51x80 = 4080 tiles, 1 layers
+    60x68 = 4080 tiles, 1 layers
+    68x60 = 4080 tiles, 1 layers
+    80x51 = 4080 tiles, 1 layers
+    85x48 = 4080 tiles, 1 layers
+
+=== mapdatalv1 (size=3764) ===
+  Width(bG)=20, Height(bH)=47, Tiles=940
+  Expected size: 4 + 940*2 = 1884
+  Actual size: 3764
+  Extra bytes: 1880
+  File has 3760 data bytes after header
+  Possible 4 layers of size 940 (remainder=0)
+  Trying other dimensions:
+    1x3760 = 3760 tiles, 1 layers
+    2x1880 = 3760 tiles, 1 layers
+    4x940 = 3760 tiles, 1 layers
+    5x752 = 3760 tiles, 1 layers
+    8x470 = 3760 tiles, 1 layers
+    10x376 = 3760 tiles, 1 layers
+    16x235 = 3760 tiles, 1 layers
+    20x188 = 3760 tiles, 1 layers
+    40x94 = 3760 tiles, 1 layers
+    47x80 = 3760 tiles, 1 layers
+    80x47 = 3760 tiles, 1 layers
+    94x40 = 3760 tiles, 1 layers
+
+=== mapdatalv2 (size=3844) ===
+  Width(bG)=30, Height(bH)=32, Tiles=960
+  Expected size: 4 + 960*2 = 1924
+  Actual size: 3844
+  Extra bytes: 1920
+  File has 3840 data bytes after header
+  Possible 4 layers of size 960 (remainder=0)
+  Trying other dimensions:
+    1x3840 = 3840 tiles, 1 layers
+    2x1920 = 3840 tiles, 1 layers
+    3x1280 = 3840 tiles, 1 layers
+    4x960 = 3840 tiles, 1 layers
+    5x768 = 3840 tiles, 1 layers
+    6x640 = 3840 tiles, 1 layers
+    8x480 = 3840 tiles, 1 layers
+    10x384 = 3840 tiles, 1 layers
+    12x320 = 3840 tiles, 1 layers
+    15x256 = 3840 tiles, 1 layers
+    16x240 = 3840 tiles, 1 layers
+    20x192 = 3840 tiles, 1 layers
+    24x160 = 3840 tiles, 1 layers
+    30x128 = 3840 tiles, 1 layers
+    32x120 = 3840 tiles, 1 layers
+    40x96 = 3840 tiles, 1 layers
+    48x80 = 3840 tiles, 1 layers
+    60x64 = 3840 tiles, 1 layers
+    64x60 = 3840 tiles, 1 layers
+    80x48 = 3840 tiles, 1 layers
+    96x40 = 3840 tiles, 1 layers
+
+=== mapdatalv3 (size=6244) ===
+  Width(bG)=40, Height(bH)=39, Tiles=1560
+  Expected size: 4 + 1560*2 = 3124
+  Actual size: 6244
+  Extra bytes: 3120
+  File has 6240 data bytes after header
+  Possible 4 layers of size 1560 (remainder=0)
+  Trying other dimensions:
+    1x6240 = 6240 tiles, 1 layers
+    2x3120 = 6240 tiles, 1 layers
+    3x2080 = 6240 tiles, 1 layers
+    4x1560 = 6240 tiles, 1 layers
+    5x1248 = 6240 tiles, 1 layers
+    6x1040 = 6240 tiles, 1 layers
+    8x780 = 6240 tiles, 1 layers
+    10x624 = 6240 tiles, 1 layers
+    12x520 = 6240 tiles, 1 layers
+    13x480 = 6240 tiles, 1 layers
+    15x416 = 6240 tiles, 1 layers
+    16x390 = 6240 tiles, 1 layers
+    20x312 = 6240 tiles, 1 layers
+    24x260 = 6240 tiles, 1 layers
+    26x240 = 6240 tiles, 1 layers
+    30x208 = 6240 tiles, 1 layers
+    32x195 = 6240 tiles, 1 layers
+    39x160 = 6240 tiles, 1 layers
+    40x156 = 6240 tiles, 1 layers
+    48x130 = 6240 tiles, 1 layers
+    52x120 = 6240 tiles, 1 layers
+    60x104 = 6240 tiles, 1 layers
+    65x96 = 6240 tiles, 1 layers
+    78x80 = 6240 tiles, 1 layers
+    80x78 = 6240 tiles, 1 layers
+    96x65 = 6240 tiles, 1 layers
+
+=== mapdatalv4 (size=5284) ===
+  Width(bG)=44, Height(bH)=30, Tiles=1320
+  Expected size: 4 + 1320*2 = 2644
+  Actual size: 5284
+  Extra bytes: 2640
+  File has 5280 data bytes after header
+  Possible 4 layers of size 1320 (remainder=0)
+  Trying other dimensions:
+    1x5280 = 5280 tiles, 1 layers
+    2x2640 = 5280 tiles, 1 layers
+    3x1760 = 5280 tiles, 1 layers
+    4x1320 = 5280 tiles, 1 layers
+    5x1056 = 5280 tiles, 1 layers
+    6x880 = 5280 tiles, 1 layers
+    8x660 = 5280 tiles, 1 layers
+    10x528 = 5280 tiles, 1 layers
+    11x480 = 5280 tiles, 1 layers
+    12x440 = 5280 tiles, 1 layers
+    15x352 = 5280 tiles, 1 layers
+    16x330 = 5280 tiles, 1 layers
+    20x264 = 5280 tiles, 1 layers
+    22x240 = 5280 tiles, 1 layers
+    24x220 = 5280 tiles, 1 layers
+    30x176 = 5280 tiles, 1 layers
+    32x165 = 5280 tiles, 1 layers
+    33x160 = 5280 tiles, 1 layers
+    40x132 = 5280 tiles, 1 layers
+    44x120 = 5280 tiles, 1 layers
+    48x110 = 5280 tiles, 1 layers
+    55x96 = 5280 tiles, 1 layers
+    60x88 = 5280 tiles, 1 layers
+    66x80 = 5280 tiles, 1 layers
+    80x66 = 5280 tiles, 1 layers
+    88x60 = 5280 tiles, 1 layers
+    96x55 = 5280 tiles, 1 layers
+
+=== mapdatalv5 (size=6072) ===
+  Width(bG)=37, Height(bH)=41, Tiles=1517
+  Expected size: 4 + 1517*2 = 3038
+  Actual size: 6072
+  Extra bytes: 3034
+  File has 6068 data bytes after header
+  Possible 4 layers of size 1517 (remainder=0)
+  Trying other dimensions:
+    1x6068 = 6068 tiles, 1 layers
+    2x3034 = 6068 tiles, 1 layers
+    4x1517 = 6068 tiles, 1 layers
+    37x164 = 6068 tiles, 1 layers
+    41x148 = 6068 tiles, 1 layers
+    74x82 = 6068 tiles, 1 layers
+    82x74 = 6068 tiles, 1 layers
+
+=== mapdatalv6 (size=3076) ===
+  Width(bG)=24, Height(bH)=32, Tiles=768
+  Expected size: 4 + 768*2 = 1540
+  Actual size: 3076
+  Extra bytes: 1536
+  File has 3072 data bytes after header
+  Possible 4 layers of size 768 (remainder=0)
+  Trying other dimensions:
+    1x3072 = 3072 tiles, 1 layers
+    2x1536 = 3072 tiles, 1 layers
+    3x1024 = 3072 tiles, 1 layers
+    4x768 = 3072 tiles, 1 layers
+    6x512 = 3072 tiles, 1 layers
+    8x384 = 3072 tiles, 1 layers
+    12x256 = 3072 tiles, 1 layers
+    16x192 = 3072 tiles, 1 layers
+    24x128 = 3072 tiles, 1 layers
+    32x96 = 3072 tiles, 1 layers
+    48x64 = 3072 tiles, 1 layers
+    64x48 = 3072 tiles, 1 layers
+    96x32 = 3072 tiles, 1 layers
+
+=== mapdatalv7 (size=4004) ===
+  Width(bG)=20, Height(bH)=50, Tiles=1000
+  Expected size: 4 + 1000*2 = 2004
+  Actual size: 4004
+  Extra bytes: 2000
+  File has 4000 data bytes after header
+  Possible 4 layers of size 1000 (remainder=0)
+  Trying other dimensions:
+    1x4000 = 4000 tiles, 1 layers
+    2x2000 = 4000 tiles, 1 layers
+    4x1000 = 4000 tiles, 1 layers
+    5x800 = 4000 tiles, 1 layers
+    8x500 = 4000 tiles, 1 layers
+    10x400 = 4000 tiles, 1 layers
+    16x250 = 4000 tiles, 1 layers
+    20x200 = 4000 tiles, 1 layers
+    25x160 = 4000 tiles, 1 layers
+    32x125 = 4000 tiles, 1 layers
+    40x100 = 4000 tiles, 1 layers
+    50x80 = 4000 tiles, 1 layers
+    80x50 = 4000 tiles, 1 layers
+
+=== mapdatalv8 (size=5892) ===
+  Width(bG)=32, Height(bH)=46, Tiles=1472
+  Expected size: 4 + 1472*2 = 2948
+  Actual size: 5892
+  Extra bytes: 2944
+  File has 5888 data bytes after header
+  Possible 4 layers of size 1472 (remainder=0)
+  Trying other dimensions:
+    1x5888 = 5888 tiles, 1 layers
+    2x2944 = 5888 tiles, 1 layers
+    4x1472 = 5888 tiles, 1 layers
+    8x736 = 5888 tiles, 1 layers
+    16x368 = 5888 tiles, 1 layers
+    23x256 = 5888 tiles, 1 layers
+    32x184 = 5888 tiles, 1 layers
+    46x128 = 5888 tiles, 1 layers
+    64x92 = 5888 tiles, 1 layers
+    92x64 = 5888 tiles, 1 layers
+
+============================================================
+MAP SP FILES (mapsp)
+============================================================
+
+=== mapsp1 (size=3764) ===
+  Short1=20, Short2=47, Product=940
+  Expected size: 4 + 940*2 = 1884
+  Actual size: 3764
+  Extra bytes: 1880
+  Data bytes: 3760
+
+=== mapsp2 (size=3844) ===
+  Short1=30, Short2=32, Product=960
+  Expected size: 4 + 960*2 = 1924
+  Actual size: 3844
+  Extra bytes: 1920
+  Data bytes: 3840
+
+=== mapsp3 (size=6244) ===
+  Short1=40, Short2=39, Product=1560
+  Expected size: 4 + 1560*2 = 3124
+  Actual size: 6244
+  Extra bytes: 3120
+  Data bytes: 6240
+
+=== mapsp4 (size=5284) ===
+  Short1=44, Short2=30, Product=1320
+  Expected size: 4 + 1320*2 = 2644
+  Actual size: 5284
+  Extra bytes: 2640
+  Data bytes: 5280
+
+=== mapsp5 (size=6072) ===
+  Short1=37, Short2=41, Product=1517
+  Expected size: 4 + 1517*2 = 3038
+  Actual size: 6072
+  Extra bytes: 3034
+  Data bytes: 6068
+
+=== mapsp6 (size=3076) ===
+  Short1=24, Short2=32, Product=768
+  Expected size: 4 + 768*2 = 1540
+  Actual size: 3076
+  Extra bytes: 1536
+  Data bytes: 3072
+
+=== mapsp7 (size=4004) ===
+  Short1=20, Short2=50, Product=1000
+  Expected size: 4 + 1000*2 = 2004
+  Actual size: 4004
+  Extra bytes: 2000
+  Data bytes: 4000
+
+=== mapsp8 (size=5892) ===
+  Short1=32, Short2=46, Product=1472
+  Expected size: 4 + 1472*2 = 2948
+  Actual size: 5892
+  Extra bytes: 2944
+  Data bytes: 5888
+
+============================================================
+MAP DATA FILES (mapdata)
+============================================================
+
+=== mapdata0 (size=1022) ===
+  Width=30, Height=34, Tiles=1020
+  Expected size: 2 + 1020 = 1022
+  Actual size: 1022
+  Layer (E1163): [9, 9, 9, 9, 9, 8, 9, 9, 9, 9, 9, 9, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 8, 9, 9, 8, 9, 9, 9, 9, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 8, 9, 9, 8, 8, 8, 9, 9, 9, 9, 9, 9, 8, 9, 9, 9, 9, 9, 8, 8, 8, 8, 8, 8, 10, 10, 10, 10, 10, 10, 8, 9, 9, 8, 9, 8, 11, 11]
+  Unique values: [0, 2, 4, 6, 8, 9, 10, 11]
+
+=== mapdata1 (size=942) ===
+  Width=20, Height=47, Tiles=940
+  Expected size: 2 + 940 = 942
+  Actual size: 942
+  Layer (E1163): [9, 10, 10, 10, 10, 10, 10, 8, 8, 8, 8, 9, 9, 8, 8, 8, 8, 8, 9, 9, 9, 10, 10, 10, 10, 10, 10, 8, 8, 8, 8, 9, 9, 9, 8, 8, 8, 8, 9, 9, 9, 10, 10, 10, 10, 10, 10, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 10, 4, 4, 4, 10, 10, 8, 8, 2, 2, 2, 2, 2, 2, 2, 4, 9, 9, 9]
+  Unique values: [0, 2, 4, 6, 8, 9, 10, 11]
+
+=== mapdata2 (size=962) ===
+  Width=30, Height=32, Tiles=960
+  Expected size: 2 + 960 = 962
+  Actual size: 962
+  Layer (E1163): [8, 8, 8, 8, 9, 9, 8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 8, 8, 8, 9, 9, 8, 9, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 8, 9, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9]
+  Unique values: [0, 2, 4, 6, 8, 9, 10, 11]
+
+=== mapdata3 (size=1562) ===
+  Width=40, Height=39, Tiles=1560
+  Expected size: 2 + 1560 = 1562
+  Actual size: 1562
+  Layer (E1163): [9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 8, 9, 8, 8, 8, 9, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 9]
+  Unique values: [0, 2, 4, 6, 8, 9, 10, 11]
+
+=== mapdata4 (size=1322) ===
+  Width=44, Height=30, Tiles=1320
+  Expected size: 2 + 1320 = 1322
+  Actual size: 1322
+  Layer (E1163): [8, 10, 10, 10, 10, 10, 10, 8, 9, 9, 8, 8, 8, 9, 8, 8, 8, 8, 8, 8, 8, 9, 9, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 8, 8, 8, 9, 9, 8, 10, 10, 10, 10, 10, 10, 8, 9, 9, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8]
+  Unique values: [0, 2, 4, 6, 8, 9, 10, 11]
+
+=== mapdata5 (size=1519) ===
+  Width=37, Height=41, Tiles=1517
+  Expected size: 2 + 1517 = 1519
+  Actual size: 1519
+  Layer (E1163): [9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 9, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10]
+  Unique values: [0, 2, 4, 6, 8, 9, 10, 11]
+
+=== mapdata6 (size=770) ===
+  Width=24, Height=32, Tiles=768
+  Expected size: 2 + 768 = 770
+  Actual size: 770
+  Layer (E1163): [8, 9, 9, 9, 9, 9, 9, 8, 9, 9, 8, 9, 9, 9, 9, 9, 8, 8, 8, 8, 8, 9, 9, 9, 8, 10, 10, 10, 10, 10, 10, 9, 9, 9, 8, 8, 8, 9, 9, 8, 8, 8, 8, 8, 8, 9, 9, 9, 8, 10, 10, 10, 10, 10, 10, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 8, 8, 9, 9, 9, 10, 10, 10, 10, 10, 10, 9]
+  Unique values: [0, 2, 4, 6, 8, 9, 10, 11]

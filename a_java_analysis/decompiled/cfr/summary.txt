@@ -1,0 +1,51 @@
+Summary for d:\Development\ts\WeichengWushu-SanguoHeroesRemake\extracted_game_files\weichengwushuang_j2me.jar
+Decompiled with CFR 0.152
+
+
+a
+----------------------------
+
+A()
+  Unable to fully structure code
+G()
+  Unable to fully structure code
+R()
+  Unable to fully structure code
+  Could not resolve type clashes
+X()
+  Unable to fully structure code
+  Could not resolve type clashes
+a(int int int byte int boolean )
+  Unable to fully structure code
+a(int int int boolean )
+  Unable to fully structure code
+al()
+  Unable to fully structure code
+ar()
+  Unable to fully structure code
+  Could not resolve type clashes
+b(javax.microedition.lcdui.Image int int int int int int int int )
+  Unable to fully structure code
+d()
+  Exception : org.benf.cfr.reader.util.ConfusedCFRException: Back jump on a try block [egrp 13[TRYBLOCK] [26, 27 : 135->139)] java.lang.Exception
+e(int )
+  Unable to fully structure code
+  Could not resolve type clashes
+f(int int int )
+  Unable to fully structure code
+  Could not resolve type clashes
+g(int )
+  Loose catch block
+h(int int int int int )
+  Unable to fully structure code
+  Could not resolve type clashes
+j()
+  Unable to fully structure code
+  Could not resolve type clashes
+t()
+  Unable to fully structure code
+v(int int int )
+  Unable to fully structure code
+  Could not resolve type clashes
+z()
+  Unable to fully structure code
