@@ -23,7 +23,7 @@ import {
 import { Tower } from './Tower';
 
 // ============================================================
-// 科技效果类型
+// 科技效果类型 - 17种效果对应原版 b1015[122]-b1015[154]
 // ============================================================
 export type TechEffectType =
   | 'attackTimeUp'      // 0: 攻击时间延长
@@ -40,6 +40,23 @@ export type TechEffectType =
   | 'paralyzeUp'       // 15: 麻痹增强
   | 'freezeUp'         // 16: 冰冻增强
   | 'goldDouble';      // 金币翻倍 (金手指)
+
+// 效果应用目标类型 (新增: 用于效果分发)
+export type EffectTarget =
+  | 'selfTower'         // 仅作用于释放该科技的塔
+  | 'allTowers'         // 作用于所有塔
+  | 'nearbyTowers'      // 作用于周围塔 (光环)
+  | 'enemies'           // 作用于敌人
+  | 'global'            // 全局效果
+  | 'economy';          // 经济效果
+
+// 效果应用上下文 (新增: 传递给 applyEffect 方法)
+export interface EffectContext {
+  sourceTower?: Tower;          // 触发效果的塔
+  targetEnemies?: any[];        // 目标敌人列表
+  nearbyTowers?: Tower[];       // 周围塔列表
+  allTowers?: Tower[];          // 所有塔
+}
 
 export interface TechEffectInstance {
   id: number;
@@ -88,6 +105,23 @@ export class TechTreeSystem {
   private goldDouble: boolean = false;
   // 装填半价标志
   private reloadHalf: boolean = false;
+  // ====== 新增: 17种科技效果等级跟踪 (对应原版 a1056 数组) ======
+  // 局部效果等级 (作用于单个塔)
+  private attackTimeUpLevel: number = 0;       // 效果0: 攻击时间延长
+  private damageUpLevel: number = 0;           // 效果1-3: 伤害提升
+  private aoeParalyzeLevel: number = 0;        // 效果4: 范围麻痹
+  private aoeFreezeLevel: number = 0;          // 效果5: 范围冰冻
+  private auraAtkUpLevel: number = 0;          // 效果9: 周围塔增益
+  private aoeSlowLevel: number = 0;            // 效果10,11: 范围减速
+  private poisonExtendLevel: number = 0;       // 效果12: 中毒延长
+  private fireExtendLevel: number = 0;         // 效果14: 火焰延长
+  private paralyzeUpLevel: number = 0;         // 效果15: 麻痹增强
+  private freezeUpLevel: number = 0;           // 效果16: 冰冻增强
+  // 塔类型解锁状态 (对应原版 e1105 数组, 索引为塔类型0-9)
+  private towerTypeUnlocked: boolean[] = [
+    true, false, false, false, false,
+    false, false, false, false, false,
+  ];
 
   private onGoldSpent: ((cost: number) => void) | null = null;
   private onHeroAwakened: ((hero: Hero) => void) | null = null;
@@ -239,10 +273,18 @@ export class TechTreeSystem {
 
     // 应用全局效果
     this.applyGlobalEffect(effectType, tower.level);
-
-    // 更新分支状态
+    // 记录效果等级 (新增: 用于17种效果的应用)
+    this.recordEffectLevel(effectType, tower.level);
+    // 解锁塔类型 (新增: 对应原版 e1105 数组)
+    // 根据科技分支索引解锁对应塔类型
+    this.unlockTowerType(tower.type);
+    // 同时解锁分支中的后续塔类型
     const branch = this.getBranchByTowerType(tower.type);
     if (branch) {
+      for (const t of branch.towerTypes) {
+        if (t <= 9) this.unlockTowerType(t);
+      }
+      // 更新分支状态
       branch.currentLevel = Math.max(branch.currentLevel, tower.level);
     }
 
@@ -279,6 +321,7 @@ export class TechTreeSystem {
 
   /**
    * 应用全局科技效果
+   * 对应原版 k(int) 方法中 g1065/h1060/b1059 数组的设置逻辑
    */
   private applyGlobalEffect(type: TechEffectType, level: number): void {
     switch (type) {
@@ -299,6 +342,251 @@ export class TechTreeSystem {
       default:
         break;
     }
+  }
+
+  // ============================================================
+  // 新增: 17种科技效果应用逻辑
+  // 对应原版 e1105/f1106/a1056 数组对塔/敌人/金币的影响
+  // ============================================================
+
+  /**
+   * 升级科技时记录效果等级 (新增方法)
+   * 对应原版 k(int) 方法中 e1105[var3] = true 的设置
+   */
+  private recordEffectLevel(type: TechEffectType, level: number): void {
+    switch (type) {
+      case 'attackTimeUp':
+        this.attackTimeUpLevel = Math.max(this.attackTimeUpLevel, level);
+        break;
+      case 'damageUp':
+        this.damageUpLevel = Math.max(this.damageUpLevel, level);
+        break;
+      case 'aoeParalyze':
+        this.aoeParalyzeLevel = Math.max(this.aoeParalyzeLevel, level);
+        break;
+      case 'aoeFreeze':
+        this.aoeFreezeLevel = Math.max(this.aoeFreezeLevel, level);
+        break;
+      case 'auraAtkUp':
+        this.auraAtkUpLevel = Math.max(this.auraAtkUpLevel, level);
+        break;
+      case 'aoeSlow':
+        this.aoeSlowLevel = Math.max(this.aoeSlowLevel, level);
+        break;
+      case 'poisonExtend':
+        this.poisonExtendLevel = Math.max(this.poisonExtendLevel, level);
+        break;
+      case 'fireExtend':
+        this.fireExtendLevel = Math.max(this.fireExtendLevel, level);
+        break;
+      case 'paralyzeUp':
+        this.paralyzeUpLevel = Math.max(this.paralyzeUpLevel, level);
+        break;
+      case 'freezeUp':
+        this.freezeUpLevel = Math.max(this.freezeUpLevel, level);
+        break;
+      default:
+        break;
+    }
+  }
+
+  /**
+   * 解锁塔类型 (新增方法)
+   * 对应原版 e1105[塔类型] = true
+   * @param towerType 塔类型索引 0-9
+   */
+  unlockTowerType(towerType: number): void {
+    if (towerType >= 0 && towerType < this.towerTypeUnlocked.length) {
+      this.towerTypeUnlocked[towerType] = true;
+    }
+  }
+
+  /**
+   * 检查塔类型是否已解锁
+   * 对应原版 e1105[塔类型] 检查
+   */
+  isTowerTypeUnlocked(towerType: number): boolean {
+    return this.towerTypeUnlocked[towerType] ?? false;
+  }
+
+  /**
+   * 应用科技效果到塔 (新增方法)
+   * 在塔攻击时调用, 根据已解锁科技效果修改塔属性
+   * 对应原版 l(int) updateTowerLogic 中的科技效果应用
+   *
+   * @param tower 要应用效果的塔
+   * @param baseDamage 基础伤害
+   * @returns 应用效果后的实际伤害
+   */
+  applyEffectsToTowerDamage(tower: Tower, baseDamage: number): number {
+    let damage = baseDamage;
+
+    // 效果1-3: 加强攻击伤害 (每级+20%)
+    if (this.damageUpLevel > 0) {
+      damage *= (1 + 0.2 * this.damageUpLevel);
+    }
+
+    // 效果6: 全军攻击增加
+    if (this.globalAtkBonus > 0) {
+      damage *= (1 + this.globalAtkBonus);
+    }
+
+    // 效果9: 周围塔增益 (由 applyAuraBonus 单独处理, 这里不重复)
+
+    return Math.floor(damage);
+  }
+
+  /**
+   * 应用光环加成 (效果9: 周围塔攻击增加)
+   * 对应原版在塔攻击时检查 f1106 数组的逻辑
+   *
+   * @param tower 当前塔
+   * @param nearbyTowers 周围的塔列表
+   * @returns 加成后的攻击力倍率
+   */
+  applyAuraBonus(tower: Tower, nearbyTowers: Tower[]): number {
+    if (this.auraAtkUpLevel === 0) return 0;
+    // 每个周围塔贡献5% * level 的攻击加成
+    const bonusPerTower = 0.05 * this.auraAtkUpLevel;
+    return Math.min(0.5, nearbyTowers.length * bonusPerTower);
+  }
+
+  /**
+   * 应用范围效果到敌人 (新增方法)
+   * 在塔攻击命中敌人时调用
+   * 对应原版 s(int)/z(int) 方法中的效果应用逻辑
+   *
+   * @param enemy 目标敌人
+   * @param towerType 释放塔的类型
+   * @param towerLevel 释放塔的等级
+   */
+  applyAoeEffectsToEnemy(
+    enemy: any,
+    towerType: number,
+    towerLevel: number,
+  ): void {
+    if (!enemy) return;
+
+    // 效果4: 范围麻痹 - 设置敌人麻痹状态
+    if (this.aoeParalyzeLevel > 0) {
+      // 麻痹概率 = 30% + 10% * level
+      const chance = 0.3 + 0.1 * this.aoeParalyzeLevel;
+      if (Math.random() < chance) {
+        enemy.effect = 1; // 麻痹
+        // 效果15: 麻痹增强 - 延长麻痹时间
+        const duration = (towerLevel * 10) * (1 + 0.5 * this.paralyzeUpLevel);
+        enemy.timer = Math.max(enemy.timer ?? 0, duration);
+      }
+    }
+
+    // 效果5: 范围冰冻 - 设置敌人冰冻状态
+    if (this.aoeFreezeLevel > 0) {
+      const chance = 0.3 + 0.1 * this.aoeFreezeLevel;
+      if (Math.random() < chance) {
+        enemy.effect = 2; // 冰冻
+        enemy.speed = Math.max(0.1, (enemy.speed ?? 1) * 0.5);
+        // 效果16: 冰冻增强 - 延长冰冻时间
+        const duration = (towerLevel * 8) * (1 + 0.5 * this.freezeUpLevel);
+        enemy.timer = Math.max(enemy.timer ?? 0, duration);
+      }
+    }
+
+    // 效果10,11: 范围减速
+    if (this.aoeSlowLevel > 0) {
+      const slowFactor = Math.max(0.3, 1 - 0.2 * this.aoeSlowLevel);
+      enemy.speed = Math.max(0.2, (enemy.speed ?? 1) * slowFactor);
+    }
+  }
+
+  /**
+   * 应用持续伤害效果到敌人 (新增方法)
+   * 每帧调用, 处理中毒和火焰的持续伤害
+   * 对应原版 s(int) 方法中的 timer 递减逻辑
+   *
+   * @param enemy 目标敌人
+   * @param deltaTime 时间增量
+   */
+  applyDamageOverTime(enemy: any, deltaTime: number): void {
+    if (!enemy || !enemy.effect) return;
+
+    switch (enemy.effect) {
+      case 3: { // 中毒
+        const baseDmg = 2;
+        // 效果12: 中毒时间延长 - 延长中毒持续时间
+        const multiplier = 1 + 0.5 * this.poisonExtendLevel;
+        enemy.hp = (enemy.hp ?? 0) - Math.floor(baseDmg * deltaTime * multiplier);
+        break;
+      }
+      case 4: { // 火焰
+        const baseDmg = 3;
+        // 效果14: 火焰伤害时间增加
+        const multiplier = 1 + 0.5 * this.fireExtendLevel;
+        enemy.hp = (enemy.hp ?? 0) - Math.floor(baseDmg * deltaTime * multiplier);
+        break;
+      }
+    }
+  }
+
+  /**
+   * 获取攻击时间延长加成 (效果0)
+   * 对应原版塔攻击持续时间的延长
+   */
+  getAttackTimeBonus(): number {
+    // 每级延长10%攻击持续时间
+    return 0.1 * this.attackTimeUpLevel;
+  }
+
+  /**
+   * 获取效果目标的分类 (新增辅助方法)
+   * 用于UI显示和效果分发
+   */
+  getEffectTarget(type: TechEffectType): EffectTarget {
+    switch (type) {
+      case 'attackTimeUp':
+      case 'damageUp':
+        return 'selfTower';
+      case 'globalAtkUp':
+      case 'fireRateUp':
+      case 'reloadHalf':
+        return 'allTowers';
+      case 'auraAtkUp':
+        return 'nearbyTowers';
+      case 'aoeParalyze':
+      case 'aoeFreeze':
+      case 'aoeSlow':
+      case 'poisonExtend':
+      case 'fireExtend':
+      case 'paralyzeUp':
+      case 'freezeUp':
+        return 'enemies';
+      case 'goldDouble':
+        return 'economy';
+      default:
+        return 'global';
+    }
+  }
+
+  /**
+   * 获取所有效果等级摘要 (新增方法)
+   * 用于存档和UI显示
+   */
+  getEffectLevels(): Record<string, number> {
+    return {
+      attackTimeUp: this.attackTimeUpLevel,
+      damageUp: this.damageUpLevel,
+      aoeParalyze: this.aoeParalyzeLevel,
+      aoeFreeze: this.aoeFreezeLevel,
+      globalAtkUp: Math.floor(this.globalAtkBonus * 10),
+      reloadHalf: this.reloadHalf ? 1 : 0,
+      fireRateUp: Math.floor(this.globalFireRateBonus * 100),
+      auraAtkUp: this.auraAtkUpLevel,
+      aoeSlow: this.aoeSlowLevel,
+      poisonExtend: this.poisonExtendLevel,
+      fireExtend: this.fireExtendLevel,
+      paralyzeUp: this.paralyzeUpLevel,
+      freezeUp: this.freezeUpLevel,
+      goldDouble: this.goldDouble ? 1 : 0,
+    };
   }
 
   /**
@@ -453,6 +741,22 @@ export class TechTreeSystem {
     this.globalFireRateBonus = 0;
     this.goldDouble = false;
     this.reloadHalf = false;
+    // 重置17种效果等级 (新增)
+    this.attackTimeUpLevel = 0;
+    this.damageUpLevel = 0;
+    this.aoeParalyzeLevel = 0;
+    this.aoeFreezeLevel = 0;
+    this.auraAtkUpLevel = 0;
+    this.aoeSlowLevel = 0;
+    this.poisonExtendLevel = 0;
+    this.fireExtendLevel = 0;
+    this.paralyzeUpLevel = 0;
+    this.freezeUpLevel = 0;
+    // 重置塔类型解锁 (仅基础塔0解锁)
+    this.towerTypeUnlocked = [
+      true, false, false, false, false,
+      false, false, false, false, false,
+    ];
     this.initBranches();
   }
 
@@ -473,6 +777,8 @@ export class TechTreeSystem {
           data: effect,
         });
         this.applyGlobalEffect(type, 1);
+        // 新增: 同时记录效果等级
+        this.recordEffectLevel(type, 1);
       }
     }
     // 解锁所有分支
@@ -480,6 +786,116 @@ export class TechTreeSystem {
       branch.unlocked = true;
       branch.currentLevel = branch.maxLevel;
     }
+    // 解锁所有塔类型 (新增)
+    for (let i = 0; i < this.towerTypeUnlocked.length; i++) {
+      this.towerTypeUnlocked[i] = true;
+    }
+    // 启用金币翻倍
+    this.goldDouble = true;
+  }
+
+  /**
+   * 从存档数据恢复科技树状态 (新增方法)
+   * 对应原版 RMS 读取 sanGuoTdData 的恢复逻辑
+   */
+  restoreFromSave(data: any): void {
+    if (!data) return;
+    this.reset();
+    // 恢复阵营
+    if (data.faction !== undefined) {
+      this.currentFaction = data.faction;
+    }
+    // 恢复金币
+    if (data.gold !== undefined) {
+      this.gold = data.gold;
+    }
+    // 恢复已解锁效果
+    if (Array.isArray(data.unlockedEffects)) {
+      for (const id of data.unlockedEffects) {
+        this.unlockedEffects.add(id);
+        const effect = TECH_EFFECTS[id];
+        if (effect) {
+          const type = this.mapEffectType(id);
+          this.effectInstances.push({
+            id,
+            type,
+            level: 1,
+            data: effect,
+          });
+          this.applyGlobalEffect(type, 1);
+          this.recordEffectLevel(type, 1);
+        }
+      }
+    }
+    // 恢复效果等级 (新增)
+    if (data.effectLevels) {
+      const lv = data.effectLevels;
+      this.attackTimeUpLevel = lv.attackTimeUp ?? 0;
+      this.damageUpLevel = lv.damageUp ?? 0;
+      this.aoeParalyzeLevel = lv.aoeParalyze ?? 0;
+      this.aoeFreezeLevel = lv.aoeFreeze ?? 0;
+      this.auraAtkUpLevel = lv.auraAtkUp ?? 0;
+      this.aoeSlowLevel = lv.aoeSlow ?? 0;
+      this.poisonExtendLevel = lv.poisonExtend ?? 0;
+      this.fireExtendLevel = lv.fireExtend ?? 0;
+      this.paralyzeUpLevel = lv.paralyzeUp ?? 0;
+      this.freezeUpLevel = lv.freezeUp ?? 0;
+      if (lv.globalAtkUp) this.globalAtkBonus = lv.globalAtkUp * 0.1;
+      if (lv.fireRateUp) this.globalFireRateBonus = lv.fireRateUp * 0.01;
+      this.reloadHalf = lv.reloadHalf === 1;
+      this.goldDouble = lv.goldDouble === 1;
+    }
+    // 恢复塔类型解锁状态
+    if (Array.isArray(data.towerTypeUnlocked)) {
+      for (let i = 0; i < this.towerTypeUnlocked.length && i < data.towerTypeUnlocked.length; i++) {
+        this.towerTypeUnlocked[i] = data.towerTypeUnlocked[i];
+      }
+    }
+    // 恢复分支状态
+    if (Array.isArray(data.branchesState)) {
+      for (let i = 0; i < this.branches.length && i < data.branchesState.length; i++) {
+        this.branches[i].unlocked = data.branchesState[i].unlocked ?? false;
+        this.branches[i].currentLevel = data.branchesState[i].currentLevel ?? 0;
+      }
+    }
+    // 恢复已觉醒武将
+    if (Array.isArray(data.awakenedHeroes)) {
+      for (const hs of data.awakenedHeroes) {
+        const hero = HEROES.find(h => h.id === hs.heroId);
+        if (hero) {
+          this.awakenedHeroes.push({
+            hero,
+            towerId: hs.towerId,
+            awakened: true,
+            faction: hs.faction ?? this.currentFaction,
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * 导出科技树状态到存档数据 (新增方法)
+   * 对应原版 RMS 写入 sanGuoTdData 的序列化逻辑
+   */
+  exportToSave(): any {
+    return {
+      faction: this.currentFaction,
+      gold: this.gold,
+      unlockedEffects: Array.from(this.unlockedEffects),
+      effectLevels: this.getEffectLevels(),
+      towerTypeUnlocked: [...this.towerTypeUnlocked],
+      branchesState: this.branches.map(b => ({
+        branchIndex: b.branchIndex,
+        unlocked: b.unlocked,
+        currentLevel: b.currentLevel,
+      })),
+      awakenedHeroes: this.awakenedHeroes.map(hs => ({
+        heroId: hs.hero.id,
+        towerId: hs.towerId,
+        faction: hs.faction,
+      })),
+    };
   }
 
   /**

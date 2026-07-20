@@ -31,6 +31,11 @@ export interface Tower {
   angle: number;      // 朝向角度
   heroId: number;     // 绑定武将ID (-1=无)
   effectType: number; // 特殊效果类型 (0=无 1=麻痹 2=冰冻 3=中毒 4=火焰 5=减速)
+  // ====== 新增: 建筑血量 (对应原版 b1066 塔HP数据) ======
+  hp: number;         // 当前血量
+  maxHp: number;      // 最大血量
+  // debuff 计时器 (对应原版 var16[15]=48)
+  debuffTimer: number;
 }
 
 export class TowerSystem {
@@ -155,6 +160,10 @@ export class TowerSystem {
       angle: 0,
       heroId: -1,
       effectType: config.effect,
+      // 新增: 初始化建筑血量 (基于塔类型和费用)
+      hp: 100 + config.cost,
+      maxHp: 100 + config.cost,
+      debuffTimer: 0,
     };
 
     this.towers.push(tower);
@@ -219,6 +228,9 @@ export class TowerSystem {
    * 更新所有塔 - 应用全局科技加成
    */
   update(enemies: Enemy[], offsetX: number, offsetY: number): void {
+    // 新增: 更新 debuff 计时器
+    this.updateDebuffs();
+
     // 获取全局科技加成
     const globalAtkBonus = this.techTree?.getGlobalAtkBonus() ?? 0;
     const globalFireRateBonus = this.techTree?.getGlobalFireRateBonus() ?? 0;
@@ -254,16 +266,40 @@ export class TowerSystem {
         tower.angle = Math.atan2(ey - ty, ex - tx);
         tower.target = targetIdx;
 
-        // 计算实际伤害 (全局攻击加成 + 武将加成)
-        let actualDamage = tower.damage * (1 + globalAtkBonus);
+        // 计算实际伤害 (全局攻击加成 + 武将加成 + 科技效果)
+        // 新增: 使用 TechTree 的 applyEffectsToTowerDamage 方法应用所有伤害相关科技
+        let actualDamage = tower.damage;
+        if (this.techTree) {
+          actualDamage = this.techTree.applyEffectsToTowerDamage(tower, tower.damage);
+          // 效果9: 周围塔增益
+          const nearbyTowers = this.getNearbyTowers(tower, 64);
+          const auraBonus = this.techTree.applyAuraBonus(tower, nearbyTowers);
+          actualDamage = Math.floor(actualDamage * (1 + auraBonus));
+        } else {
+          // 退化方案: 仅使用全局加成
+          actualDamage = tower.damage * (1 + globalAtkBonus);
+        }
         if (tower.heroId >= 0) {
           actualDamage *= 1.5; // 武将觉醒后额外50%伤害
         }
         target.hp -= Math.floor(actualDamage);
 
-        // 应用特殊效果
+        // 应用特殊效果 (塔自身效果)
         if (tower.effectType > 0 && target) {
           this.applyTowerEffect(target, tower.effectType, tower.level);
+          // ====== 新增: 效果0 (attackTimeUp) - 攻击时间延长 ======
+          // 延长塔特殊效果(麻痹/冰冻/中毒/火焰/减速)的持续时间
+          if (this.techTree) {
+            const attackTimeBonus = this.techTree.getAttackTimeBonus();
+            if (attackTimeBonus > 0 && target.timer > 0) {
+              target.timer = Math.floor(target.timer * (1 + attackTimeBonus));
+            }
+          }
+        }
+
+        // 新增: 应用科技树的范围效果 (效果4/5/10/11/15/16)
+        if (this.techTree) {
+          this.techTree.applyAoeEffectsToEnemy(target, tower.type, tower.level);
         }
 
         // 攻速受全局加成影响
@@ -273,6 +309,36 @@ export class TowerSystem {
         tower.target = -1;
       }
     }
+
+    // 新增: 应用持续伤害效果 (中毒/火焰) 到所有活跃敌人
+    if (this.techTree) {
+      for (const enemy of enemies) {
+        if (enemy.state === 0 || enemy.state === 5) continue;
+        this.techTree.applyDamageOverTime(enemy, 1);
+      }
+    }
+  }
+
+  /**
+   * 获取指定塔周围的塔列表 (新增方法)
+   * 用于效果9 (auraAtkUp) 周围塔攻击增加
+   * @param tower 中心塔
+   * @param radius 搜索半径 (像素)
+   */
+  private getNearbyTowers(tower: Tower, radius: number): Tower[] {
+    const result: Tower[] = [];
+    const cx = tower.x;
+    const cy = tower.y;
+    const tileRadius = Math.ceil(radius / 16); // 16 = TILE_SIZE
+    for (const t of this.towers) {
+      if (t === tower) continue;
+      const dx = Math.abs(t.x - cx);
+      const dy = Math.abs(t.y - cy);
+      if (dx <= tileRadius && dy <= tileRadius) {
+        result.push(t);
+      }
+    }
+    return result;
   }
 
   /**
@@ -339,6 +405,25 @@ export class TowerSystem {
       this.renderer.setColor(0xFCFFCD);
       for (let i = 0; i < tower.level; i++) {
         this.renderer.fillRect(px + 2 + i * 3, py + TILE_SIZE - 4, 2, 2);
+      }
+
+      // ====== 新增: 绘制塔血条 (当血量不满时) ======
+      if (tower.hp < tower.maxHp) {
+        const barW = TILE_SIZE;
+        const barH = 2;
+        const hpRatio = Math.max(0, tower.hp / tower.maxHp);
+        this.renderer.setColor(0x000000);
+        this.renderer.fillRect(px, py - 4, barW, barH);
+        // 血量颜色: >50% 绿, >25% 黄, <25% 红
+        const hpColor = hpRatio > 0.5 ? 0x00FF00 : (hpRatio > 0.25 ? 0xFFC107 : 0xFF0000);
+        this.renderer.setColor(hpColor);
+        this.renderer.fillRect(px, py - 4, barW * hpRatio, barH);
+      }
+
+      // 绘制 debuff 状态 (被敌人施加 debuff 时闪烁)
+      if (tower.debuffTimer > 0) {
+        this.renderer.setColor(0x9370DB);
+        this.renderer.drawRect(px - 1, py - 1, TILE_SIZE + 2, TILE_SIZE + 2);
       }
 
       // 绘制武将名称 (已觉醒时)
@@ -434,5 +519,119 @@ export class TowerSystem {
     // 延迟导入避免循环依赖
     const hero = HEROES_MAP[heroId];
     return hero?.name ?? null;
+  }
+
+  /**
+   * 重置塔系统 (新增方法)
+   * 清空所有塔, 用于重新开始关卡
+   */
+  reset(): void {
+    this.towers = [];
+    this.selectedTower = null;
+    this.buildMode = false;
+    this.buildX = 0;
+    this.buildY = 0;
+  }
+
+  // ============================================================
+  // 新增: 敌人攻击塔接口 (对应原版 checkEnemyAttack / helperV_1P)
+  // ============================================================
+
+  /**
+   * 对塔造成伤害 (新增方法)
+   * 对应原版 helperV_1P 中塔HP递减逻辑
+   * @param tower 目标塔
+   * @param damage 伤害值
+   * @returns 塔是否被摧毁
+   */
+  damageTower(tower: Tower, damage: number): boolean {
+    // debuff 期间受到双倍伤害 (对应原版 var16[15]=48)
+    const actualDamage = tower.debuffTimer > 0 ? damage * 2 : damage;
+    tower.hp -= actualDamage;
+    if (tower.hp <= 0) {
+      // 塔被摧毁
+      this.towers = this.towers.filter(t => t !== tower);
+      if (this.selectedTower === tower) {
+        this.selectedTower = null;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 对塔施加 debuff (新增方法)
+   * 对应原版 case 8,9 的 tower[15] = 48
+   * @param tower 目标塔
+   * @param duration debuff 持续时间 (帧)
+   */
+  applyDebuff(tower: Tower, duration: number = 48): void {
+    tower.debuffTimer = Math.max(tower.debuffTimer, duration);
+  }
+
+  /**
+   * 更新塔的 debuff 计时器 (新增方法)
+   * 每帧调用
+   */
+  updateDebuffs(): void {
+    for (const tower of this.towers) {
+      if (tower.debuffTimer > 0) {
+        tower.debuffTimer--;
+      }
+    }
+  }
+
+  /**
+   * 获取指定位置附近的塔 (新增方法)
+   * 用于敌人范围攻击
+   * @param cx 中心X (像素)
+   * @param cy 中心Y (像素)
+   * @param range 搜索半径 (像素)
+   * @returns 范围内的塔列表
+   */
+  getTowersInRange(cx: number, cy: number, range: number): Tower[] {
+    const result: Tower[] = [];
+    for (const tower of this.towers) {
+      const tx = tower.x * TILE_SIZE + TILE_SIZE / 2;
+      const ty = tower.y * TILE_SIZE + TILE_SIZE / 2;
+      const dist = Math.sqrt((tx - cx) ** 2 + (ty - cy) ** 2);
+      if (dist <= range) {
+        result.push(tower);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * 从存档数据恢复塔布局 (新增方法)
+   * 对应原版 RMS 读取 sanGuoTdData 后的塔状态恢复
+   */
+  restoreFromSave(towersData: any[]): void {
+    this.towers = [];
+    if (!Array.isArray(towersData)) return;
+    for (const td of towersData) {
+      const config = this.towerConfigs[td.type];
+      if (!config) continue;
+      const maxHp = td.maxHp ?? (100 + config.cost);
+      const tower: Tower = {
+        x: td.x ?? 0,
+        y: td.y ?? 0,
+        type: td.type ?? 0,
+        level: td.level ?? 1,
+        damage: td.damage ?? config.damage,
+        range: td.range ?? config.range,
+        fireRate: td.fireRate ?? config.fireRate,
+        cooldown: 0,
+        target: -1,
+        angle: 0,
+        heroId: td.heroId ?? -1,
+        effectType: td.effectType ?? config.effect,
+        // 新增: 恢复建筑血量
+        hp: td.hp ?? maxHp,
+        maxHp,
+        debuffTimer: 0,
+      };
+      this.towers.push(tower);
+    }
   }
 }

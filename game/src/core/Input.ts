@@ -50,7 +50,13 @@ export class InputSystem {
 
     this.canvas.addEventListener('touchend', (e) => {
       e.preventDefault();
-      this.handleUp(this.pressStartX, this.pressStartY);
+      // 使用 changedTouches 获取实际释放坐标, 避免重复转换
+      const touch = e.changedTouches[0];
+      if (touch) {
+        this.handleUp(touch.clientX, touch.clientY);
+      } else {
+        this.handleUp(this.pressStartX, this.pressStartY);
+      }
     }, { passive: false });
 
     // 鼠标事件

@@ -71,6 +71,22 @@ export class UISystem {
   private heroAwakenText: string = '';
   private heroAwakenTimer: number = 0;
 
+  // ====== 新增: 游戏控制状态 (对应原版 isPausedInGame / 速度切换) ======
+  // 游戏速度 (1=正常, 2=2倍速, 3=3倍速)
+  private gameSpeed: number = 1;
+  // 是否暂停
+  private paused: boolean = false;
+  // 是否显示暂停菜单
+  private pauseMenuVisible: boolean = false;
+
+  // ====== 新增: 科技树面板翻页状态 ======
+  // 当前科技树页码 (0-based)
+  private techPage: number = 0;
+  // 每页显示的分支数
+  private readonly techPageItems: number = 4;
+  // 总页数 (在 renderTechPanel 时动态计算)
+  private techPageCount: number = 1;
+
   constructor(renderer: Renderer) {
     this.renderer = renderer;
   }
@@ -138,6 +154,7 @@ export class UISystem {
     this.techPanelVisible = true;
     this.buildPanelVisible = false;
     this.upgradePanelVisible = false;
+    this.techPage = 0; // 重置到第一页
     this.updateButtons();
   }
 
@@ -157,6 +174,103 @@ export class UISystem {
     this.heroAwakenTimer = 180; // 3秒
   }
 
+  // ============================================================
+  // 新增: 游戏控制接口 (对应原版 handleVolumeInput / isPausedInGame)
+  // ============================================================
+
+  /**
+   * 获取当前游戏速度
+   */
+  getGameSpeed(): number {
+    return this.gameSpeed;
+  }
+
+  /**
+   * 设置游戏速度
+   */
+  setGameSpeed(speed: number): void {
+    this.gameSpeed = Math.max(1, Math.min(3, speed));
+  }
+
+  /**
+   * 切换游戏速度 (1 -> 2 -> 3 -> 1)
+   */
+  cycleGameSpeed(): void {
+    this.gameSpeed = (this.gameSpeed % 3) + 1;
+  }
+
+  /**
+   * 是否暂停
+   */
+  isPaused(): boolean {
+    return this.paused;
+  }
+
+  /**
+   * 设置暂停状态
+   */
+  setPaused(paused: boolean): void {
+    this.paused = paused;
+    this.pauseMenuVisible = paused;
+    this.updateButtons();
+  }
+
+  /**
+   * 切换暂停
+   */
+  togglePause(): void {
+    this.setPaused(!this.paused);
+  }
+
+  /**
+   * 是否显示暂停菜单
+   */
+  isPauseMenuVisible(): boolean {
+    return this.pauseMenuVisible;
+  }
+
+  /**
+   * 上一页科技树
+   */
+  techPrevPage(): void {
+    if (this.techPage > 0) {
+      this.techPage--;
+      this.updateButtons();
+    }
+  }
+
+  /**
+   * 下一页科技树
+   */
+  techNextPage(): void {
+    if (this.techPage < this.techPageCount - 1) {
+      this.techPage++;
+      this.updateButtons();
+    }
+  }
+
+  /**
+   * 设置当前科技树页码
+   */
+  setTechPage(page: number): void {
+    this.techPage = Math.max(0, Math.min(this.techPageCount - 1, page));
+    this.updateButtons();
+  }
+
+  /**
+   * 获取当前科技树页码
+   */
+  getTechPage(): number {
+    return this.techPage;
+  }
+
+  /**
+   * 获取科技树总页数
+   */
+  getTechPageCount(): number {
+    return this.techPageCount;
+  }
+
   /**
    * 更新按钮列表
    */
@@ -164,15 +278,104 @@ export class UISystem {
     this.buttons = [];
 
     if (this.techPanelVisible) {
-      // 科技树面板 - 只显示关闭按钮
+      // 科技树面板 - 显示关闭按钮 + 翻页按钮
       const panelW = 200;
       const panelX = (LOGICAL_WIDTH - panelW) / 2;
       const panelY = 30;
 
+      // 关闭按钮 (右上角)
       this.buttons.push({
         x: panelX + panelW - 30, y: panelY, w: 28, h: 18,
         label: '关闭', icon: '✕', color: 0x8B0000,
         action: 'close_tech', visible: true, enabled: true,
+      });
+
+      // ====== 新增: 翻页按钮 ======
+      // 上一页按钮 (左下角)
+      const navY = panelY + 260 + 4;
+      this.buttons.push({
+        x: panelX + 10, y: navY, w: 50, h: 18,
+        label: '◀ 上一页', icon: '◀', color: 0x555566,
+        action: 'tech_prev_page', visible: true, enabled: this.techPage > 0,
+      });
+      // 下一页按钮 (右下角)
+      this.buttons.push({
+        x: panelX + panelW - 60, y: navY, w: 50, h: 18,
+        label: '下一页 ▶', icon: '▶', color: 0x555566,
+        action: 'tech_next_page', visible: true, enabled: this.techPage < this.techPageCount - 1,
+      });
+      return;
+    }
+
+    // ====== 新增: 顶部右侧控制按钮 (暂停/加速/菜单) ======
+    // 对应原版 isPausedInGame 切换和音量键处理
+    if (!this.buildPanelVisible && !this.upgradePanelVisible) {
+      // 三个控制按钮在顶部信息栏右侧
+      const ctrlY = 2;
+      const ctrlH = 16;
+      const ctrlW = 22;
+      const ctrlGap = 1;
+      // 从右到左: 菜单 > 暂停 > 速度
+      let ctrlX = LOGICAL_WIDTH - ctrlW - 2;
+
+      // 菜单按钮
+      this.buttons.push({
+        x: ctrlX, y: ctrlY, w: ctrlW, h: ctrlH,
+        label: '☰', icon: '☰', color: 0x555566,
+        action: 'menu', visible: true, enabled: true,
+      });
+      ctrlX -= (ctrlW + ctrlGap);
+
+      // 暂停按钮
+      this.buttons.push({
+        x: ctrlX, y: ctrlY, w: ctrlW, h: ctrlH,
+        label: this.paused ? '▶' : 'II',
+        icon: this.paused ? '▶' : 'II',
+        color: this.paused ? 0x4CAF50 : 0xFFC107,
+        action: 'pause', visible: true, enabled: true,
+      });
+      ctrlX -= (ctrlW + ctrlGap);
+
+      // 速度按钮
+      this.buttons.push({
+        x: ctrlX, y: ctrlY, w: ctrlW, h: ctrlH,
+        label: `${this.gameSpeed}x`, icon: '⚡', color: 0x00CED1,
+        action: 'speed_up', visible: true, enabled: true,
+      });
+    }
+
+    // ====== 新增: 暂停菜单按钮 ======
+    if (this.pauseMenuVisible) {
+      // 暂停菜单覆盖在屏幕中央
+      const menuW = 120;
+      const menuH = 100;
+      const menuX = (LOGICAL_WIDTH - menuW) / 2;
+      const menuY = (LOGICAL_HEIGHT - menuH) / 2;
+      const itemH = 22;
+
+      // 继续
+      this.buttons.push({
+        x: menuX, y: menuY, w: menuW, h: itemH,
+        label: '继续游戏', icon: '▶', color: 0x4CAF50,
+        action: 'resume', visible: true, enabled: true,
+      });
+      // 重新开始
+      this.buttons.push({
+        x: menuX, y: menuY + itemH + 2, w: menuW, h: itemH,
+        label: '重新开始', icon: '↻', color: 0xFFC107,
+        action: 'restart', visible: true, enabled: true,
+      });
+      // 返回主菜单
+      this.buttons.push({
+        x: menuX, y: menuY + (itemH + 2) * 2, w: menuW, h: itemH,
+        label: '返回主菜单', icon: '☰', color: 0xF44336,
+        action: 'back_to_menu', visible: true, enabled: true,
+      });
+      // 存档
+      this.buttons.push({
+        x: menuX, y: menuY + (itemH + 2) * 3, w: menuW, h: itemH,
+        label: '保存进度', icon: '💾', color: 0x2196F3,
+        action: 'save_game', visible: true, enabled: true,
       });
       return;
     }
@@ -319,17 +522,17 @@ export class UISystem {
     this.renderer.setColor(0x000000);
     this.renderer.fillRect(0, 0, LOGICAL_WIDTH, 20);
 
-    // 信息栏文字
-    this.renderer.drawText(`金:${gold}`, 4, 4, 0xFFD700, 10);
-    this.renderer.drawText(`城防:${lives}`, 60, 4, 0xFF4444, 10);
-    this.renderer.drawText(`关:${level + 1}`, 120, 4, 0xFCFFCD, 10);
-    this.renderer.drawText(`波:${wave}`, 170, 4, 0xFCFFCD, 10);
+    // 信息栏文字 (左侧紧凑布局, 右侧留给控制按钮)
+    this.renderer.drawText(`金:${gold}`, 2, 4, 0xFFD700, 10);
+    this.renderer.drawText(`防:${lives}`, 50, 4, 0xFF4444, 10);
+    this.renderer.drawText(`关:${level + 1}`, 92, 4, 0xFCFFCD, 10);
+    this.renderer.drawText(`波:${wave}`, 128, 4, 0xFCFFCD, 10);
 
     // 显示已觉醒武将数量
     if (this.techTree) {
       const heroCount = this.techTree.getAwakenedHeroes().length;
       if (heroCount > 0) {
-        this.renderer.drawText(`将:${heroCount}`, 210, 4, 0xFFD700, 10);
+        this.renderer.drawText(`将:${heroCount}`, 164, 4, 0xFFD700, 10);
       }
     }
 
@@ -361,11 +564,10 @@ export class UISystem {
     // 消息提示
     if (this.messageTimer > 0) {
       this.messageTimer--;
-      const alpha = Math.min(1, this.messageTimer / 30);
-      this.renderer.setColor(0x000000);
       const tw = this.renderer.virtualContext.measureText(this.messageText).width + 10;
       const mx = (LOGICAL_WIDTH - tw) / 2;
       const my = 100;
+      this.renderer.setColor(0x000000);
       this.renderer.fillRect(mx, my, tw, 18);
       this.renderer.setColor(0x333333);
       this.renderer.drawRect(mx, my, tw, 18);
@@ -375,13 +577,17 @@ export class UISystem {
     // 武将觉醒提示
     if (this.heroAwakenTimer > 0) {
       this.heroAwakenTimer--;
-      const alpha = Math.min(1, this.heroAwakenTimer / 30);
       const y = 60;
       this.renderer.setColor(0x000000);
       this.renderer.fillRect(0, y, LOGICAL_WIDTH, 30);
       this.renderer.setColor(0xFFD700);
       const tw = this.renderer.virtualContext.measureText(this.heroAwakenText).width;
       this.renderer.drawText(this.heroAwakenText, (LOGICAL_WIDTH - tw) / 2, y + 8, 0xFFD700, 14);
+    }
+
+    // ====== 新增: 暂停菜单遮罩 ======
+    if (this.pauseMenuVisible) {
+      this.renderPauseMenu();
     }
   }
 
@@ -489,13 +695,26 @@ export class UISystem {
     this.renderer.setColor(0xFFD700);
     this.renderer.drawRect(panelX, panelY, panelW, panelH);
 
-    // 标题
+    // 标题 + 页码
     this.renderer.drawText('科技树', panelX + 70, panelY + 4, 0xFFD700, 12);
 
-    // 分支列表
+    // 分支列表 - 分页显示
     const branches = this.techTree.getBranches();
+    this.techPageCount = Math.max(1, Math.ceil(branches.length / this.techPageItems));
+    if (this.techPage >= this.techPageCount) this.techPage = this.techPageCount - 1;
+
+    const startIdx = this.techPage * this.techPageItems;
+    const endIdx = Math.min(startIdx + this.techPageItems, branches.length);
+
+    // 页码指示器
+    this.renderer.drawText(
+      `第 ${this.techPage + 1}/${this.techPageCount} 页`,
+      panelX + panelW - 70, panelY + 4, 0xAAAAFF, 9,
+    );
+
     let y = panelY + 26;
-    for (const branch of branches) {
+    for (let i = startIdx; i < endIdx; i++) {
+      const branch = branches[i];
       const branchName = this.getBranchName(branch.branchIndex);
 
       // 分支背景
@@ -519,15 +738,30 @@ export class UISystem {
       y += 24;
     }
 
-    // 已觉醒武将
-    const heroes = this.techTree.getAwakenedHeroes();
-    if (heroes.length > 0) {
-      this.renderer.drawText('已觉醒武将:', panelX + 4, y + 4, 0xFFD700, 9);
-      y += 16;
-      for (const hs of heroes) {
-        this.renderer.drawText(`★ ${hs.hero.name} (${FACTION_NAMES[hs.faction]})`, panelX + 8, y, 0xFFD700, 9);
-        y += 12;
+    // 已觉醒武将 (仅在最后一页显示)
+    if (this.techPage === this.techPageCount - 1) {
+      const heroes = this.techTree.getAwakenedHeroes();
+      if (heroes.length > 0 && y < panelY + panelH - 20) {
+        this.renderer.drawText('已觉醒武将:', panelX + 4, y + 4, 0xFFD700, 9);
+        y += 16;
+        for (const hs of heroes) {
+          if (y >= panelY + panelH - 12) break;
+          this.renderer.drawText(`★ ${hs.hero.name} (${FACTION_NAMES[hs.faction]})`, panelX + 8, y, 0xFFD700, 9);
+          y += 12;
+        }
       }
+    }
+
+    // 翻页提示
+    if (this.techPageCount > 1) {
+      this.renderer.drawText(
+        this.techPage > 0 ? '◀ 上页' : '',
+        panelX + 4, panelY + panelH - 14, 0x888888, 8,
+      );
+      this.renderer.drawText(
+        this.techPage < this.techPageCount - 1 ? '下页 ▶' : '',
+        panelX + panelW - 60, panelY + panelH - 14, 0x888888, 8,
+      );
     }
   }
 
@@ -549,5 +783,28 @@ export class UISystem {
 
   update(): void {
     // UI更新逻辑
+  }
+
+  // ============================================================
+  // 新增: 暂停菜单渲染 (对应原版 isPausedInGame 时叠加层)
+  // ============================================================
+  private renderPauseMenu(): void {
+    // 半透明遮罩
+    this.renderer.setColor(0x000000);
+    this.renderer.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+
+    // 菜单边框
+    const menuW = 120;
+    const menuH = 100;
+    const menuX = (LOGICAL_WIDTH - menuW) / 2;
+    const menuY = (LOGICAL_HEIGHT - menuH) / 2;
+
+    this.renderer.setColor(0x1a1a2a);
+    this.renderer.fillRect(menuX, menuY, menuW, menuH);
+    this.renderer.setColor(0xFFD700);
+    this.renderer.drawRect(menuX, menuY, menuW, menuH);
+
+    // 标题
+    this.renderer.drawText('已暂停', (LOGICAL_WIDTH - 36) / 2, menuY - 14, 0xFFD700, 12);
   }
 }

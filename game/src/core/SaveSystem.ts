@@ -42,7 +42,7 @@ export interface SaveData {
   currentFaction: number;
 
   // 塔布局 (可选保存)
-  towers: { x: number; y: number; type: number; level: number; damage: number; range: number; fireRate: number; heroId: number; effectType: number }[];
+  towers: { x: number; y: number; type: number; level: number; damage: number; range: number; fireRate: number; heroId: number; effectType: number; hp: number; maxHp: number }[];
 
   // 统计
   totalKills: number;
@@ -227,6 +227,9 @@ export class SaveSystem {
         fireRate: t.fireRate,
         heroId: t.heroId,
         effectType: t.effectType,
+        // 新增: 保存建筑血量
+        hp: t.hp,
+        maxHp: t.maxHp,
       })),
       totalKills: stats.totalKills,
       totalGoldEarned: stats.totalGoldEarned,
@@ -278,6 +281,10 @@ export class SaveSystem {
       angle: 0,
       heroId: t.heroId,
       effectType: t.effectType,
+      // 新增: 恢复建筑血量
+      hp: t.hp,
+      maxHp: t.maxHp,
+      debuffTimer: 0,
     }));
   }
 

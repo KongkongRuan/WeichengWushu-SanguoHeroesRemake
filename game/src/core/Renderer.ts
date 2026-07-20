@@ -152,6 +152,13 @@ export class Renderer {
   }
 
   /**
+   * 设置全局透明度 (0-1)
+   */
+  setAlpha(alpha: number): void {
+    this.virtualCtx.globalAlpha = Math.max(0, Math.min(1, alpha));
+  }
+
+  /**
    * 绘制文字
    */
   drawText(text: string, x: number, y: number, color: number = 0xFCFFCD, size: number = 10): void {
@@ -163,16 +170,22 @@ export class Renderer {
 
   /**
    * 将虚拟画布渲染到屏幕 (带高清缩放)
+   * 使用 nearest-neighbor 缩放保持像素清晰度
    */
   present(): void {
     const physW = this.canvas.width;
     const physH = this.canvas.height;
 
+    // 确保禁用图像平滑 (保持像素清晰)
     this.ctx.imageSmoothingEnabled = false;
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+    // 黑色清屏
     this.ctx.fillStyle = '#000';
     this.ctx.fillRect(0, 0, physW, physH);
 
+    // 将虚拟画布 (240x320) 放大到物理画布
+    // imageSmoothingEnabled=false 确保使用 nearest-neighbor 而非双线性插值
     this.ctx.drawImage(
       this.virtualCanvas,
       0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT,

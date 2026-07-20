@@ -95,31 +95,17 @@ export class AudioSystem {
       this.isPlaying = true;
       console.log(`Playing MIDI: ${filePath}`);
     } catch (e) {
-      console.error(`Failed to play MIDI ${filePath}:`, e);
-      // 尝试使用 Web Audio API 生成简单背景音乐
-      this.playFallbackMusic();
+      console.warn(`Failed to play MIDI ${filePath}:`, e);
+      // MIDI 播放失败时静默处理, 不播放噪音
+      // 原来的 playFallbackMusic() 会创建永不停止的 440Hz 振荡器造成噪音
     }
   }
 
   /**
    * 备用背景音乐 (当 MIDI 播放失败时)
+   * 已禁用: 原实现创建永不停止的振荡器会造成持续噪音
    */
-  private playFallbackMusic(): void {
-    if (!this.audioContext) return;
-
-    // 使用振荡器生成简单旋律
-    const oscillator = this.audioContext.createOscillator();
-    const gainNode = this.audioContext.createGain();
-    oscillator.connect(gainNode);
-    gainNode.connect(this.audioContext.destination);
-
-    gainNode.gain.value = 0.1;
-    oscillator.type = 'sine';
-    oscillator.frequency.value = 440;
-
-    oscillator.start();
-    this.isPlaying = true;
-  }
+  // private playFallbackMusic(): void { ... }
 
   /**
    * 停止播放

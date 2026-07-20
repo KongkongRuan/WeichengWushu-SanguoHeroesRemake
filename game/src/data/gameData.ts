@@ -33,6 +33,68 @@ export const FACTION_ENDING_SEQUENCES: number[][] = [
 ];
 
 // ============================================================
+// 阵营结局路径索引 (根据 selectedFaction 选择)
+// 对应原版 d1053[2..7] 6条路径
+// 蜀(0)=路径0, 魏(1)=路径3, 吴(2)=路径1, 群(3)=路径2
+// (吴/群默认走蜀结局分支, 简化处理)
+// ============================================================
+export const FACTION_ENDING_PATH_INDEX: number[] = [0, 3, 1, 2];
+
+// ============================================================
+// 阵营结局文字 (基于 b1015[95]-b1015[100] 关卡剧情扩展)
+// 每条结局文本由 [标题, 描述1, 描述2, 描述3] 组成
+// 对应原版 renderEndingAnim 中根据 b1174(阶段) 切换显示的文字
+// ============================================================
+export interface FactionEnding {
+  faction: number;
+  factionName: string;
+  color: number;
+  title: string;        // 阶段0: 阵营结局标题
+  description: string;  // 阶段1: 阵营结局描述
+  victory: string;      // 阶段2: 统一胜利文字
+  final: string;        // 阶段3: 最终结局
+}
+
+export const FACTION_ENDINGS: FactionEnding[] = [
+  {
+    faction: 0,
+    factionName: '蜀',
+    color: 0x4CAF50,
+    title: '蜀汉一统',
+    description: '刘备仁德布于天下，卧龙凤雏辅佐左右，蜀汉终成大业，恢复汉室江山。',
+    victory: '兴复汉室，还于旧都，天下太平。',
+    final: '蜀汉传奇，永载史册。',
+  },
+  {
+    faction: 1,
+    factionName: '魏',
+    color: 0x2196F3,
+    title: '曹魏霸业',
+    description: '曹操挟天子以令诸侯，能臣猛将云集，魏国终成霸业，奠定晋朝根基。',
+    victory: '魏武挥鞭，东临碣石有遗篇。',
+    final: '魏国霸业，青史留名。',
+  },
+  {
+    faction: 2,
+    factionName: '吴',
+    color: 0xFF9800,
+    title: '东吴霸主',
+    description: '孙家世代名将，弓箭好手辈出，东吴雄踞江东，最终北伐中原一统天下。',
+    victory: '孙吴英豪，江东子弟多才俊。',
+    final: '东吴传奇，千古流传。',
+  },
+  {
+    faction: 3,
+    factionName: '群',
+    color: 0x9C27B0,
+    title: '群雄逐鹿',
+    description: '乱世出英雄，群雄并起，逐鹿中原。最终能臣猛将归于一统，开创盛世。',
+    victory: '群雄并起，终归一统。',
+    final: '乱世英雄，名垂青史。',
+  },
+];
+
+// ============================================================
 // 塔升级路径 (c1051[4] - 4条升级路径)
 // 每条路径定义塔类型可升级的序列
 // ============================================================
@@ -231,6 +293,25 @@ export const TILE_SIZE = 16;          // 原版瓦片大小 (像素)
 
 export const LOGICAL_WIDTH = 240;     // 原版逻辑分辨率宽
 export const LOGICAL_HEIGHT = 320;    // 原版逻辑分辨率高
+
+// 地图视口常量 (原版 a.java: top bar=13px, map area height=276, bottom bar=31px)
+export const MAP_TOP_BAR_H = 13;      // 顶部信息栏高度
+export const MAP_VIEW_H = 276;        // 地图可视区域高度
+export const MAP_BOTTOM_BAR_H = 31;   // 底部信息栏高度
+export const MAP_VIEW_W = 240;        // 地图可视区域宽度
+
+// 原版 c1070: 各关卡建筑方框初始位置 (像素坐标)
+export const BUILDING_BOX_INIT: number[][] = [
+  [336, 64],   // level 0
+  [64, 528],   // level 1
+  [160, 176],  // level 2
+  [560, 432],  // level 3
+  [592, 352],  // level 4
+  [256, 320],  // level 5
+  [320, 336],  // level 6
+  [96, 640],   // level 7
+  [96, 32],    // level 8
+];
 
 export const MAX_ENEMIES = 30;        // 最大同屏敌人数 (bt >= 30 时游戏结束)
 export const ENEMY_ARRAY_SIZE = 30;   // 敌人数组大小 c1107[30][18]
