@@ -1,9 +1,0 @@
-Class: Lcom/netmite/andme/launcher/u_537157ce65e053cc/CMidlet;
-Superclass: Lcom/netmite/andme/launcher/Launcher2;
-Access: public
-
-Fields:
-
-Methods:
-  public constructor <init>()V
-  public onCreate(Landroid/os/Bundle;)V
