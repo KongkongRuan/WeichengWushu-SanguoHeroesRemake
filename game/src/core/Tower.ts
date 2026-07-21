@@ -857,7 +857,8 @@ export class TowerSystem {
     for (const enemy of enemies) {
       if (enemy === primary || !this.isActiveEnemy(enemy) || enemy.bossType === 8) continue;
       if (Math.abs(enemy.x - tower.strikeX) < 24 && Math.abs(enemy.y - tower.strikeY) < 24) {
-        this.damageEnemy(tower, enemy, 0.25, false);
+        // 原版 case 1 会对范围内每个敌人调用完整 v(...)：伤害降为 1/4，但中毒照常生效。
+        this.damageEnemy(tower, enemy, 0.25);
       }
     }
   }

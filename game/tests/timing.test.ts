@@ -678,10 +678,14 @@ test('建筑方框可解析敌人并取得原版兵种名', () => {
 test('石灰瓶实际命中写入独立中毒计时并使用原版 h_4 三帧标记绘制', () => {
   const tower = createTower(1, { effectType: 3 });
   const enemy = createEnemy();
+  const nearby = createEnemy(60, 20);
+  const outside = createEnemy(80, 16);
   const towerSystem = systemWithTower(tower);
-  towerSystem.update([enemy], 0, 0);
-  for (let i = 0; i < 4; i++) towerSystem.update([enemy], 0, 0);
+  towerSystem.update([enemy, nearby, outside], 0, 0);
+  for (let i = 0; i < 4; i++) towerSystem.update([enemy, nearby, outside], 0, 0);
   assert.equal((enemy as unknown as Enemy).poisonTimer, 48);
+  assert.equal((nearby as unknown as Enemy).poisonTimer, 48);
+  assert.equal((outside as unknown as Enemy).poisonTimer, 0);
 
   const draws: Array<{
     sx: number; sy: number; sw: number; sh: number;
