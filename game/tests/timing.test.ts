@@ -7,14 +7,21 @@ import {
   originalDemolishRefund,
 } from '../src/core/Timing';
 import { TowerSystem, type Tower } from '../src/core/Tower';
+import { EnemyState, EnemySystem, type Enemy } from '../src/core/Enemy';
+import { MapData } from '../src/core/MapData';
 import {
   TOWER_AMBIENT_LAYER_TYPES,
   TOWER_AUX_LAYER_BY_TYPE,
   TOWER_GATE_LOAD_DIR_S1117,
   TOWER_GATE_LOAD_OFF_T1118,
-  TOWER_RIGHT_FACING_TRANSFORMS,
   TOWER_PATH_FACING_TYPES,
   TOWER_ATTACK_DURATION_TICKS,
+  TOWER_PROJECTILE_RANGE_TYPES,
+  MAX_ENEMIES,
+  TOWER_COST_Q1100,
+  TOWER_UPGRADE_COST_R1101,
+  TECH_COST_G1057,
+  INITIAL_GOLD_BY_MODE,
 } from '../src/data/gameData';
 
 function createTower(type: number, overrides: Partial<Tower> = {}): Tower {
@@ -32,8 +39,19 @@ function createTower(type: number, overrides: Partial<Tower> = {}): Tower {
   };
 }
 
-function createEnemy(x: number = 48, y: number = 16, hp: number = 1000) {
-  return { x, y, hp, state: 0, effect: 0, timer: 0, slowScale: 1 } as never;
+function createEnemy(x: number = 48, y: number = 16, hp: number = 1000, defense: number = 0) {
+  return { x, y, hp, defense, state: 0, effect: 0, timer: 0, slowScale: 1 } as never;
+}
+
+function createMovingEnemy(overrides: Partial<Enemy> = {}): Enemy {
+  return {
+    x: 14, y: 8, hp: 100, defense: 0, goldReward: 5, speed: 2, baseSpeed: 2,
+    slowScale: 1, dir: 1, variant: 0, animFrame: 0, state: EnemyState.WALK,
+    maxHp: 100, unitType: 0, elite: false, spawnIndex: 0, bossType: 0,
+    siegeAnim: 0, siegeTimer: 0, chargeTimer: 0, dieTimer: 0,
+    effect: 0, timer: 0,
+    ...overrides,
+  };
 }
 
 function systemWithTower(tower: Tower): TowerSystem {
@@ -97,6 +115,13 @@ test('倍速只缩放游戏逻辑，不依赖显示刷新率', () => {
   }
 });
 
+test('倍速追帧预算按倍速扩大，不会在一次卡顿中丢掉额外战斗帧', () => {
+  const normal = new FixedStepClock();
+  const triple = new FixedStepClock();
+  assert.equal(normal.advance(1000, 1, 10), 10);
+  assert.equal(triple.advance(1000, 3, 30), 30);
+});
+
 test('片头动画固定约60FPS推进，不会被10Hz战斗时钟放慢', () => {
   assert.equal(countAnimationFrames(60, 1), 60);
   assert.equal(countAnimationFrames(120, 1), 60);
@@ -128,6 +153,30 @@ test('第一波不会自动开始，必须满足原版 # 键条件', () => {
   assert.equal(canStartWave({ ...ready, levelStarted: false }), false);
 });
 
+test('格中心方向判断只检查占用位，不会提前消耗断龙闸石阵', () => {
+  const map = new MapData({} as never);
+  Object.assign(map as unknown as Record<string, unknown>, {
+    mapData: { width: 2, height: 1 },
+    terrain: [0, 1],
+    pathDefense: [16, 0],
+  });
+  assert.equal(map.isPathUnoccupiedAtPixel(8, 8), true);
+  assert.equal(map.getPathDefense(0, 0), 16);
+  assert.equal(map.isPathUnoccupiedAtPixel(24, 8), false);
+});
+
+test('小兵被堵时只等待一帧，不会反复退回上一格中心', () => {
+  const enemy = createMovingEnemy({ state: EnemyState.BLOCKED });
+  const system = new EnemySystem({} as never, {} as never);
+  const internal = system as unknown as {
+    updateEnemy(target: Enemy, index: number): void;
+  };
+  internal.updateEnemy(enemy, 0);
+  assert.equal(enemy.state, EnemyState.WALK);
+  assert.equal(enemy.x, 14);
+  assert.equal(enemy.y, 8);
+});
+
 test('塔属性与拆除返还使用原版线性公式', () => {
   assert.equal(linearLevelValue([15, 5], 1), 15);
   assert.equal(linearLevelValue([15, 5], 3), 25);
@@ -153,6 +202,20 @@ test('11 类建筑始终使用同一套原版辅助层编号', () => {
     'arrow', 'lime', 'spike', 'fire-ice', 'arrow', 'fire-ice',
     'log', 'catapult', 'liquid', 'liquid', 'gate',
   ]);
+});
+
+test('悬停范围只对六类投掷/远程建筑显示', () => {
+  assert.deepEqual([...TOWER_PROJECTILE_RANGE_TYPES], [0, 1, 3, 4, 5, 7]);
+});
+
+test('经济参数与原版 q1100/r1101/g1057 及每战初始金币一致', () => {
+  assert.deepEqual([...TOWER_COST_Q1100], [20, 30, 40, 50, 40, 80, 40, 50, 60, 80, 30]);
+  assert.deepEqual([...TOWER_UPGRADE_COST_R1101], [
+    [10, 2], [15, 3], [20, 4], [20, 5], [10, 5], [30, 5],
+    [10, 5], [20, 5], [20, 5], [30, 5], [20, 5],
+  ]);
+  assert.deepEqual([...TECH_COST_G1057], [20, 40, 60, 80, 100]);
+  assert.deepEqual([...INITIAL_GOLD_BY_MODE], [300, 250]);
 });
 
 test('原版常驻 t 动画与攻击 bu 过程层使用独立分支', () => {
@@ -227,8 +290,64 @@ test('沸水与滚油会绘制道路上的主要液体攻击层', () => {
   }
 });
 
-test('投石右向原图可转换为上右下左四个道路朝向', () => {
-  assert.deepEqual([...TOWER_RIGHT_FACING_TRANSFORMS], [5, 0, 6, 1]);
+test('投石主模型遵从原版，不按道路方向旋转', () => {
+  const system = new TowerSystem({} as never, {} as never);
+  const resolveFacing = (system as unknown as {
+    resolvePathFacing(x: number, y: number, type: number): number;
+  }).resolvePathFacing;
+  assert.equal(resolveFacing.call(system, 10, 10, 7), 0);
+});
+
+test('拥堵绕行不会选择进入后立即反向的道路格', () => {
+  const map = {
+    getPathDirAtPixel(x: number, y: number) {
+      if (x === 0 && y === -16) return 1;
+      if (x === 32 && y === 0) return 0;
+      return 0;
+    },
+    isPathFreeAtPixel(x: number, y: number) {
+      return x === 0 && y === 16;
+    },
+  };
+  const system = new EnemySystem({} as never, map as never);
+  const findDetour = (system as unknown as {
+    findDetourDirection(x: number, y: number, previousDir: number): number;
+  }).findDetourDirection;
+  assert.equal(findDetour.call(system, 0, 0, 0), 0);
+});
+
+test('敌人防御力按原版减伤，伤害最低仍扣 1 点', () => {
+  const tower = createTower(0, { damage: 30 });
+  const enemy = createEnemy(48, 16, 100, 100);
+  const system = systemWithTower(tower);
+  system.update([enemy], 0, 0);
+  system.update([enemy], 0, 0);
+  assert.equal(enemy.hp, 99);
+});
+
+test('活动敌人达到原版 30 个槽位后暂停刷怪', () => {
+  const map = {
+    getSpawnCheckPixel() { return { x: 8, y: 8 }; },
+    getSpawnPixel() { return { x: 8, y: 8 }; },
+    isPathFreeAtPixel() { return true; },
+    getPathDirAtPixel() { return 0; },
+    occupyTileAtPixel() {},
+  };
+  const system = new EnemySystem({} as never, map as never);
+  const internal = system as unknown as {
+    enemies: Enemy[];
+    aT: number;
+    aX: number;
+    aR: number;
+    spawnTick(): void;
+  };
+  internal.enemies = Array.from({ length: MAX_ENEMIES }, (_, spawnIndex) => createMovingEnemy({ spawnIndex }));
+  internal.aT = 0;
+  internal.aX = 1;
+  internal.aR = -1;
+  internal.spawnTick();
+  assert.equal(internal.enemies.length, MAX_ENEMIES);
+  assert.equal(internal.aT, 0);
 });
 
 test('投石与道路机关在攻击和升级期间保持建造时解析出的道路朝向', () => {
@@ -416,19 +535,15 @@ test('魏国终阶断龙闸使用原版 46 点持久石阵，其余等级为 16'
   assert.equal(strengths.every(strength => strength === 46), true);
 });
 
-test('投石建造后会自动朝向建筑左右两侧的敌人路径', () => {
-  const resolveFacing = (roadX: number): number => {
-    const map = {
-      getTerrain(tx: number, ty: number) {
-        return tx === roadX && ty >= 10 && ty <= 12 ? 0 : 8;
-      },
-    };
-    const system = new TowerSystem({} as never, map as never);
-    return (system as unknown as {
-      resolvePathFacing(x: number, y: number, type: number): number;
-    }).resolvePathFacing(10, 10, 7);
+test('投石建造不会因为道路位置自动改变朝向', () => {
+  const map = {
+    getTerrain(tx: number, ty: number) {
+      return tx === 9 && ty >= 10 && ty <= 12 ? 0 : 8;
+    },
   };
-
-  assert.equal(resolveFacing(9), 3);  // 道路在左，投石朝左
-  assert.equal(resolveFacing(13), 1); // 道路在右，投石朝右
+  const system = new TowerSystem({} as never, map as never);
+  const resolveFacing = (system as unknown as {
+    resolvePathFacing(x: number, y: number, type: number): number;
+  }).resolvePathFacing;
+  assert.equal(resolveFacing.call(system, 10, 10, 7), 0);
 });

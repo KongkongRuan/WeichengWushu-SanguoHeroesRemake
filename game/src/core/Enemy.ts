@@ -41,6 +41,7 @@ import {
   ENEMY_ANIM_L1083,
   ENEMY_DRAW_OFFSETS_D1091,
   ENEMY_SRC_RECTS_A1092,
+  MAX_ENEMIES,
 } from '../data/gameData';
 
 // 敌人状态 (对应原版 b1066[n][8], var45[var3=8])
@@ -61,7 +62,8 @@ export interface Enemy {
   x: number;           // [0]  X坐标 (地图像素)
   y: number;           // [1]  Y坐标 (地图像素)
   hp: number;          // [2]  当前HP
-  goldReward: number;  // [3]  aY 击杀金币系数 (原版结算实际用固定值, 见 SETTLE)
+  defense: number;     // [3] aY 敌人防御力/减伤值
+  goldReward: number;  // H5结算字段；原版普通/名将固定为5/50
   speed: number;       // [4]  速度 px/逻辑帧 (aZ)
   baseSpeed: number;   // 未受状态效果影响的原始速度
   slowScale: number;   // 当前减速倍率，效果结束后恢复为 1
@@ -239,7 +241,9 @@ export class EnemySystem {
   // 刷怪 (对应原版 l(int) 行22811-22948, 固定 l(1))
   // ============================================================
   private spawnTick(): void {
-    if (this.aT >= this.aX) return;
+    // 原版 b1066 是 30 个活动敌人槽位；达到上限时只暂停刷怪，
+    // 等已有单位离场后再继续当前波次，避免把道路填满后永久互相阻塞。
+    if (this.aT >= this.aX || this.enemies.length >= MAX_ENEMIES) return;
 
     // 出生空闲检查: b(b1069[aN][0], b1069[aN][1]+13) — 出生点下方13px的格子可进入才刷
     // (两个反编译器一致确认 +13 偏移; 效果: 敌人成串而出, 约0.8-1.1s/个, 无全局匀速定时器)
@@ -275,6 +279,7 @@ export class EnemySystem {
       x: sp.x,                                // [0] = b1069[aN][0]
       y: sp.y,                                // [1] = b1069[aN][1]
       hp: elite ? this.aW * 10 : this.aW,     // [2] 名将波10倍HP
+      defense: this.aY,                       // [3] 原版 aY，攻击时从伤害中扣除
       goldReward: elite ? 50 : 5,             // 原版结算固定奖励，不是波次 aY
       speed: this.aZ,                         // [4]
       baseSpeed: this.aZ,
@@ -330,9 +335,14 @@ export class EnemySystem {
     // 2. l(1) 刷怪
     this.spawnTick();
 
-    // 3. 逐敌人更新 (原版按 o1153 顺序; H5 逆序遍历配合 swap-remove)
-    for (let i = this.enemies.length - 1; i >= 0; i--) {
-      this.updateEnemy(this.enemies[i], i);
+    // 3. 原版先按出生序 o1153 升序更新，让队首先离开当前格。
+    // 后方单位先绕行会把多车道地图逐格填死，形成永久堵塞。
+    this.enemies.sort((a, b) => a.spawnIndex - b.spawnIndex);
+    for (let i = 0; i < this.enemies.length;) {
+      const enemy = this.enemies[i];
+      this.updateEnemy(enemy, i);
+      // removeEnemy() 使用 splice 时，当前位置已换成下一个敌人；否则才前进。
+      if (this.enemies[i] === enemy) i++;
     }
   }
 
@@ -348,8 +358,10 @@ export class EnemySystem {
 
     const nx = enemy.x + (DIRECTIONS_K1081[enemy.dir][0] << 4);
     const ny = enemy.y + (DIRECTIONS_K1081[enemy.dir][1] << 4);
-    const nextFree = this.mapData.isPathFreeAtPixel(nx, ny); // b() 行16868
-    if (!nextFree) {
+    // 原版 o() 使用 d() 只查看 E1163 占用位；D1162 是否可破坏留给跨格
+    // 的 b() 判定，不能在这里提前削弱断龙闸或把机关误判成绕行墙。
+    const nextUnoccupied = this.mapData.isPathUnoccupiedAtPixel(nx, ny);
+    if (!nextUnoccupied) {
       enemy.dir = this.findDetourDirection(enemy.x, enemy.y, enemy.dir);
       return;
     }
@@ -372,7 +384,9 @@ export class EnemySystem {
       const ny = y + (DIRECTIONS_K1081[candidate][1] << 4);
       if (this.mapData.isPathFreeAtPixel(nx, ny)) {
         const nextPathDir = this.mapData.getPathDirAtPixel(nx, ny);
-        const reversesPath = nextPathDir >= 0 && nextPathDir < 4 && Math.abs(nextPathDir - pathDir) === 2;
+        // 原版 b(x,y,dir) 比较的是候选方向与目标格方向。若误用当前格方向，
+        // 拥堵绕行时会放行“进入后立刻掉头”的反向格，形成死循环。
+        const reversesPath = nextPathDir >= 0 && nextPathDir < 4 && Math.abs(nextPathDir - candidate) === 2;
         const reversesPrevious = nextPathDir >= 0 && nextPathDir < 4 && Math.abs(nextPathDir - previousDir) === 2;
         if (!reversesPath && !reversesPrevious) return candidate;
       }
@@ -426,10 +440,11 @@ export class EnemySystem {
       }
 
       case EnemyState.BLOCKED: // case 7: 被堵
-        // 原版状态 1/2/3 会先退回当前格中心，再执行四向绕行。
-        if (!this.returnToTileCenter(enemy)) return;
+        this.updateDirection(enemy);
+        // 原版 state 7 只暂停一个逻辑帧；位置不会被强行拉回格中心。
+        // 拉回中心会把已经贴近墙边的单位推回上一格，随后反复撞墙。
         enemy.state = EnemyState.WALK;
-        break;
+        return;
 
       case EnemyState.CHARGE: // case 8: 冲城
         enemy.chargeTimer++;
@@ -507,21 +522,6 @@ export class EnemySystem {
     enemy.y = ny;
   }
 
-  /** 被堵在格边界时逐帧退回格中心；到达中心后才允许切换绕行方向。 */
-  private returnToTileCenter(enemy: Enemy): boolean {
-    const centerX = (enemy.x >> 4) * TILE_SIZE + (TILE_SIZE >> 1);
-    const centerY = (enemy.y >> 4) * TILE_SIZE + (TILE_SIZE >> 1);
-    const dx = centerX - enemy.x;
-    const dy = centerY - enemy.y;
-    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return true;
-
-    const step = Math.max(0.1, enemy.baseSpeed);
-    enemy.x += Math.sign(dx) * Math.min(Math.abs(dx), step);
-    enemy.y += Math.sign(dy) * Math.min(Math.abs(dy), step);
-    this.advanceAnim(enemy);
-    return Math.abs(centerX - enemy.x) < 0.001 && Math.abs(centerY - enemy.y) < 0.001;
-  }
-
   /**
    * 像素坐标 → 瓦片索引 (对应原版 a(int,int) 行10001)
    */
@@ -539,11 +539,8 @@ export class EnemySystem {
       // 原版 p() 会 a(x,y,false) 释放敌人当前格
       this.mapData.releaseTileAtPixel(enemy.x, enemy.y);
     }
-    const last = this.enemies.length - 1;
-    if (index !== last) {
-      this.enemies[index] = this.enemies[last];
-    }
-    this.enemies.length = last;
+    // 保持出生序顺序，避免 swap-remove 把后方敌人挪到队首破坏更新顺序。
+    this.enemies.splice(index, 1);
     // 原版: aT==aX && aP==0 时播清场音效 h(aq) — H5跳过(注释标注)
   }
 

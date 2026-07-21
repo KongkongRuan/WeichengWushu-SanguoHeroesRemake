@@ -30,8 +30,7 @@ import {
   TOWER_FOOTPRINT_O1098,
   TOWER_DIRECTION_P1099,
   TOWER_PATH_FACING_TYPES, TOWER_ATTACK_DURATION_TICKS,
-  TOWER_AUX_LAYER_BY_TYPE, TOWER_AMBIENT_LAYER_TYPES,
-  TOWER_RIGHT_FACING_TRANSFORMS,
+  TOWER_AUX_LAYER_BY_TYPE, TOWER_AMBIENT_LAYER_TYPES, TOWER_PROJECTILE_RANGE_TYPES,
 } from '../data/gameData';
 import { TOWER_NAMES, TOWER_DESCRIPTIONS, HEROES, Hero } from '../data/heroes';
 import type { TechTreeSystem } from './TechTree';
@@ -293,9 +292,7 @@ export class TowerSystem {
    */
   private resolvePathFacing(tileX: number, tileY: number, type: number): number {
     const renderType = this.spriteType(type);
-    // 投石不是原版的“定向占地机关”，不能因此限制建造位置；但待机模型仍应
-    // 在第一次攻击前朝向道路。攻击后它会继续按实际目标更新朝向。
-    if (TOWER_DIRECTION_P1099[renderType] !== 1 && renderType !== 7) return 0;
+    if (TOWER_DIRECTION_P1099[renderType] !== 1) return 0;
     let bestOrientation = 0;
     let bestScore = -1;
     for (let orientation = 0; orientation < 4; orientation++) {
@@ -342,9 +339,10 @@ export class TowerSystem {
     // 原版科技建筑解锁门禁 (e1105): 未解锁返回false (提示由 UI 层给 b1015[115])
     if (this.buildUnlockCheck && !this.buildUnlockCheck(type)) return false;
 
-    // 原版建造费 (q1100) 优先, 否则用 towerConfigs; 装填半价科技效果保留
+    // 原版建造费 (q1100) 优先, 否则用 towerConfigs。装填半价只影响断龙闸装填，
+    // 不能把所有新建建筑的 q1100 都减半。
     const baseCost = this.buildCostProvider?.(type) ?? config.cost;
-    const actualCost = this.techTree?.isReloadHalf() ? Math.floor(baseCost / 2) : baseCost;
+    const actualCost = baseCost;
     if (this.gold < actualCost) return false;
 
     const stats = this.originalStats(type, 1);
@@ -394,37 +392,20 @@ export class TowerSystem {
     return true;
   }
 
+  /** 原版动作16显示的逐级升级费用；塔升级不等于购买科技建筑。 */
+  getUpgradeCost(tower: Tower): number | null {
+    if (tower.level >= 6) return null;
+    const [baseCost, stepCost] = TOWER_UPGRADE_COST_R1101[this.spriteType(tower.type)] ?? [50, 50];
+    return baseCost + stepCost * Math.max(0, tower.level - 1);
+  }
+
   /**
-   * 升级塔 - 集成科技树系统
-   * 还原原版 j(I I I)V 升级逻辑
-   * 所有原版塔都走 TechTree 的 r1101 升级费用公式。
+   * 原版动作16：只支付 r1101 当前等级费用并提升建筑等级。
+   * 普通塔升级不会创建全局科技效果；科技效果只由底部科技建筑/作弊入口管理。
    */
   upgradeTower(tower: Tower): boolean {
-    // 使用科技树系统检查是否可升级
-    if (this.techTree) {
-      const check = this.techTree.canUpgradeTech(tower);
-      if (!check.canUpgrade) return false;
-
-      const result = this.techTree.upgradeTech(tower);
-      if (!result.success) return false;
-
-      // 原版属性不是乘法成长，而是各自数组的“基础值 + 每级增量”。
-      tower.level++;
-      this.applyOriginalStats(tower);
-      this.beginUpgradeEffect(tower);
-
-      // 检查武将觉醒
-      if (result.hero) {
-        tower.heroId = result.hero.id;
-        this.onHeroAwakened?.(result.hero, tower);
-      }
-      return true;
-    }
-
-    // 无科技树时的备用逻辑
-    if (tower.level >= 6) return false;
-    const [baseCost, stepCost] = TOWER_UPGRADE_COST_R1101[this.spriteType(tower.type)] ?? [50, 50];
-    const cost = baseCost + stepCost * Math.max(0, tower.level - 1);
+    const cost = this.getUpgradeCost(tower);
+    if (cost == null) return false;
     if (this.gold < cost) return false;
     tower.level++;
     this.applyOriginalStats(tower);
@@ -535,8 +516,6 @@ export class TowerSystem {
   update(enemies: Enemy[], offsetX: number, offsetY: number): void {
     this.updateDebuffs();
     this.tickAnim();
-    const globalFireRateBonus = this.techTree?.getGlobalFireRateBonus() ?? 0;
-
     for (const tower of this.towers) {
       if (tower.buildEffect !== 0) continue;
       if (tower.type === 10) {
@@ -545,7 +524,6 @@ export class TowerSystem {
       }
 
       if (tower.attackState === 1) {
-        if (tower.cooldown > 0) tower.cooldown--;
         this.advanceAttack(tower, enemies, offsetX, offsetY);
         continue;
       }
@@ -565,7 +543,9 @@ export class TowerSystem {
       }
 
       this.updateStrikeTarget(tower, targetIdx, enemies[targetIdx], offsetX, offsetY);
-      tower.cooldown = Math.max(5, Math.floor(tower.fireRate * (1 - globalFireRateBonus)));
+      // 原版攻击动画与冷却分开计时；冷却只在 state=2 下降，不能在攻击动画
+      // 播放期间提前消耗，否则投石等长动作会获得近乎双倍的攻击频率。
+      tower.cooldown = Math.max(5, Math.floor(tower.fireRate));
       this.startAttack(tower);
     }
 
@@ -770,23 +750,18 @@ export class TowerSystem {
   }
 
   private towerDamage(tower: Tower): number {
-    let damage = tower.damage;
-    if (this.techTree) {
-      damage = this.techTree.applyEffectsToTowerDamage(tower, damage);
-      damage *= 1 + this.techTree.applyAuraBonus(tower, this.getNearbyTowers(tower, 64));
-    }
-    if (tower.heroId >= 0) damage *= 1.5;
-    return Math.floor(damage);
+    // s1102 是建筑本身的攻击力。普通升级和武将显示不会额外乘一个
+    // H5 自造的全局科技/1.5 倍英雄系数。
+    return Math.max(0, Math.floor(tower.damage));
   }
 
   private damageEnemy(tower: Tower, enemy: Enemy, scale: number = 1, applyEffect: boolean = true): void {
-    enemy.hp -= Math.max(1, Math.floor(this.towerDamage(tower) * scale));
+    const rawDamage = Math.max(1, Math.floor(this.towerDamage(tower) * scale));
+    // 原版 b1066[3]=aY 是敌人防御力；每次受击至少扣1点。
+    enemy.hp -= Math.max(1, rawDamage - Math.max(0, enemy.defense ?? 0));
     if (applyEffect && tower.effectType > 0) {
       this.applyTowerEffect(enemy, tower.effectType, tower.level);
-      const bonus = this.techTree?.getAttackTimeBonus() ?? 0;
-      if (bonus > 0 && enemy.timer > 0) enemy.timer = Math.floor(enemy.timer * (1 + bonus));
     }
-    this.techTree?.applyAoeEffectsToEnemy(enemy, tower.type, tower.level);
   }
 
   private damageTarget(tower: Tower, enemies: Enemy[]): void {
@@ -1069,19 +1044,11 @@ export class TowerSystem {
       if (!rect) continue;
       const dx = (points[base + 1] ?? 0) + deviceDx;
       const dy = (points[base + 2] ?? 0) + deviceDy;
-      let drawX = ax + dx;
-      let drawY = ay + dy;
-      let transform = 0;
-      if (type === 7) {
-        // t7_0 只有一套面向右的投石主模型。按建造时解析出的道路朝向旋转/翻转，
-        // 并在宽高互换时保持原模型中心不动。
-        transform = TOWER_RIGHT_FACING_TRANSFORMS[tower.orientation & 3] ?? 0;
-        if (transform === 5 || transform === 6) {
-          drawX += (rect[2] - rect[3]) / 2;
-          drawY += (rect[3] - rect[2]) / 2;
-        }
-      }
-      this.renderer.drawSpriteTransform(img, rect[0], rect[1], rect[2], rect[3], drawX, drawY, transform);
+      // 原版主模型对 0-9 号建筑始终使用 transform=0；投石图集的三张
+      // 等级外观本身已经包含姿态，不能再按道路方向旋转整张裁剪图。
+      this.renderer.drawSpriteTransform(
+        img, rect[0], rect[1], rect[2], rect[3], ax + dx, ay + dy, 0,
+      );
       drawn = true;
     }
     return drawn;
@@ -1116,12 +1083,16 @@ export class TowerSystem {
     const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(tower.type)] ?? 1;
     const size = footprint << 4;
     const center = footprint << 3;
-    if (selected && tower.range > 0) {
-      this.renderer.setColor(0xffffff);
+    const showRange = selected || TOWER_PROJECTILE_RANGE_TYPES.includes(this.spriteType(tower.type));
+    if (showRange && tower.range > 0) {
       const ctx = this.renderer.virtualContext;
+      ctx.save();
+      ctx.strokeStyle = selected ? 'rgba(255, 255, 255, 0.92)' : 'rgba(255, 102, 102, 0.86)';
+      ctx.lineWidth = selected ? 1.5 : 1;
       ctx.beginPath();
       ctx.arc(px + center, py + center, tower.range, 0, Math.PI * 2);
       ctx.stroke();
+      ctx.restore();
     }
 
     const corner = this.spr('ui', 0);
@@ -2312,14 +2283,11 @@ export class TowerSystem {
       const defenseStrength = this.faction === 1 && tower.level - 1 === 6 ? 46 : 16;
       for (const cell of cells) this.mapData.setPathDefense(cell.tx, cell.ty, defenseStrength);
 
-      let damage = tower.damage;
-      if (this.techTree) damage = this.techTree.applyEffectsToTowerDamage(tower, damage);
-      if (tower.heroId >= 0) damage *= 1.5;
+      const damage = Math.max(0, Math.floor(tower.damage));
       for (const enemy of enemies) {
         if (enemy.state === EnemyState.DYING || enemy.state === EnemyState.SETTLE) continue;
         if (!cellKeys.has(`${enemy.x >> 4},${enemy.y >> 4}`)) continue;
-        enemy.hp -= Math.floor(damage);
-        this.techTree?.applyAoeEffectsToEnemy(enemy, tower.type, tower.level);
+        enemy.hp -= Math.max(1, damage - Math.max(0, enemy.defense ?? 0));
       }
     } else if (tower.gateState === 2) {
       tower.gateTimer++;

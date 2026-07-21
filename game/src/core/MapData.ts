@@ -331,6 +331,16 @@ export class MapData {
   }
 
   /**
+   * 原版 d(x,y)：只检查 E1163 的运行时占用位。方向选择不能在这里提前
+   * 消耗 D1162 石阵；敌人真正尝试跨格时才由 isPathFreeAtPixel() 处理。
+   */
+  isPathUnoccupiedAtPixel(px: number, py: number): boolean {
+    const idx = this.tileIndexAtPixel(px, py);
+    const v = this.terrain[idx] ?? TERRAIN_OBSTACLE;
+    return (v & 1) === 0;
+  }
+
+  /**
    * 像素坐标处是否为我城格 (对应原版 c(int,int) 行17868: E1163==11)
    */
   isOurCastleAtPixel(px: number, py: number): boolean {

@@ -222,7 +222,8 @@ export class Game {
   private cardAb: number = 0;          // ab: 文系卡Y
 
   // ====== 开场/加载字段 ======
-  private logoFrame: number = 0;       // ak: LOGO动画帧计数
+  private logoFrame: number = 0;       // ak: 原版 LOGO 逻辑帧（1..35，每帧100ms）
+  private logoFrameAccumulator: number = 0; // 60Hz 显示帧换算到原版 10Hz
   private loadingProgress: number = 0; // am→progress: 加载进度 0..1
   private atlasesReady: boolean = false;
   private atlasesPromise: Promise<void> | null = null;
@@ -348,8 +349,7 @@ export class Game {
       },
       getGateLoadCost: (tower) => this.towerSystem.getGateLoadCost(tower),
       getUpgradeCost: (tower) => {
-        const info = this.techTree.canUpgradeTech(tower);
-        return info.canUpgrade ? (info.cost ?? null) : null;
+        return this.towerSystem.getUpgradeCost(tower);
       },
       getDemolishRefund: (tower) => {
         const orig = tower.type;
@@ -1788,6 +1788,13 @@ export class Game {
    */
   async loadLevel(level: number, resetTech: boolean = true): Promise<void> {
     this.currentLevel = level;
+    if (resetTech) {
+      // 原版 aj() 在每场战斗重新建立战场：金币、塔、科技建筑和科技效果
+      // 都不从上一关继承。读档传 false 才保留存档中的这些状态。
+      this.gold = INITIAL_GOLD_BY_MODE[this.gameModeT === 1 ? 1 : 0];
+      this.towerSystem.reset();
+      this.techTree.reset();
+    }
     await this.mapData.loadLevel(level);
 
     this.enemySystem.setLevel(level);
@@ -1863,8 +1870,7 @@ export class Game {
 
   // ====== 重新开始当前关卡 ======
   private async restartLevel(): Promise<void> {
-    // 保留科技树和金币 (仅重置当前关卡布局)
-    this.towerSystem.reset();
+    // 原版重新开始会重新初始化当前战斗，而不是保留上一局金币/科技。
     await this.loadLevel(this.currentLevel);
   }
 
@@ -1895,7 +1901,9 @@ export class Game {
     if (playingActive) {
       this.animationClock.reset();
       const speed = this.uiSystem.getGameSpeed();
-      const steps = this.logicClock.advance(elapsedMs, speed, 10);
+      // 追帧上限按倍速同比扩大，保证 x1/x2/x3 都保留相同的 1 秒真实时间窗口。
+      // 固定上限 10 会让 x3 在一次较长卡顿后丢掉额外战斗帧，破坏攻防相对结果。
+      const steps = this.logicClock.advance(elapsedMs, speed, 10 * speed);
       for (let i = 0; i < steps; i++) this.runLogicStep();
     } else if (nonPlayingAnimated) {
       this.logicClock.reset();
@@ -2059,12 +2067,17 @@ export class Game {
   }
 
   // ============================================================
-  // 开场 LOGO 动画 (原版 l=0: x() 行26145 布局 / y() 行26190 渲染, 35帧)
-  // H5简化: sflogo_0 主标帧动画 + sflogo_2/3/4 三行字依次淡入, 1.5秒或可点击跳过
+  // 开场 LOGO 动画 (原版 l=0: G() 行7324、f(0,ak) 行19715、y() 行26190)
+  // 原版主循环每100ms推进一次，共35帧；sflogo_2/3/4 各自是4帧图集，不是整行文字。
   // ============================================================
   private updateLogoAnim(dt: number): void {
-    this.logoFrame += dt;
-    if (this.logoFrame >= 90) {
+    this.logoFrameAccumulator += dt;
+    const originalTicks = Math.floor(this.logoFrameAccumulator / 6);
+    if (originalTicks > 0) {
+      this.logoFrameAccumulator -= originalTicks * 6;
+      this.logoFrame += originalTicks;
+    }
+    if (this.logoFrame > 35) {
       this.startLoadingScreen();
     }
   }
@@ -2161,39 +2174,56 @@ export class Game {
   }
 
   // ============================================================
-  // 开场 LOGO 渲染 (原版 y() 行26190 的H5简化版)
+  // 开场 LOGO 渲染 (原版 f(0,ak) + y() 的关键素材与时序)
   // ============================================================
   private renderLogoAnim(): void {
     const r = this.renderer;
     r.setColor(0xFFFFFF);
     r.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
 
-    // 主标 sflogo_0 (228x51 = 4帧57x51) 帧动画居中
+    const tick = Math.max(0, Math.min(35, this.logoFrame));
+    const logoX = (LOGICAL_WIDTH - 57) >> 1;
+    const logoY = 92;
+
+    // 前5帧的水滴落下对应原版 frame 1 的 sflogo_1 实体。
+    if (tick > 0 && tick < 6) {
+      const drop = this.spr('sflogo', 1);
+      if (drop) r.drawImage(drop, (LOGICAL_WIDTH - drop.width) >> 1, 28 + tick * 11);
+    }
+
+    // sflogo_5 是原版 frame 8 加入的光环；放在主标后方，避免白色区域盖住火焰。
+    if (tick >= 8 && tick <= 18) {
+      const halo = this.spr('sflogo', 5);
+      if (halo) {
+        const ctx = r.virtualContext;
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, 1 - Math.abs(13 - tick) / 6);
+        r.drawImage(halo, (LOGICAL_WIDTH - halo.width) >> 1, logoY - 18);
+        ctx.restore();
+      }
+    }
+
+    // 主标 sflogo_0：228x51 = 4帧57x51，只能裁切单帧。
     const logo = this.spr('sflogo', 0);
-    if (logo) {
-      const frame = (this.logoFrame >> 3) % 4;
-      r.drawImageRegion(logo, frame * 57, 0, 57, 51, (240 - 57) >> 1, 96, 57, 51);
+    if (logo && tick >= 5) {
+      const frame = Math.min(3, Math.max(0, (tick - 5) >> 1));
+      r.drawImageRegion(logo, frame * 57, 0, 57, 51, logoX, logoY, 57, 51);
     }
-    // 三行字 sflogo_2/3/4 (68x18) 依次以裁剪揭示，避免 alpha:false 画布上的半透明文字发虚。
-    for (let i = 0; i < 3; i++) {
-      const img = this.spr('sflogo', 2 + i);
-      if (!img) continue;
-      const appear = (this.logoFrame - (20 + i * 18)) / 16;
-      if (appear <= 0) continue;
-      const x = (240 - 68) >> 1;
-      const y = 164 + i * 26;
-      const visibleH = Math.max(1, Math.min(img.height, Math.floor(img.height * Math.min(1, appear))));
-      const ctx = r.virtualContext;
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(x, y, img.width, visibleH);
-      ctx.clip();
-      r.drawImage(img, x, y);
-      ctx.restore();
+
+    // sflogo_2/3/4 每张68x18由4个17x18帧组成；原版把三个标志横向放置。
+    if (tick >= 8) {
+      const glyphFrame = Math.min(3, (tick - 8) >> 1);
+      for (let i = 0; i < 3; i++) {
+        const img = this.spr('sflogo', 2 + i);
+        if (!img) continue;
+        r.drawImageRegion(img, glyphFrame * 17, 0, 17, 18, 82 + i * 30, 166, 17, 18);
+      }
     }
-    // 跳过提示
-    if ((this.frameCount & 31) < 20) {
-      r.drawText('点击跳过', 102, 292, 0x999999, 9);
+
+    // 原版后段显示 sflogo_7 厂商字标；点击/回车跳过仍保留，但不额外绘制非原版提示。
+    if (tick >= 14) {
+      const wordmark = this.spr('sflogo', 7);
+      if (wordmark) r.drawImage(wordmark, (LOGICAL_WIDTH - wordmark.width) >> 1, 212);
     }
   }
 
@@ -2885,11 +2915,25 @@ export class Game {
       const label = hoveredTower
         ? this.towerSystem.getTowerName(hoveredTower)
         : (canBuild ? '可造区域' : '不可造区域');
+      this.renderer.virtualContext.font = '9px monospace';
+      const labelWidth = Math.min(
+        LOGICAL_WIDTH - 4,
+        Math.max(52, Math.ceil(this.renderer.virtualContext.measureText(label).width) + 10),
+      );
+      const labelCtx = this.renderer.virtualContext;
+      labelCtx.save();
+      labelCtx.fillStyle = hoveredTower
+        ? 'rgba(30, 39, 54, 0.92)'
+        : 'rgba(248, 243, 217, 0.92)';
+      labelCtx.fillRect(0, 296, labelWidth, 14);
+      labelCtx.strokeStyle = hoveredTower ? 'rgba(242, 193, 78, 0.9)' : 'rgba(83, 103, 138, 0.45)';
+      labelCtx.strokeRect(0.5, 296.5, labelWidth - 1, 13);
+      labelCtx.restore();
       this.renderer.drawText(
         label,
         2,
         299,
-        hoveredTower ? 0xf2c14e : (canBuild ? 0x2f7a5a : 0xb23a48),
+        hoveredTower ? 0xf9e7a7 : (canBuild ? 0x2f7a5a : 0xb23a48),
         9,
       );
     }

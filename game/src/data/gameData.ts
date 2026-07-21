@@ -180,8 +180,8 @@ export const TOWER_AUX_LAYER_BY_TYPE = [
  */
 export const TOWER_AMBIENT_LAYER_TYPES: readonly number[] = [2, 3, 5, 8, 9];
 
-/** t7_0 投石模型原图面向右；按 0上/1右/2下/3左 转成 J2ME Sprite transform。 */
-export const TOWER_RIGHT_FACING_TRANSFORMS: readonly number[] = [5, 0, 6, 1];
+/** 悬停时显示攻击范围的投掷/远程建筑（原版有明确射程圈的六类）。 */
+export const TOWER_PROJECTILE_RANGE_TYPES: readonly number[] = [0, 1, 3, 4, 5, 7];
 
 /**
  * q1100: 击杀奖励金币 (byte[11])
