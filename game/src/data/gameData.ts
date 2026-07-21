@@ -434,6 +434,27 @@ export const TOWER_DIR_SPREAD_M1084: number[][] = [
 ];
 
 /**
+ * s1117/t1118: 断龙闸装填石排的方向与起点 (a.java:17379 c(int×6))。
+ * 装填时只显示 3 块石头；完整 3×3 石阵只在释放完成后写入 D1162。
+ */
+export const TOWER_GATE_LOAD_DIR_S1117: [number, number][] = [
+  [1, 0], [0, 1], [1, 0], [0, 1],
+];
+export const TOWER_GATE_LOAD_OFF_T1118: [number, number][] = [
+  [1, 5], [29, -5], [1, 27], [1, -5],
+];
+
+/** 断龙闸落闸三帧的横向偏移与源矩形表 (u1119/v1120/h1121)。 */
+export const TOWER_GATE_FALL_OFF_U1119: [number, number][] = [[33, -9], [43, -18], [58, -27]];
+export const TOWER_GATE_FALL_OFF_V1120: [number, number][] = [[-33, -27], [-18, -18], [-8, -9]];
+export const TOWER_GATE_FALL_RECTS_H1121: [number, number][][] = [
+  [[0, 52], [52, 14], [66, 16]],
+  [[0, 13], [13, 16], [29, 23]],
+  [[0, 32], [32, 23], [55, 15]],
+  [[0, 23], [23, 16], [39, 13]],
+];
+
+/**
  * z1148: 突刺(类型2)地刺帧 Y 偏移 (byte[5], a.java:4597), 对应 r(int×3) 行24522
  */
 export const TOWER_SPIKE_YOFF_Z1148: number[] = [0, -6, -8, -12, -14];

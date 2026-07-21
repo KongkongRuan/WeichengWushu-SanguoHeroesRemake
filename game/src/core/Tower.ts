@@ -19,6 +19,8 @@ import {
   TOWER_DECOR_L1143, TOWER_BASE_OFFSETS_J1139, TOWER_LEVEL_FRAME_D1135,
   TOWER_ANCHOR_O1098,
   TOWER_DIR_SPREAD_M1084, TOWER_SPIKE_YOFF_Z1148,
+  TOWER_GATE_LOAD_DIR_S1117, TOWER_GATE_LOAD_OFF_T1118,
+  TOWER_GATE_FALL_OFF_U1119, TOWER_GATE_FALL_OFF_V1120, TOWER_GATE_FALL_RECTS_H1121,
   TOWER_GROUND_FRAME_N1149, TOWER_GROUND_PIECES_M1150,
   TOWER_LOG_BASE_OFF_J1144, TOWER_BOIL_BASE_OFF_K1145, TOWER_BOIL_ANIM_L1146,
   TOWER_FOUNTAIN_OFF_M1147, TOWER_DEVICE_POINTS_H1140,
@@ -64,7 +66,7 @@ export interface Tower {
   strikeX: number;      // 原版 entity[11]：最近一次攻击的地图像素 X
   strikeY: number;      // 原版 entity[12]：最近一次攻击的地图像素 Y
   gateLoaded: boolean;   // 断龙闸 entity[15]：是否已经装填石块
-  gateState: number;     // 断龙闸 entity[10]：0待命 1释放中 2落闸 3已使用
+  gateState: number;     // 断龙闸 entity[10]：0待命 1释放中 2落闸
   gateTimer: number;     // 断龙闸动作计时，对应 entity[13]
 }
 
@@ -82,6 +84,8 @@ export class TowerSystem {
   private pendingBuildType: number = 0;
   // aN: 当前关卡号 (原版范围圈颜色 l1116[aN] 取色用)
   private mapLevel: number = 0;
+  // X: 国家 0蜀/1魏/2吴；类型8/9的终阶机关效果会按国家分支变化。
+  private faction: number = 0;
   // 预览动画帧计数 (对应原版 a1019, 角标呼吸/不可建格闪烁)
   private previewFrame: number = 0;
   private onGoldSpent: ((gold: number) => void) | null = null;
@@ -212,6 +216,10 @@ export class TowerSystem {
     this.mapLevel = level;
   }
 
+  setFaction(faction: number): void {
+    this.faction = Math.max(0, Math.min(2, faction | 0));
+  }
+
   /** 注入原版 10Hz 的 a1019 视觉帧，渲染本身不再推进计数。 */
   setVisualFrame(frame: number): void {
     this.previewFrame = frame;
@@ -237,13 +245,25 @@ export class TowerSystem {
     tower.fireRate = stats.fireRate;
   }
 
-  /** 方向机关投射到建筑外侧的 3x3 格（原版 m1084）。 */
-  private projectedDeviceCells(tileX: number, tileY: number, orientation: number): { tx: number; ty: number }[] {
+  /**
+   * 方向机关投射到建筑外侧的格子（原版 m1084）。寒冰/滚油的常规命中区域只取
+   * 中间一排/列；突刺、擂木和断龙闸使用完整 3×3。
+   */
+  private projectedDeviceCells(
+    tileX: number,
+    tileY: number,
+    orientation: number,
+    centerStrip: boolean = false,
+  ): { tx: number; ty: number }[] {
     const spread = TOWER_DIR_SPREAD_M1084[orientation & 3];
     const result: { tx: number; ty: number }[] = [];
     const seen = new Set<string>();
     for (let i = 0; i < 3; i++) {
       for (let j = 0; j < 3; j++) {
+        if (centerStrip) {
+          const horizontal = (orientation & 3) === 0 || (orientation & 3) === 2;
+          if ((horizontal && i !== 1) || (!horizontal && j !== 1)) continue;
+        }
         const px = tileX * TILE_SIZE + (i << 4) * spread[0] + spread[2];
         const py = tileY * TILE_SIZE + (j << 4) * spread[1] + spread[3];
         const tx = px >> 4;
@@ -508,7 +528,12 @@ export class TowerSystem {
       const triggerRange = tower.range > 0 ? tower.range : half + TILE_SIZE;
       const directionalAttack = renderType === 2 || renderType === 6 || renderType === 8 || renderType === 9;
       const directionalCells = directionalAttack
-        ? new Set(this.projectedDeviceCells(tower.x, tower.y, tower.orientation).map(cell => `${cell.tx},${cell.ty}`))
+        ? new Set(this.projectedDeviceCells(
+          tower.x,
+          tower.y,
+          tower.orientation,
+          renderType === 8 || renderType === 9,
+        ).map(cell => `${cell.tx},${cell.ty}`))
         : null;
       let closestDist = directionalAttack ? Number.POSITIVE_INFINITY : triggerRange;
       let targetIdx = -1;
@@ -769,10 +794,6 @@ export class TowerSystem {
         }
       }
 
-      // 原版选中框按完整占地放大，范围圆心也位于建筑中心而非左上第一格。
-      if (this.selectedTower === tower) {
-        this.renderSelectedTowerFrame(tower, px, py);
-      }
     }
 
     // 绘制建造预览 (对应原版 am() case 1 行14719: 范围圈+逐格指示+角标+塔幻影)
@@ -823,12 +844,12 @@ export class TowerSystem {
     return drawn;
   }
 
-  /** 原版 am() case 0：四角框包裹完整占地，并以 10Hz 轻微向外呼吸。 */
-  private renderSelectedTowerFrame(tower: Tower, px: number, py: number): void {
+  /** 原版 am() case 0：四角框包裹完整占地；确认选中后才向外呼吸并显示范围。 */
+  private renderSelectedTowerFrame(tower: Tower, px: number, py: number, selected: boolean): void {
     const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(tower.type)] ?? 1;
     const size = footprint << 4;
     const center = footprint << 3;
-    if (tower.range > 0) {
+    if (selected && tower.range > 0) {
       this.renderer.setColor(0xffffff);
       const ctx = this.renderer.virtualContext;
       ctx.beginPath();
@@ -838,36 +859,98 @@ export class TowerSystem {
 
     const corner = this.spr('ui', 0);
     if (!corner) return;
-    const pulse = (this.previewFrame & 1) << 1;
+    const pulse = selected ? (this.previewFrame & 1) << 1 : 0;
     const pulseDirs: [number, number][] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
     for (let k = 0; k < 4; k++) {
       const cx = px + (size - 7) * CURSOR_CORNER_O1156[k][0] + pulseDirs[k][0] * pulse;
       const cy = py + (size - 7) * CURSOR_CORNER_O1156[k][1] + pulseDirs[k][1] * pulse;
       this.renderer.drawSpriteTransform(corner, k * 7, 0, 7, 7, cx, cy, 0);
     }
+
+    // ui_1 红色定位标记始终跟随建筑左上边缘，并以完整占地宽度居中。
+    const marker = this.spr('ui', 1);
+    if (marker) {
+      const bounce = (this.previewFrame & 1) << 1;
+      this.renderer.drawImage(marker, px + center - (marker.width >> 1), py - TILE_SIZE - bounce);
+    }
   }
 
   /**
-   * 原版对类型10额外使用 bu_43 绘制路径石块。这里显示装填后的朝向预告；
-   * 释放后的持久石块由 MapData 的 D1162 路径机关层统一绘制。
+   * 原版 c(int×6)：装填时使用 bu_43 只画一排 3 块；释放前两帧抬起石排，
+   * 第 2..4 帧使用 bu_44/45/46 播放落闸。释放后的完整 3×3 石阵由 D1162 持久绘制。
    */
   private renderGatePathStones(tower: Tower, offsetX: number, offsetY: number): boolean {
     const stone = this.spr('bu', 43);
     if (!stone) return false;
+    const orientation = tower.orientation & 3;
+    const [dirX, dirY] = TOWER_GATE_LOAD_DIR_S1117[orientation];
+    const [startX, startY] = TOWER_GATE_LOAD_OFF_T1118[orientation];
+    const baseX = offsetX + tower.x * TILE_SIZE;
+    const baseY = offsetY + tower.y * TILE_SIZE;
     let drawn = false;
-    for (const cell of this.projectedDeviceCells(tower.x, tower.y, tower.orientation)) {
-      if (this.mapData.getTerrain(cell.tx, cell.ty) >= 8) continue;
-      if (!tower.gateLoaded && tower.gateState !== 1) continue;
-      this.renderer.drawSpriteTransform(
-        stone,
-        0, 0, 15, 16,
-        offsetX + cell.tx * TILE_SIZE,
-        offsetY + cell.ty * TILE_SIZE,
-        0,
-      );
+
+    if (tower.gateLoaded) {
+      for (let i = 0; i < 3; i++) {
+        this.renderer.drawSpriteTransform(
+          stone, 0, 0, 15, 20,
+          baseX + startX + dirX * i * TILE_SIZE,
+          baseY + startY + dirY * i * TILE_SIZE,
+          0,
+        );
+      }
       drawn = true;
     }
+
+    if (tower.gateState === 1 && tower.gateTimer < 3) {
+      for (let i = 0; i < 3; i++) {
+        this.renderer.drawSpriteTransform(
+          stone, 0, 20, 15, 42,
+          baseX + startX + dirX * i * TILE_SIZE,
+          baseY + startY - 22 + dirY * i * TILE_SIZE,
+          0,
+        );
+      }
+      drawn = true;
+    }
+
+    if (tower.gateState === 1 && tower.gateTimer > 1 && tower.gateTimer < 5) {
+      drawn = this.renderGateFallFrame(tower, baseX, baseY, tower.gateTimer - 2) || drawn;
+    }
     return drawn;
+  }
+
+  /** bu_44/45/46 的三方向裁切帧，逐像素对应原版 c(int×6) 的 timer=2..4。 */
+  private renderGateFallFrame(tower: Tower, baseX: number, baseY: number, frame: number): boolean {
+    const orientation = tower.orientation & 3;
+    const rect = TOWER_GATE_FALL_RECTS_H1121[orientation]?.[frame];
+    if (!rect) return false;
+    const [src, length] = rect;
+    let img: HTMLImageElement | null = null;
+    for (let i = 0; i < 3; i++) {
+      switch (orientation) {
+        case 0:
+          img = this.spr('bu', 44);
+          if (img) this.renderer.drawSpriteTransform(img, 0, src, 16, length, baseX + i * TILE_SIZE, baseY - 37, 0);
+          break;
+        case 1: {
+          img = this.spr('bu', 45);
+          const [dx, dy] = TOWER_GATE_FALL_OFF_U1119[frame];
+          if (img) this.renderer.drawSpriteTransform(img, src, 0, length, 18, baseX + dx, baseY + dy + i * TILE_SIZE, 1);
+          break;
+        }
+        case 2:
+          img = this.spr('bu', 46);
+          if (img) this.renderer.drawSpriteTransform(img, 0, src, 15, length, baseX + i * TILE_SIZE, baseY + 30, 0);
+          break;
+        case 3: {
+          img = this.spr('bu', 45);
+          const [dx, dy] = TOWER_GATE_FALL_OFF_V1120[frame];
+          if (img) this.renderer.drawSpriteTransform(img, src, 0, length, 18, baseX + dx, baseY + dy + i * TILE_SIZE, 0);
+          break;
+        }
+      }
+    }
+    return img !== null;
   }
 
   /** 底部明细区使用的完整塔模型预览，复用战场的原版素材合成路径。 */
@@ -1354,8 +1437,8 @@ export class TowerSystem {
   /**
    * 滚油攻击态油渍 (对应原版 h(int×5) 行21857, y() case 9 的 entity[10]!=0 分支)
    * bu_39 (15x29帧, 帧=(a1019&3), H5 用 tower.frame&3); 格 Y 额外 -16 (a.java:21935)
-   * 原版按 m(entity[2],entity[3]) 判定画满 3×3 或单排; H5 简化为单排:
-   *   朝向 0/2 → 中间一行 3 格; 朝向 1/3 → 中间一列 3 格 (a.java:21873-21896)
+   * 原版按 m(entity[2],entity[3]) 判定画满 3×3 或单排：蜀国终阶（原版等级6）
+   * 为完整 3×3，其余朝向 0/2 → 中间一行，朝向 1/3 → 中间一列。
    */
   private renderOilSpread(tower: Tower, px: number, py: number): boolean {
     const orient = tower.orientation & 3;
@@ -1363,8 +1446,10 @@ export class TowerSystem {
     const img = this.spr('bu', 39);
     if (!img) return false;
     const frame = (tower.frame & 3) * 15;
-    const rows = orient === 0 || orient === 2 ? [1] : [0, 1, 2];
-    const cols = orient === 0 || orient === 2 ? [0, 1, 2] : [1];
+    const originalLevel = tower.level - 1;
+    const fullSpread = this.faction === 0 && originalLevel === 6;
+    const rows = fullSpread || orient === 1 || orient === 3 ? [0, 1, 2] : [1];
+    const cols = fullSpread || orient === 0 || orient === 2 ? [0, 1, 2] : [1];
     let drawn = false;
     for (const r of rows) {
       for (const c of cols) {
@@ -1604,9 +1689,32 @@ export class TowerSystem {
    * 选择塔
    */
   selectTower(tileX: number, tileY: number): Tower | null {
-    const tower = this.towers.find(t => this.occupiesTile(t, tileX, tileY));
+    const tower = this.getTowerAt(tileX, tileY);
     this.selectedTower = tower ?? null;
     return this.selectedTower;
+  }
+
+  /** 查找光标覆盖的塔，但不改变确认选择状态。 */
+  getTowerAt(tileX: number, tileY: number): Tower | null {
+    return this.towers.find(t => this.occupiesTile(t, tileX, tileY)) ?? null;
+  }
+
+  /**
+   * 在所有战场实体之后绘制建筑定位框。返回 false 表示该格没有塔，调用方应画普通 1 格框。
+   */
+  renderBuildingCursor(
+    tileX: number,
+    tileY: number,
+    offsetX: number,
+    offsetY: number,
+    selected: boolean,
+  ): boolean {
+    const tower = this.getTowerAt(tileX, tileY);
+    if (!tower) return false;
+    const px = offsetX + tower.x * TILE_SIZE;
+    const py = offsetY + tower.y * TILE_SIZE;
+    this.renderSelectedTowerFrame(tower, px, py, selected && this.selectedTower === tower);
+    return true;
   }
 
   /**
@@ -1786,7 +1894,8 @@ export class TowerSystem {
         strikeX: (td.x ?? 0) * TILE_SIZE,
         strikeY: (td.y ?? 0) * TILE_SIZE,
         gateLoaded: td.gateLoaded === true,
-        gateState: Math.max(0, Math.min(3, td.gateState ?? 0)),
+        // 旧版曾把释放完成错误地保存为 3（永久“已使用”）；原版完成后会回到待命，可再次装填。
+        gateState: td.gateState === 3 ? 0 : Math.max(0, Math.min(2, td.gateState ?? 0)),
         gateTimer: 0,
       };
       this.towers.push(tower);
@@ -1825,7 +1934,8 @@ export class TowerSystem {
     } else if (tower.gateState === 2) {
       tower.gateTimer++;
       if (tower.gateTimer > 9) {
-        tower.gateState = 3;
+        // 原版 ah() 会把动作状态恢复为 0；道路上的 3×3 石阵由 D1162 独立保留。
+        tower.gateState = 0;
         tower.gateTimer = 0;
         tower.attackAnim = 0;
       }

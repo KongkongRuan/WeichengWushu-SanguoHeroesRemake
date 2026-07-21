@@ -270,6 +270,7 @@ export class Game {
   private setupCallbacks(): void {
     // 科技树初始化 (默认蜀, 国家确认时更新)
     this.techTree.setFaction(Faction.SHU);
+    this.towerSystem.setFaction(Faction.SHU);
 
     this.enemySystem.setCallbacks(
       (gold) => {
@@ -358,6 +359,7 @@ export class Game {
       renderTowerPreview: (type, level, centerX, centerY) => {
         this.towerSystem.renderTowerPreview(type, level, centerX, centerY);
       },
+      deselectTower: () => this.towerSystem.deselectTower(),
       onTechBuilt: (techIndex) => {
         // 原版: 装置建成即 e1105 解锁两塔 + b1059 城堡部件长出
         this.castleRenderer.startPartAnimation(TECH_CASTLE_PART_H1060[techIndex] ?? 0);
@@ -751,29 +753,13 @@ export class Game {
     // 检查地图点击 (使用相机系统转换坐标)
     const tile = this.mapData.screenToTile(x, y);
 
-    // 将建筑方框移动到点击位置 (触屏支持, 对应原版 al() 中的 bN/bO 设置)
-    this.mapData.setBuildingBox(tile.tx, tile.ty);
-
-    // 获取建筑方框当前瓦片坐标 (点击后即为点击位置)
-    const boxTile = this.mapData.getBuildingBoxTile();
-
-    // 原版行14545-14607:
-    //   有塔(ay!=-1) → 塔操作栏 (j(2..7)); 可建格 e(bN,bO) → 建造栏 j(0);
-    //   我城格 g(bN,bO) → 科技栏 j(1); 否则 u1096=true (取消选择)
-    const tower = this.towerSystem.selectTower(boxTile.tx, boxTile.ty);
-    if (tower) {
-      // 点击已有塔: 底部塔操作栏 (升级/拆除/取消, 原版类别2)
-      this.buildBar.open(BAR_CAT_TOWER, tower);
-    } else if (this.mapData.isBuildableAt(boxTile.tx, boxTile.ty)) {
-      // 点击可建造位置: 底部建造栏 (原版类别0)
-      this.towerSystem.deselectTower();
-      this.buildBar.open(BAR_CAT_BUILD);
-    } else if (this.mapData.isOurCastle(boxTile.tx, boxTile.ty)) {
-      // 点击我方城池: 底部科技面板 (原版类别1, 任务B)
-      this.towerSystem.deselectTower();
-      this.buildBar.open(BAR_CAT_TECH);
+    // 触屏采用“首次点击定位、再次点击确认”：首次点击只让红框悬停并按建筑占地放大，
+    // 不立即弹栏；再次点击同一格才等价于键盘 Enter。这样既避免误操作，也保留软键确认入口。
+    const previous = this.mapData.getBuildingBoxTile();
+    if (tile.tx === previous.tx && tile.ty === previous.ty) {
+      this.openBarForBoxTile();
     } else {
-      // 不可建造且无塔: 取消选择 (对应原版 u1096=true)
+      this.mapData.setBuildingBox(tile.tx, tile.ty);
       this.towerSystem.deselectTower();
     }
   }
@@ -1196,6 +1182,7 @@ export class Game {
         this.cardAb = (320 - COUNTRY_PANEL_H - 56) >> 1;
         // 国家落到实处: 传入 TechTree (蜀0/魏1/吴2 与 Faction 枚举一致)
         this.techTree.setFaction(this.factionX as Faction);
+        this.towerSystem.setFaction(this.factionX);
         this.state = GameState.UPGRADE_SELECT;
         break;
       case 'cancel':
@@ -1544,6 +1531,7 @@ export class Game {
     this.battleAN = this.currentLevel >= 0 && this.currentLevel <= 8 ? this.currentLevel : 0;
     this.k1029 = this.gameModeT === 1;
     this.techTree.setFaction(this.factionX as Faction);
+    this.towerSystem.setFaction(this.factionX);
     // 恢复科技树。新存档把字段放在根对象，旧版则可能嵌在 data.tech；
     // 两种格式都兼容，避免读档后升级效果和武将觉醒状态丢失。
     const savedTech = data.tech ?? {
@@ -2846,11 +2834,6 @@ export class Game {
     // 渲染双方城池 (对应原版 ak() 行14443-14448: m(aK,aL,0) 我城, m(aI,aJ,1) 敌城)
     this.castleRenderer.render();
 
-    // 普通模式显示 1 格原版定位框；选位模式由 TowerSystem 按完整占地绘制。
-    if (!this.towerSystem.isBuildMode && !this.towerSystem.hasSelectedTower) {
-      this.mapData.renderBuildingBox();
-    }
-
     // 渲染路径高亮 (建造模式)
     if (this.towerSystem.isBuildMode) {
       this.mapData.renderPathOverlay();
@@ -2861,6 +2844,22 @@ export class Game {
 
     // 渲染敌人 (EnemySystem 内部应用相机偏移)
     this.enemySystem.render();
+
+    // 普通定位框最后绘制，确保不会再被建筑或敌人模型覆盖。光标经过建筑时仅按完整
+    // 占地放大；只有 Enter/二次点击打开塔操作栏后，才显示选中呼吸与攻击范围。
+    if (!this.towerSystem.isBuildMode) {
+      const box = this.mapData.getBuildingBoxTile();
+      const selected = this.buildBar.isOpen && this.buildBar.category === BAR_CAT_TOWER;
+      if (!this.towerSystem.renderBuildingCursor(
+        box.tx,
+        box.ty,
+        -this.mapData.cameraX,
+        -this.mapData.cameraY + MAP_TOP_BAR_H,
+        selected,
+      )) {
+        this.mapData.renderBuildingBox();
+      }
+    }
 
     // 渲染UI
     this.renderTopBar();

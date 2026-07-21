@@ -6,6 +6,10 @@ import {
   linearLevelValue,
   originalDemolishRefund,
 } from '../src/core/Timing';
+import {
+  TOWER_GATE_LOAD_DIR_S1117,
+  TOWER_GATE_LOAD_OFF_T1118,
+} from '../src/data/gameData';
 
 function countLogicSteps(refreshRate: number, seconds: number, speed: number = 1): number {
   const clock = new FixedStepClock();
@@ -79,4 +83,16 @@ test('塔属性与拆除返还使用原版线性公式', () => {
   assert.equal(linearLevelValue([20, -2], 6), 10);
   assert.equal(originalDemolishRefund(20, [10, 2], 1), 10);
   assert.equal(originalDemolishRefund(20, [10, 2], 3), 21);
+});
+
+test('断龙闸装填预览始终是沿朝向的一排三块石头', () => {
+  const origin = { x: 100, y: 80 };
+  const positions = TOWER_GATE_LOAD_DIR_S1117.map(([dx, dy], orientation) => {
+    const [ox, oy] = TOWER_GATE_LOAD_OFF_T1118[orientation];
+    return [0, 1, 2].map(i => [origin.x + ox + dx * i * 16, origin.y + oy + dy * i * 16]);
+  });
+  assert.deepEqual(positions[0], [[101, 85], [117, 85], [133, 85]]);
+  assert.deepEqual(positions[1], [[129, 75], [129, 91], [129, 107]]);
+  assert.deepEqual(positions[2], [[101, 107], [117, 107], [133, 107]]);
+  assert.deepEqual(positions[3], [[101, 75], [101, 91], [101, 107]]);
 });

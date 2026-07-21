@@ -88,6 +88,8 @@ export interface BuildBarHost {
   getDemolishRefund(tower: Tower): number;
   /** 在明细区按原版素材层合成完整塔模型。 */
   renderTowerPreview(type: number, level: number, centerX: number, centerY: number): void;
+  /** 栏完全关闭后清除“已选中”状态；地图悬停框不依赖该状态。 */
+  deselectTower(): void;
   /** 装置建成回调 (提示/存档等) */
   onTechBuilt(techIndex: number): void;
 }
@@ -270,6 +272,8 @@ export class BuildBarSystem {
       if (this.au === 0 && this.av === 0) {
         const enterPlacement = this.aw === 3;
         this.aw = 0;
+        this.ay = null;
+        this.host?.deselectTower();
         if (enterPlacement) {
           // 原版 K() case 3: bF=1 + a(13) 进入建造选位
           this.host?.enterPlacement(this.bw);
