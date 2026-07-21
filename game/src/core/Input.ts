@@ -25,6 +25,7 @@ export class InputSystem {
   private pressStartX: number = 0;
   private pressStartY: number = 0;
   private isPressed: boolean = false;
+  private isDragging: boolean = false;
   private longPressThreshold: number = 500; // ms
   private tapThreshold: number = 10; // pixels
 
@@ -75,7 +76,9 @@ export class InputSystem {
     });
 
     this.canvas.addEventListener('mouseleave', () => {
+      if (this.isPressed) this.releaseCallback?.(this.lastX, this.lastY);
       this.isPressed = false;
+      this.isDragging = false;
     });
   }
 
@@ -84,7 +87,10 @@ export class InputSystem {
     this.pressStartTime = Date.now();
     this.pressStartX = pos.x;
     this.pressStartY = pos.y;
+    this.lastX = pos.x;
+    this.lastY = pos.y;
     this.isPressed = true;
+    this.isDragging = false;
 
     // 长按检测
     setTimeout(() => {
@@ -108,6 +114,11 @@ export class InputSystem {
     const pos = this.renderer.screenToLogical(clientX, clientY);
     this.lastX = pos.x;
     this.lastY = pos.y;
+    if (!this.isDragging) {
+      const dist = Math.hypot(pos.x - this.pressStartX, pos.y - this.pressStartY);
+      if (dist < this.tapThreshold) return;
+      this.isDragging = true;
+    }
     this.moveCallback?.(pos.x, pos.y);
   }
 
@@ -122,11 +133,12 @@ export class InputSystem {
     const duration = Date.now() - this.pressStartTime;
 
     // 如果是轻触 (短时间 + 小位移)
-    if (dist < this.tapThreshold && duration < this.longPressThreshold) {
+    if (!this.isDragging && dist < this.tapThreshold && duration < this.longPressThreshold) {
       this.tapCallback?.(pos.x, pos.y);
     }
 
     this.releaseCallback?.(pos.x, pos.y);
+    this.isDragging = false;
   }
 
   /**

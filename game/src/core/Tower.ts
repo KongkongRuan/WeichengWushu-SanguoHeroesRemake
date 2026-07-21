@@ -1,10 +1,9 @@
 /**
  * 塔系统 - 塔放置、攻击、升级
  * 还原原版 bu_* 精灵图和塔数值
- * 塔类型对照原版 TOWER_NAMES:
- *   0=石灰瓶 1=断龙闸 2=突刺 3=擂木 4=烟火
- *   5=投石 6=麻痹矢 7=沸水 8=寒冰 9=滚油
- *   10=石灰瓶装置(顶点) 11=断龙闸装置 12=突刺装置
+ * 塔类型直接使用原版编号（不再经过旧 H5 重排）:
+ *   0=弓手塔 1=石灰瓶 2=突刺 3=烟火 4=麻痹矢
+ *   5=寒冰 6=擂木 7=投石 8=沸水 9=滚油 10=断龙闸
  */
 import { Renderer } from './Renderer';
 import { MapData } from './MapData';
@@ -12,7 +11,10 @@ import { Enemy, EnemyState } from './Enemy';
 import { SpriteLoader } from './SpriteLoader';
 import {
   TILE_SIZE, TOWER_DATA_T, TOWER_DATA_U,
+  TOWER_UPGRADE_COST_R1101, TOWER_DAMAGE_S1102,
   TOWER_ANIM_W1123, TOWER_DRAW_POINTS_I1122, TOWER_ORIENT_Y1125,
+  TOWER_MODEL_RECTS_F1112, TOWER_MODEL_POINTS_G1113, TOWER_MODEL_PART_COUNTS_Q1114,
+  TOWER_DEVICE_MODEL_OFF_R1115,
   TOWER5_FRAME_YOFF_X1124, TOWER_BASE_I1142, TOWER_BASE_OFF_K1141,
   TOWER_DECOR_L1143, TOWER_BASE_OFFSETS_J1139, TOWER_LEVEL_FRAME_D1135,
   TOWER_ANCHOR_O1098,
@@ -23,11 +25,11 @@ import {
   TOWER_DEVICE_BODY_E1136, TOWER_DEVICE_ORIENT_F1137, TOWER_DEVICE_FLAG_G1138,
   TOWER_RANGE_T1103, RANGE_CIRCLE_COLORS_L1116, BUILD_BAD_COLORS_Q1158,
   CURSOR_CORNER_O1156, CURSOR_BRACKET_Q1159,
-  MAP_TOP_BAR_H, MAP_VIEW_H,
-  ARCHER_TOWER_TYPE,
+  TOWER_FOOTPRINT_O1098,
 } from '../data/gameData';
 import { TOWER_NAMES, TOWER_DESCRIPTIONS, HEROES, Hero } from '../data/heroes';
 import type { TechTreeSystem } from './TechTree';
+import { linearLevelValue } from './Timing';
 
 // 武将ID到武将对象的映射 (避免循环依赖, 在模块加载时构建)
 const HEROES_MAP: Record<number, Hero> = {};
@@ -35,13 +37,11 @@ HEROES.forEach(h => { HEROES_MAP[h.id] = h; });
 
 // 攻击状态持续逻辑帧数 (10FPS节拍; 原版 c1107[4]==6 攻击态, H5用计时近似)
 const TOWER_ATTACK_ANIM_TICKS = 14;
-// 动画节拍: 6个60fps帧 = 100ms (对应原版 ah() 行13890 每逻辑帧推进 entity[7])
-const ANIM_TICK_FRAMES = 6;
 
 export interface Tower {
   x: number;          // 瓦片X坐标
   y: number;          // 瓦片Y坐标
-  type: number;       // 塔类型 (0-12, 对应原版TOWER_NAMES)
+  type: number;       // 原版塔类型 (0-10)
   level: number;      // 塔等级
   damage: number;     // 攻击力
   range: number;      // 攻击范围
@@ -60,6 +60,8 @@ export interface Tower {
   frame: number;       // 动画帧 (对应原版 entity[7], 按 w1123[type] 序列推进)
   orientation: number; // 朝向 0=上 1=右 2=下 3=左 (对应原版 entity[5])
   attackAnim: number;  // 攻击状态剩余逻辑帧 (>0 即攻击态, 对应原版 entity[4]==6)
+  strikeX: number;      // 原版 entity[11]：最近一次攻击的地图像素 X
+  strikeY: number;      // 原版 entity[12]：最近一次攻击的地图像素 Y
 }
 
 export class TowerSystem {
@@ -88,31 +90,23 @@ export class TowerSystem {
   private buildCostProvider: ((h5Type: number) => number | null) | null = null;
   // 拆除返还 (原版 b(int) 行15818; 返回null=用默认公式)
   private demolishRefundProvider: ((tower: Tower) => number | null) | null = null;
-  // 动画节拍累加器 (对应原版 10FPS 逻辑帧推进 entity[7])
-  private animAcc: number = 0;
   // 精灵图缓存 (避免 getByPrefix 每帧线性查找)
   private spriteCache: Map<string, HTMLImageElement | null> = new Map();
 
-  // 塔配置 - 使用原版塔名称和数值
-  // 类型0-9为基础塔, 10-12为装置(升级顶点)
+  // 塔配置直接按原版 type 0-10 编号。伤害/范围/攻击间隔的初值分别来自
+  // s1102/t1103/u1104；建造费运行时由 q1100 provider 注入。
   private towerConfigs: Record<number, { name: string; cost: number; damage: number; range: number; fireRate: number; color: number; effect: number }> = {
-    0: { name: TOWER_NAMES[0]  || '石灰瓶', cost: 50,  damage: 10, range: 64, fireRate: 30, color: 0x8B4513, effect: 0 },
-    1: { name: TOWER_NAMES[1]  || '断龙闸', cost: 100, damage: 30, range: 80, fireRate: 60, color: 0x696969, effect: 0 },
-    2: { name: TOWER_NAMES[2]  || '突刺',   cost: 80,  damage: 20, range: 72, fireRate: 45, color: 0x4169E1, effect: 0 },
-    3: { name: TOWER_NAMES[3]  || '擂木',   cost: 70,  damage: 15, range: 60, fireRate: 40, color: 0x00CED1, effect: 0 },
-    4: { name: TOWER_NAMES[4]  || '烟火',   cost: 120, damage: 40, range: 70, fireRate: 50, color: 0xFF4500, effect: 4 },
-    5: { name: TOWER_NAMES[5]  || '投石',   cost: 90,  damage: 35, range: 76, fireRate: 55, color: 0x8B4513, effect: 0 },
-    6: { name: TOWER_NAMES[6]  || '麻痹矢', cost: 110, damage: 18, range: 68, fireRate: 35, color: 0x9370DB, effect: 1 },
-    7: { name: TOWER_NAMES[7]  || '沸水',   cost: 85,  damage: 25, range: 65, fireRate: 42, color: 0x1E90FF, effect: 4 },
-    8: { name: TOWER_NAMES[8]  || '寒冰',   cost: 95,  damage: 22, range: 70, fireRate: 48, color: 0x00CED1, effect: 2 },
-    9: { name: TOWER_NAMES[9]  || '滚油',   cost: 130, damage: 45, range: 75, fireRate: 58, color: 0xFF6347, effect: 4 },
-    // 装置类型 (分支顶点)
-    10: { name: TOWER_NAMES[10] || '石灰瓶装置', cost: 200, damage: 60,  range: 90,  fireRate: 25, color: 0xFFD700, effect: 0 },
-    11: { name: TOWER_NAMES[11] || '断龙闸装置', cost: 250, damage: 80,  range: 95,  fireRate: 30, color: 0xFFD700, effect: 0 },
-    12: { name: TOWER_NAMES[12] || '突刺装置',   cost: 300, damage: 100, range: 100, fireRate: 20, color: 0xFFD700, effect: 0 },
-    // 弓手塔 (原版塔0, b1015[2]"基础远程攻击单位", q1100[0]=20金, e1105[0]初始解锁)
-    // 渲染同原版塔0 (瓶类基座 renderBottleBase 组0 + t0 攻击动画, 见 spriteType 映射)
-    19: { name: '弓手塔', cost: 20, damage: 10, range: 64, fireRate: 30, color: 0x8B4513, effect: 0 },
+    0:  { name: '弓手塔', cost: 20, damage: 15, range: 64, fireRate: 20, color: 0xC8D8E8, effect: 0 },
+    1:  { name: '石灰瓶', cost: 30, damage: 10, range: 48, fireRate: 30, color: 0x78C878, effect: 3 },
+    2:  { name: '突刺',   cost: 40, damage: 30, range: 0,  fireRate: 60, color: 0xD8D8D8, effect: 0 },
+    3:  { name: '烟火',   cost: 50, damage: 15, range: 64, fireRate: 25, color: 0xFF7040, effect: 4 },
+    4:  { name: '麻痹矢', cost: 40, damage: 15, range: 56, fireRate: 30, color: 0xD0B050, effect: 1 },
+    5:  { name: '寒冰',   cost: 80, damage: 60, range: 64, fireRate: 30, color: 0x70D8F0, effect: 2 },
+    6:  { name: '擂木',   cost: 40, damage: 20, range: 0,  fireRate: 60, color: 0x986838, effect: 0 },
+    7:  { name: '投石',   cost: 50, damage: 30, range: 48, fireRate: 30, color: 0xA08060, effect: 0 },
+    8:  { name: '沸水',   cost: 60, damage: 40, range: 64, fireRate: 80, color: 0x50A8E0, effect: 0 },
+    9:  { name: '滚油',   cost: 80, damage: 60, range: 64, fireRate: 100, color: 0x604020, effect: 4 },
+    10: { name: '断龙闸', cost: 30, damage: 50, range: 0,  fireRate: 0,  color: 0x90A0A8, effect: 0 },
   };
 
   constructor(renderer: Renderer, mapData: MapData) {
@@ -214,16 +208,40 @@ export class TowerSystem {
     this.mapLevel = level;
   }
 
+  /** 注入原版 10Hz 的 a1019 视觉帧，渲染本身不再推进计数。 */
+  setVisualFrame(frame: number): void {
+    this.previewFrame = frame;
+  }
+
+  /** s1102/t1103/u1104 的基础值 + 每级增量公式（H5 level 为 1 起）。 */
+  private originalStats(type: number, level: number): { damage: number; range: number; fireRate: number } {
+    const originalType = this.spriteType(type);
+    const [damageBase, damageStep] = TOWER_DAMAGE_S1102[originalType] ?? [0, 0];
+    const [rangeBase, rangeStep] = TOWER_DATA_T[originalType] ?? [0, 0];
+    const [rateBase, rateStep] = TOWER_DATA_U[originalType] ?? [0, 0];
+    return {
+      damage: Math.max(0, linearLevelValue([damageBase, damageStep], level)),
+      range: Math.max(0, linearLevelValue([rangeBase, rangeStep], level)),
+      fireRate: Math.max(0, linearLevelValue([rateBase, rateStep], level)),
+    };
+  }
+
+  private applyOriginalStats(tower: Tower): void {
+    const stats = this.originalStats(tower.type, tower.level);
+    tower.damage = stats.damage;
+    tower.range = stats.range;
+    tower.fireRate = stats.fireRate;
+  }
+
   /**
    * 放置塔
    * 任务B-3: 接入原版科技建筑门禁 (e1105), 未解锁禁止建造 (原版 M() case 0 行8373-8389)
    * 任务A: 建造费改用原版 q1100 (经 buildCostProvider), 与建造栏显示价格一致
    */
   placeTower(tileX: number, tileY: number, type: number): boolean {
-    if (!this.mapData.isBuildableAt(tileX, tileY)) return false;
-
-    // 检查是否已有塔
-    if (this.towers.some(t => t.x === tileX && t.y === tileY)) return false;
+    const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(type)] ?? 1;
+    // 原版塔按 2x2/3x3 占地，不能只检查锚点一格。
+    if (!this.isPlacementAreaClear(tileX, tileY, type)) return false;
 
     const config = this.towerConfigs[type];
     if (!config) return false;
@@ -236,14 +254,15 @@ export class TowerSystem {
     const actualCost = this.techTree?.isReloadHalf() ? Math.floor(baseCost / 2) : baseCost;
     if (this.gold < actualCost) return false;
 
+    const stats = this.originalStats(type, 1);
     const tower: Tower = {
       x: tileX,
       y: tileY,
       type,
       level: 1,
-      damage: config.damage,
-      range: config.range,
-      fireRate: config.fireRate,
+      damage: stats.damage,
+      range: stats.range,
+      fireRate: stats.fireRate,
       cooldown: 0,
       target: -1,
       angle: 0,
@@ -257,9 +276,16 @@ export class TowerSystem {
       frame: 0,
       orientation: 0,
       attackAnim: 0,
+      strikeX: tileX * TILE_SIZE,
+      strikeY: tileY * TILE_SIZE,
     };
 
     this.towers.push(tower);
+    for (let dx = 0; dx < footprint; dx++) {
+      for (let dy = 0; dy < footprint; dy++) {
+        this.mapData.occupyBuildTile(tileX + dx, tileY + dy);
+      }
+    }
     this.gold -= actualCost;
     this.onGoldSpent?.(actualCost);
     return true;
@@ -268,23 +294,9 @@ export class TowerSystem {
   /**
    * 升级塔 - 集成科技树系统
    * 还原原版 j(I I I)V 升级逻辑
-   * 弓手塔(19)不在 TechTree 分支中: 走原版备用公式 (r1101[0]=(10,2), a(int,byte[],int) 行10095)
+   * 所有原版塔都走 TechTree 的 r1101 升级费用公式。
    */
   upgradeTower(tower: Tower): boolean {
-    // 弓手塔备用升级 (原版塔0无科技分支, 费用=10+2*(等级-1), 上限5级 见 d(int) 行19056 var9<5)
-    if (tower.type === ARCHER_TOWER_TYPE) {
-      if (tower.level >= 5) return false;
-      const cost = 10 + 2 * (tower.level - 1);
-      if (this.gold < cost) return false;
-      tower.level++;
-      tower.damage = Math.floor(tower.damage * 1.5);
-      tower.range = Math.floor(tower.range * 1.1);
-      tower.fireRate = Math.max(10, Math.floor(tower.fireRate * 0.85));
-      this.gold -= cost;
-      this.onGoldSpent?.(cost);
-      return true;
-    }
-
     // 使用科技树系统检查是否可升级
     if (this.techTree) {
       const check = this.techTree.canUpgradeTech(tower);
@@ -293,30 +305,25 @@ export class TowerSystem {
       const result = this.techTree.upgradeTech(tower);
       if (!result.success) return false;
 
-      // 应用科技效果到塔属性
+      // 原版属性不是乘法成长，而是各自数组的“基础值 + 每级增量”。
       tower.level++;
-      tower.damage = Math.floor(tower.damage * 1.5);
-      tower.range = Math.floor(tower.range * 1.1);
-      tower.fireRate = Math.max(10, Math.floor(tower.fireRate * 0.85));
+      this.applyOriginalStats(tower);
 
       // 检查武将觉醒
       if (result.hero) {
         tower.heroId = result.hero.id;
-        // 装置塔获得额外加成
-        tower.damage = Math.floor(tower.damage * 2);
-        tower.range = Math.floor(tower.range * 1.5);
         this.onHeroAwakened?.(result.hero, tower);
       }
       return true;
     }
 
     // 无科技树时的备用逻辑
-    const cost = 50 * tower.level;
+    if (tower.level >= 6) return false;
+    const [baseCost, stepCost] = TOWER_UPGRADE_COST_R1101[this.spriteType(tower.type)] ?? [50, 50];
+    const cost = baseCost + stepCost * Math.max(0, tower.level - 1);
     if (this.gold < cost) return false;
     tower.level++;
-    tower.damage = Math.floor(tower.damage * 1.5);
-    tower.range = Math.floor(tower.range * 1.2);
-    tower.fireRate = Math.max(10, Math.floor(tower.fireRate * 0.8));
+    this.applyOriginalStats(tower);
     this.gold -= cost;
     this.onGoldSpent?.(cost);
     return true;
@@ -331,15 +338,47 @@ export class TowerSystem {
       ?? Math.floor(this.towerConfigs[tower.type].cost * tower.level * 0.7);
     this.gold += refund;
     this.onGoldSpent?.(-refund);
+    const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(tower.type)] ?? 1;
+    for (let dx = 0; dx < footprint; dx++) {
+      for (let dy = 0; dy < footprint; dy++) {
+        this.mapData.releaseBuildTile(tower.x + dx, tower.y + dy);
+      }
+    }
     this.towers = this.towers.filter(t => t !== tower);
     this.selectedTower = null;
   }
 
   /**
-   * 精灵渲染类型映射 (弓手塔19 → 原版塔0的渲染路径: 瓶类基座组0 + t0攻击动画)
+   * 精灵渲染类型映射。19 仅作为旧存档中弓手塔的兼容别名，正常运行时直接使用原版 0-10。
    */
   private spriteType(type: number): number {
-    return type === ARCHER_TOWER_TYPE ? 0 : type;
+    // 新存档直接使用原版编号；19 仅作为旧版本存档的兼容别名。
+    return type === 19 ? 0 : type;
+  }
+
+  /** 判断某塔是否覆盖指定地图格。 */
+  private occupiesTile(tower: Tower, tx: number, ty: number): boolean {
+    const fp = TOWER_FOOTPRINT_O1098[this.spriteType(tower.type)] ?? 1;
+    return tx >= tower.x && tx < tower.x + fp && ty >= tower.y && ty < tower.y + fp;
+  }
+
+  /** 检查一个塔的完整占地区域，供实际建造和移动预览共用。 */
+  private isPlacementAreaClear(tileX: number, tileY: number, type: number): boolean {
+    const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(type)] ?? 1;
+    for (let dx = 0; dx < footprint; dx++) {
+      for (let dy = 0; dy < footprint; dy++) {
+        const tx = tileX + dx;
+        const ty = tileY + dy;
+        if (!this.mapData.isBuildableAt(tx, ty)) return false;
+        if (this.towers.some(t => this.occupiesTile(t, tx, ty))) return false;
+      }
+    }
+    return true;
+  }
+
+  /** 当前建造幻影覆盖的完整区域是否可放置。 */
+  canBuildAtCurrentPosition(): boolean {
+    return this.isPlacementAreaClear(this.buildX, this.buildY, this.pendingBuildType);
   }
 
   /**
@@ -349,13 +388,8 @@ export class TowerSystem {
     // 新增: 更新 debuff 计时器
     this.updateDebuffs();
 
-    // 动画节拍: 每 ANIM_TICK_FRAMES 个渲染帧 = 100ms 逻辑帧
-    // (对应原版 ah() 行13890: 每逻辑帧推进所有实体 entity[7] 动画帧)
-    this.animAcc++;
-    if (this.animAcc >= ANIM_TICK_FRAMES) {
-      this.animAcc = 0;
-      this.tickAnim();
-    }
+    // Game 已按原版 100ms 固定逻辑帧调用本方法，动画每次直接推进一次。
+    this.tickAnim();
 
     // 获取全局科技加成
     const globalAtkBonus = this.techTree?.getGlobalAtkBonus() ?? 0;
@@ -367,10 +401,15 @@ export class TowerSystem {
         continue;
       }
 
-      // 查找目标
-      const tx = offsetX + tower.x * TILE_SIZE + TILE_SIZE / 2;
-      const ty = offsetY + tower.y * TILE_SIZE + TILE_SIZE / 2;
-      let closestDist = tower.range;
+      // 查找目标。实体坐标是占地左上角，瞄准点与模型一样使用 o1098*8 的中心锚点。
+      const renderType = this.spriteType(tower.type);
+      const half = (TOWER_ANCHOR_O1098[renderType] ?? 2) << 3;
+      const tx = offsetX + tower.x * TILE_SIZE + half;
+      const ty = offsetY + tower.y * TILE_SIZE + half;
+      // 突刺/擂木/断龙闸等近身机关在原版范围表中为 0，它们靠敌人进入机关
+      // 占地附近触发；若直接把 0 交给通用距离索敌，攻击动画永远不会启动。
+      const triggerRange = tower.range > 0 ? tower.range : half + TILE_SIZE;
+      let closestDist = triggerRange;
       let targetIdx = -1;
 
       for (let i = 0; i < enemies.length; i++) {
@@ -392,6 +431,8 @@ export class TowerSystem {
         const ey = offsetY + target.y;
         tower.angle = Math.atan2(ey - ty, ex - tx);
         tower.target = targetIdx;
+        tower.strikeX = target.x;
+        tower.strikeY = target.y;
 
         // 计算实际伤害 (全局攻击加成 + 武将加成 + 科技效果)
         // 新增: 使用 TechTree 的 applyEffectsToTowerDamage 方法应用所有伤害相关科技
@@ -409,24 +450,29 @@ export class TowerSystem {
         if (tower.heroId >= 0) {
           actualDamage *= 1.5; // 武将觉醒后额外50%伤害
         }
-        target.hp -= Math.floor(actualDamage);
 
-        // 应用特殊效果 (塔自身效果)
-        if (tower.effectType > 0 && target) {
-          this.applyTowerEffect(target, tower.effectType, tower.level);
-          // ====== 新增: 效果0 (attackTimeUp) - 攻击时间延长 ======
-          // 延长塔特殊效果(麻痹/冰冻/中毒/火焰/减速)的持续时间
-          if (this.techTree) {
-            const attackTimeBonus = this.techTree.getAttackTimeBonus();
-            if (attackTimeBonus > 0 && target.timer > 0) {
-              target.timer = Math.floor(target.timer * (1 + attackTimeBonus));
+        // 近身机关和范围装置按原版区域触发，同一逻辑帧可命中范围内多个敌人。
+        const areaAttack = tower.type === 2 || tower.type === 6 ||
+          tower.type === 8 || tower.type === 9 || tower.type === 10;
+        const victims = areaAttack ? enemies.filter(enemy => {
+          if (enemy.state === EnemyState.DYING || enemy.state === EnemyState.SETTLE) return false;
+          return Math.hypot(offsetX + enemy.x - tx, offsetY + enemy.y - ty) < triggerRange;
+        }) : [target];
+
+        for (const victim of victims) {
+          victim.hp -= Math.floor(actualDamage);
+          if (tower.effectType > 0) {
+            this.applyTowerEffect(victim, tower.effectType, tower.level);
+            if (this.techTree) {
+              const attackTimeBonus = this.techTree.getAttackTimeBonus();
+              if (attackTimeBonus > 0 && victim.timer > 0) {
+                victim.timer = Math.floor(victim.timer * (1 + attackTimeBonus));
+              }
             }
           }
-        }
-
-        // 新增: 应用科技树的范围效果 (效果4/5/10/11/15/16)
-        if (this.techTree) {
-          this.techTree.applyAoeEffectsToEnemy(target, tower.type, tower.level);
+          if (this.techTree) {
+            this.techTree.applyAoeEffectsToEnemy(victim, tower.type, tower.level);
+          }
         }
 
         // 攻速受全局加成影响
@@ -484,18 +530,22 @@ export class TowerSystem {
         break;
       case 2: // 冰冻
         enemy.effect = 2;
-        enemy.speed = Math.max(0.1, enemy.speed * 0.5);
+        enemy.timer = Math.max(enemy.timer, towerLevel * 8);
         break;
       case 3: // 中毒
         enemy.effect = 3;
+        enemy.timer = Math.max(enemy.timer, towerLevel * 10);
         enemy.hp -= towerLevel * 2;
         break;
       case 4: // 火焰
         enemy.effect = 4;
+        enemy.timer = Math.max(enemy.timer, towerLevel * 8);
         enemy.hp -= towerLevel * 3;
         break;
       case 5: // 减速
-        enemy.speed = Math.max(0.2, enemy.speed * 0.7);
+        enemy.effect = 5;
+        enemy.slowScale = Math.min(enemy.slowScale, 0.7);
+        enemy.timer = Math.max(enemy.timer, towerLevel * 10);
         break;
       default:
         break;
@@ -564,6 +614,9 @@ export class TowerSystem {
       let spriteDrawn = false;
       if (this.spriteLoader) {
         spriteDrawn = this.renderBase(tower, px, py);
+        // 原版主模型层：t{type}_0。此前遗漏该层，导致截图中的弓手塔/突刺
+        // 只剩 bu 图集的攻击效果，外观完全不像原版。
+        spriteDrawn = this.renderModel(tower, px, py) || spriteDrawn;
         spriteDrawn = this.renderAttackAnim(tower, px, py) || spriteDrawn;
       }
 
@@ -625,7 +678,6 @@ export class TowerSystem {
 
     // 绘制建造预览 (对应原版 am() case 1 行14719: 范围圈+逐格指示+角标+塔幻影)
     if (this.buildMode) {
-      this.previewFrame++;
       this.renderBuildPreview(offsetX, offsetY);
     }
   }
@@ -633,6 +685,63 @@ export class TowerSystem {
   // ============================================================
   // 原版塔渲染: 基座层 + 攻击动画层
   // ============================================================
+
+  /**
+   * 绘制原版 t0_0..t10_0 主模型。
+   * a.java 的 ag() 先画 y() 的 bu 效果层，再按 f1112/g1113/q1114
+   * 拼出 t 图集主模型，最后才叠加攻击动画。
+   */
+  private renderModel(tower: Tower, px: number, py: number): boolean {
+    const type = this.spriteType(tower.type);
+    const img = this.spr(`t${type}`, 0);
+    const rects = TOWER_MODEL_RECTS_F1112[type];
+    const groups = TOWER_MODEL_POINTS_G1113[type];
+    if (!img || !rects || !groups) return false;
+
+    const level0 = Math.max(0, Math.min(5, tower.level - 1));
+    const groupIndex = Math.min(groups.length - 1, level0 >> 1);
+    const points = groups[groupIndex] ?? [];
+    const count = TOWER_MODEL_PART_COUNTS_Q1114[type]?.[groupIndex] ?? Math.floor(points.length / 3);
+    const [deviceDx, deviceDy] = type === 10
+      ? (TOWER_DEVICE_MODEL_OFF_R1115[tower.orientation & 3] ?? [0, 0])
+      : [0, 0];
+    // g1113 的 dx/dy 均以实体中心为原点；塔坐标自身是占地区域左上角。
+    const half = (TOWER_ANCHOR_O1098[type] ?? 2) << 3;
+    const ax = px + half;
+    const ay = py + half;
+
+    let drawn = false;
+    for (let i = 0; i < count; i++) {
+      const base = i * 3;
+      const rectIndex = points[base] ?? -1;
+      const rect = rects[rectIndex];
+      if (!rect) continue;
+      const dx = (points[base + 1] ?? 0) + deviceDx;
+      const dy = (points[base + 2] ?? 0) + deviceDy;
+      this.renderer.drawSpriteTransform(img, rect[0], rect[1], rect[2], rect[3], ax + dx, ay + dy, 0);
+      drawn = true;
+    }
+    return drawn;
+  }
+
+  /** 底部明细区使用的完整塔模型预览，复用战场的原版素材合成路径。 */
+  renderTowerPreview(type: number, level: number, centerX: number, centerY: number): void {
+    const stats = this.originalStats(type, level);
+    const ghost: Tower = {
+      x: 0, y: 0, type, level,
+      damage: stats.damage, range: stats.range, fireRate: stats.fireRate,
+      cooldown: 0, target: -1, angle: 0, heroId: -1,
+      effectType: this.towerConfigs[type]?.effect ?? 0,
+      hp: 1, maxHp: 1, debuffTimer: 0,
+      frame: 0, orientation: 0, attackAnim: 0,
+      strikeX: 0, strikeY: 0,
+    };
+    const half = (TOWER_ANCHOR_O1098[this.spriteType(type)] ?? 2) << 3;
+    const px = centerX - half;
+    const py = centerY - half;
+    this.renderBase(ghost, px, py);
+    this.renderModel(ghost, px, py);
+  }
 
   /**
    * 塔基座层 (对应原版 y(int) 行26281, 按实体类型 entity[2] 分派)
@@ -651,7 +760,7 @@ export class TowerSystem {
    */
   private renderBase(tower: Tower, px: number, py: number): boolean {
     const type = this.spriteType(tower.type); // 弓手塔19→原版塔0渲染路径
-    const level0 = tower.level - 1; // 原版等级字段 entity[13] (0起)
+    const level0 = tower.level - 1; // 原版等级字段 entity[3] (0起)
     const half = (TOWER_ANCHOR_O1098[type] ?? 2) << 3;
     const ax = px + half;
     const ay = py + half;
@@ -663,7 +772,13 @@ export class TowerSystem {
       case 1: // 断龙闸
         return this.renderGateBase(tower, ax, ay, level0);
       case 2: // 突刺
-        return this.renderSpikeBase(tower, px, py, level0);
+        if (tower.attackAnim <= 0) return false;
+        return this.renderSpikeBase(
+          tower,
+          px,
+          py,
+          Math.min(12, Math.max(0, TOWER_ATTACK_ANIM_TICKS - tower.attackAnim)),
+        );
       case 3: // 擂木
       case 5: // 投石
         return this.renderLogStoneBase(tower, px, py, ax, ay, level0);
@@ -678,7 +793,8 @@ export class TowerSystem {
         if (tower.attackAnim > 0) return this.renderOilSpread(tower, px, py);
         return this.renderFountainBase(tower, px, py, level0, [36, 37, 38]);
       case 10: // 装置
-        return this.renderDeviceBase(tower, px, py, level0);
+        // 原版仅在装置动作状态 entity[10]==2 时叠加该基座效果。
+        return tower.attackAnim > 0 && this.renderDeviceBase(tower, px, py, level0);
       default:
         return false;
     }
@@ -845,12 +961,12 @@ export class TowerSystem {
   }
 
   /**
-   * 突刺基座 (对应原版 g(int 朝向,int x,int y,int 等级) 行21008 + r(int×3) 行24522)
-   * 3×3 地格沿朝向展开 (m1084 表); 等级 0-6 长第 1 排, 4-9 第 2 排(帧=等级-3), 7-11 第 3 排(帧=等级-6)
+   * 突刺攻击地刺 (对应原版 g(int 朝向,int x,int y,int 攻击阶段) 行21008 + r(int×3) 行24522)
+   * 3×3 地格沿朝向展开 (m1084 表); 阶段 0-6 长第 1 排, 4-9 第 2 排(帧=阶段-3), 7-11 第 3 排(帧=阶段-6)
    * 朝向 0/2 按行(y) 展开, 朝向 1/3 按列(x) 展开
    * r(): 每格先画 bu_42 底座(7x23), 帧<5 时画 bu_41 刺帧 (9x26, srcX=帧*9, Y 偏移 z1148[帧])
    */
-  private renderSpikeBase(tower: Tower, px: number, py: number, level0: number): boolean {
+  private renderSpikeBase(tower: Tower, px: number, py: number, phase: number): boolean {
     const orient = tower.orientation & 3;
     const m = TOWER_DIR_SPREAD_M1084[orient];
     const img41 = this.spr('bu', 41);
@@ -865,9 +981,9 @@ export class TowerSystem {
         const line = orient === 0 || orient === 2 ? j : i;
         // 排与帧判定 (a.java:21032-21082)
         let frame = -1;
-        if (line === 0 && level0 >= 0 && level0 < 7) frame = level0;
-        else if (line === 1 && level0 > 3 && level0 < 10) frame = level0 - 3;
-        else if (line === 2 && level0 > 6 && level0 < 12) frame = level0 - 6;
+        if (line === 0 && phase >= 0 && phase < 7) frame = phase;
+        else if (line === 1 && phase > 3 && phase < 10) frame = phase - 3;
+        else if (line === 2 && phase > 6 && phase < 12) frame = phase - 6;
         if (frame < 0) continue;
         // r() a.java:24522: bu_42 底座 @ (cx+4, cy-15)
         this.renderer.drawSpriteTransform(img42, 0, 0, 7, 23, cx + 4, cy - 15, 0);
@@ -912,11 +1028,14 @@ export class TowerSystem {
   }
 
   /**
-   * 攻击打击点 (原版 entity[11]/[12] 为打击点世界坐标; H5 简化: 锚点 + 朝向一格)
+   * 攻击打击点：使用攻击发生时记录的原版 entity[11]/[12] 世界坐标。
    */
   private strikePoint(tower: Tower, ax: number, ay: number): [number, number] {
-    const o = tower.orientation & 3;
-    return [ax + [0, 1, 0, -1][o] * 16, ay + [-1, 0, 1, 0][o] * 16];
+    const type = this.spriteType(tower.type);
+    const half = (TOWER_ANCHOR_O1098[type] ?? 2) << 3;
+    const mapAnchorX = tower.x * TILE_SIZE + half;
+    const mapAnchorY = tower.y * TILE_SIZE + half;
+    return [tower.strikeX + (ax - mapAnchorX), tower.strikeY + (ay - mapAnchorY)];
   }
 
   /**
@@ -1113,7 +1232,7 @@ export class TowerSystem {
 
   /**
    * 装置基座 (对应原版 y() case 10, a.java:26600-26681)
-   * 原版仅 entity[10]==2 时绘制; H5 无此状态位, 常驻绘制 (简化)
+   * 原版仅 entity[10]==2 时绘制；H5以 attackAnim>0 对应动作状态。
    * 基准 = F1137[朝向] + 实体坐标:
    *   塔身 E1136 九点 bu_47 (14x19帧, srcX=等级*14)
    *   旗帜 G1138 四点 p(int×3) (ui_20, 27x29帧)
@@ -1176,7 +1295,12 @@ export class TowerSystem {
         }
         return true;
       }
-      case 2:
+      case 2: {
+        if (tower.attackAnim <= 0) return false;
+        const img = this.spr('t2', 1);
+        if (!img) return false;
+        return this.renderMultiPoint(img, TOWER_ANIM_W1123[type], tower.frame, type, ax, ay);
+      }
       case 3:
       case 9: {
         const img = this.spr(`t${type}`, 1);
@@ -1232,7 +1356,7 @@ export class TowerSystem {
    * 建造模式预览 (对应原版 am() case 1 行14719-14735, bF==1 建造选位)
    * 依次移植: e(bN,bO,bw,0) 范围圈 (行19320) → p(bN,bO) 逐格指示+角标 (行23898/24225)
    *   → i(bN,bO,fp,fp) 四角块 (行22126)
-   * 另加 H5 增补: 塔幻影 (半透明基座) 与左下角可建造文字 (原版仅以格子颜色表达, 无文字)
+   * 另加 H5 增补: 塔幻影 (半透明基座)。可造状态统一绘制到底部信息条。
    */
   private renderBuildPreview(offsetX: number, offsetY: number): void {
     const type = this.spriteType(this.pendingBuildType); // 弓手塔19→原版塔0预览
@@ -1261,7 +1385,7 @@ export class TowerSystem {
       for (let j = 0; j < fp; j++) {
         const tx = this.buildX + i;
         const ty = this.buildY + j;
-        const ok = this.mapData.isBuildableAt(tx, ty) && !this.towers.some(t => t.x === tx && t.y === ty);
+        const ok = this.mapData.isBuildableAt(tx, ty) && !this.towers.some(t => this.occupiesTile(t, tx, ty));
         if (!ok) allOk = false;
         const color = ok ? 0x4cffac : BUILD_BAD_COLORS_Q1158[this.previewFrame & 3];
         this.renderer.setColor(color);
@@ -1310,20 +1434,14 @@ export class TowerSystem {
       damage: 0, range: 0, fireRate: 0, cooldown: 0, target: -1, angle: 0,
       heroId: -1, effectType: 0, hp: 0, maxHp: 0, debuffTimer: 0,
       frame: 0, orientation: 0, attackAnim: 0,
+      strikeX: this.buildX * TILE_SIZE, strikeY: this.buildY * TILE_SIZE,
     };
     vctx.save();
     vctx.globalAlpha = 0.55;
     this.renderBase(ghost, bx, by);
+    this.renderModel(ghost, bx, by);
     vctx.restore();
 
-    // ---- 左下角可建造文字 (H5 增补, 对应玩家截图的文字提示; 原版仅以格色表达)
-    this.renderer.drawText(
-      allOk ? '可建造' : '不可建造',
-      4,
-      MAP_TOP_BAR_H + MAP_VIEW_H - 12,
-      allOk ? 0x4cffac : 0xff5555,
-      9,
-    );
   }
 
   /**
@@ -1337,7 +1455,7 @@ export class TowerSystem {
    * 选择塔
    */
   selectTower(tileX: number, tileY: number): Tower | null {
-    const tower = this.towers.find(t => t.x === tileX && t.y === tileY);
+    const tower = this.towers.find(t => this.occupiesTile(t, tileX, tileY));
     this.selectedTower = tower ?? null;
     return this.selectedTower;
   }
@@ -1371,10 +1489,10 @@ export class TowerSystem {
   }
 
   /**
-   * 获取所有可建造的塔类型 (含弓手塔19; 装置类10-12不可直接建造)
+   * 获取所有可建造的原版塔类型（0-10；装置升级链仍由科技解锁门禁控制）。
    */
   getBuildableTowerTypes(): number[] {
-    return Object.keys(this.towerConfigs).map(Number).filter(t => t <= 9 || t === ARCHER_TOWER_TYPE);
+    return Object.keys(this.towerConfigs).map(Number).filter(t => t >= 0 && t <= 10);
   }
 
   /**
@@ -1416,6 +1534,12 @@ export class TowerSystem {
     tower.hp -= actualDamage;
     if (tower.hp <= 0) {
       // 塔被摧毁
+      const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(tower.type)] ?? 1;
+      for (let dx = 0; dx < footprint; dx++) {
+        for (let dy = 0; dy < footprint; dy++) {
+          this.mapData.releaseBuildTile(tower.x + dx, tower.y + dy);
+        }
+      }
       this.towers = this.towers.filter(t => t !== tower);
       if (this.selectedTower === tower) {
         this.selectedTower = null;
@@ -1479,14 +1603,17 @@ export class TowerSystem {
       const config = this.towerConfigs[td.type];
       if (!config) continue;
       const maxHp = td.maxHp ?? (100 + config.cost);
+      const level = Math.max(1, Math.min(6, td.level ?? 1));
+      const stats = this.originalStats(td.type ?? 0, level);
       const tower: Tower = {
         x: td.x ?? 0,
         y: td.y ?? 0,
         type: td.type ?? 0,
-        level: td.level ?? 1,
-        damage: td.damage ?? config.damage,
-        range: td.range ?? config.range,
-        fireRate: td.fireRate ?? config.fireRate,
+        level,
+        // 旧存档可能保存过乘法成长后的错误属性；读取时按原版公式重新计算。
+        damage: stats.damage,
+        range: stats.range,
+        fireRate: stats.fireRate,
         cooldown: 0,
         target: -1,
         angle: 0,
@@ -1500,8 +1627,16 @@ export class TowerSystem {
         frame: 0,
         orientation: 0,
         attackAnim: 0,
+        strikeX: (td.x ?? 0) * TILE_SIZE,
+        strikeY: (td.y ?? 0) * TILE_SIZE,
       };
       this.towers.push(tower);
+      const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(tower.type)] ?? 1;
+      for (let dx = 0; dx < footprint; dx++) {
+        for (let dy = 0; dy < footprint; dy++) {
+          this.mapData.occupyBuildTile(tower.x + dx, tower.y + dy);
+        }
+      }
     }
   }
 }

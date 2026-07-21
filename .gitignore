@@ -65,3 +65,6 @@ desktop.ini
 .env
 .env.local
 .env.*.local
+
+# 本地逻辑回归测试产物
+game/.test-dist/

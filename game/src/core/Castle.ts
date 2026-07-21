@@ -10,9 +10,6 @@
  *   - 我城画在我城锚点(which=0, aK/aL), 敌城画在敌城锚点(which=1, aI/aJ)
  *   - 锚点 = 瓦片坐标*16, 随相机偏移 (与地图瓦片同一坐标变换)
  *
- * H5简化 (注释标注):
- *   - 不绘制我城城门开启动画 (原版行23465-23504: w1111/bv/k(), 为特效)
- *
  * 任务B: 我城部件接 b1059 科技过滤 (原版行23509-23514: b1059[id] || which!=0)
  *   - 初始可见 = c1061 (原版 aj() 行14114-14126)
  *   - 科技建筑建成 → b1059[h1060[i]]=true → 对应部件长出
@@ -35,6 +32,11 @@ export class CastleRenderer {
   private spriteLoader: SpriteLoader | null = null;
   // 我城部件可见表 (原版 b1059, 由 BuildBarSystem.castlePartFilter() 提供)
   private ourPartFilter: boolean[] | null = null;
+  private animatedPart: number = -1;
+  private animationFrame: number = 0;
+  private static readonly BUILD_EFFECT_OFFSETS: [number, number][] = [
+    [-13, -43], [-24, -32], [-4, -32], [-13, -22],
+  ];
 
   constructor(renderer: Renderer, mapData: MapData) {
     this.renderer = renderer;
@@ -50,6 +52,21 @@ export class CastleRenderer {
    */
   setOurPartFilter(filter: boolean[] | null): void {
     this.ourPartFilter = filter;
+  }
+
+  /** 科技建成后播放原版 w1111/bv 城池部件展开特效。 */
+  startPartAnimation(partId: number): void {
+    this.animatedPart = partId;
+    this.animationFrame = 0;
+  }
+
+  update(): void {
+    if (this.animatedPart < 0) return;
+    this.animationFrame++;
+    if (this.animationFrame >= 9) {
+      this.animatedPart = -1;
+      this.animationFrame = 0;
+    }
   }
 
   /**
@@ -117,6 +134,45 @@ export class CastleRenderer {
       }
     }
 
+    if (which === 0 && this.animatedPart >= 0) {
+      this.renderPartAnimation(anchorX, anchorY, parts, count);
+    }
+
     vctx.restore();
+  }
+
+  private renderPartAnimation(anchorX: number, anchorY: number, parts: number[], count: number): void {
+    let partIndex = -1;
+    for (let i = 0; i < count; i++) {
+      if (parts[i * 3] === this.animatedPart) {
+        partIndex = i;
+        break;
+      }
+    }
+    const rect = CASTLE_RECTS_E1058[this.animatedPart];
+    if (partIndex < 0 || !rect) return;
+
+    const centerX = parts[partIndex * 3 + 1] + anchorX + (rect[2] >> 1);
+    const centerY = parts[partIndex * 3 + 2] + anchorY + (rect[3] >> 1) + MAP_TOP_BAR_H;
+    const effect = this.spriteLoader?.getUISprite(20) ?? null;
+    if (effect) {
+      const frame = Math.min(this.animationFrame, Math.floor(effect.width / 27) - 1);
+      const shift = frame === 0 ? 0 : 4;
+      for (const [ox, oy] of CastleRenderer.BUILD_EFFECT_OFFSETS) {
+        this.renderer.drawImageRegion(effect, frame * 27, 0, 27, effect.height,
+          centerX + ox - this.mapData.cameraX - shift,
+          centerY + oy - this.mapData.cameraY,
+          27, effect.height);
+      }
+    }
+
+    if (this.animationFrame > 1) {
+      const flourish = this.spriteLoader?.getUISprite(21) ?? null;
+      if (flourish) {
+        this.renderer.drawImage(flourish,
+          centerX - this.mapData.cameraX - (flourish.width >> 1),
+          centerY - this.mapData.cameraY - (this.animationFrame << 1));
+      }
+    }
   }
 }

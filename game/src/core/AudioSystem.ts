@@ -58,12 +58,19 @@ export class AudioSystem {
 
     if (event.name === 'Note on' && event.velocity > 0) {
       // 播放音符 (MIDI note number to frequency)
-      const noteNumber = event.noteNumber;
-      const velocity = event.velocity / 127;
-      this.soundfont.play(noteNumber, this.audioContext, {
-        duration: 0.5,
-        gain: velocity * this.volume,
-      });
+      const noteNumber = Number(event.noteNumber);
+      const velocity = Number(event.velocity) / 127;
+      // 某些 MIDI 文件会发出不完整的 Note on 事件；不要把 NaN 传给
+      // WebAudio，否则浏览器会抛出 "AudioBufferSourceNode ... non-finite"。
+      if (!Number.isFinite(noteNumber) || !Number.isFinite(velocity)) return;
+      try {
+        this.soundfont.play(noteNumber, this.audioContext, {
+          duration: 0.5,
+          gain: Math.max(0, Math.min(1, velocity * this.volume)),
+        });
+      } catch {
+        // 音频只是可选增强，单个坏事件不应中断游戏循环。
+      }
     }
   }
 

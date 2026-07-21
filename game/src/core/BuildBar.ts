@@ -14,8 +14,8 @@
  * H5触屏适配 (注释标注的简化点):
  *   - 点击图标=选中, 再点同一图标=确认; 点明细区=确认; 点地图=关栏
  *   - 未解锁塔图标置灰 (原版不置灰, 仅选中时提示 b1015[115]; 按任务要求置灰)
- *   - 科技面板条目22=金手指(作弊) 不接
- *   - 大图标用 ui_15 帧2x (原版用整塔合成精灵 a(type,0,28,y,0,2,0) 行10701)
+ *   - 科技面板保留原版的建筑解锁和城堡部件状态
+ *   - 明细区通过 TowerSystem 合成完整塔模型，与原版 a(type,level,...) 一致
  */
 import { Renderer } from './Renderer';
 import { SpriteLoader } from './SpriteLoader';
@@ -34,8 +34,6 @@ import {
   ORIG_TECH_DESC,
   ORIG_ACTION_DESC,
   BAR_MESSAGES,
-  ORIG_TO_H5_TOWER,
-  H5_TO_ORIG_TOWER,
   CASTLE_RECTS_E1058,
   UI19_GOLD_SX,
   UI19_GOLD_W,
@@ -81,6 +79,8 @@ export interface BuildBarHost {
   getUpgradeCost(tower: Tower): number | null;
   /** 拆除返还 (原版 b(int) 行15818: (建造费+升级投入)>>1) */
   getDemolishRefund(tower: Tower): number;
+  /** 在明细区按原版素材层合成完整塔模型。 */
+  renderTowerPreview(type: number, level: number, centerX: number, centerY: number): void;
   /** 装置建成回调 (提示/存档等) */
   onTechBuilt(techIndex: number): void;
 }
@@ -139,17 +139,15 @@ export class BuildBarSystem {
     return this.castleParts;
   }
 
-  /** H5塔类型是否已解锁 (建塔门禁: 以原版科技建筑为准) */
-  isTowerUnlocked(h5Type: number): boolean {
-    const orig = H5_TO_ORIG_TOWER[h5Type] ?? -1;
-    if (orig < 0) return true; // 非原版体系塔 (装置等) 不受此门禁
-    return this.towerUnlocked[orig];
+  /** 原版塔类型是否已解锁 (建塔门禁: 以原版科技建筑为准) */
+  isTowerUnlocked(origType: number): boolean {
+    if (origType < 0 || origType >= this.towerUnlocked.length) return true;
+    return this.towerUnlocked[origType];
   }
 
-  /** H5塔类型的原版建造费 (q1100) */
-  towerCost(h5Type: number): number {
-    const orig = H5_TO_ORIG_TOWER[h5Type] ?? -1;
-    return orig >= 0 ? TOWER_COST_Q1100[orig] : 0;
+  /** 原版塔类型的建造费 (q1100) */
+  towerCost(origType: number): number {
+    return TOWER_COST_Q1100[origType] ?? 0;
   }
 
   // ============================================================
@@ -186,6 +184,16 @@ export class BuildBarSystem {
     this.av = 0;
     this.o = -1;
     this.ay = null;
+  }
+
+  /**
+   * 原版金手指“获得全部科技”：五座科技建筑、城堡部件和全部塔一次解锁。
+   * 由暂停菜单调用，保持与正常购买相同的状态层，避免只改 UI 不改门禁。
+   */
+  cheatUnlockAll(): void {
+    this.techBuilt = new Array(5).fill(true);
+    this.castleParts = new Array(10).fill(true);
+    this.towerUnlocked = new Array(11).fill(true);
   }
 
   // ============================================================
@@ -226,16 +234,20 @@ export class BuildBarSystem {
     }
   }
 
-  /** 滑入滑出动画 (原版 K() 行8146-8217) */
-  update(): void {
+  /**
+   * 滑入滑出动画 (原版 K() 行8146-8217)。
+   * 原版每 100ms 推进一次；这里按真实时间插值，兼顾原版时长和现代屏幕的平滑度。
+   */
+  update(elapsedMs: number = 100): void {
+    const scale = Math.max(0, elapsedMs) / 100;
     if (this.aw === 1) {
       // 打开: av→ax, au→18 (原版 case 1: av+=20/au+=20)
-      this.av = Math.min(AV_MAX, this.av + BAR_SPEED);
-      this.au = Math.min(AU_MAX, this.au + 4);
+      this.av = Math.min(AV_MAX, this.av + BAR_SPEED * scale);
+      this.au = Math.min(AU_MAX, this.au + 4 * scale);
     } else if (this.aw === 2 || this.aw === 3) {
       // 关闭: au/av→0 (原版 case 2/3: au-=20, av-=20)
-      this.au = Math.max(0, this.au - 4);
-      this.av = Math.max(0, this.av - BAR_SPEED);
+      this.au = Math.max(0, this.au - 4 * scale);
+      this.av = Math.max(0, this.av - BAR_SPEED * scale);
       if (this.au === 0 && this.av === 0) {
         const enterPlacement = this.aw === 3;
         this.aw = 0;
@@ -513,7 +525,6 @@ export class BuildBarSystem {
     const r = this.renderer;
     const items = this.items();
     const item = items[this.aD];
-    const ui15 = this.spriteLoader?.getUISprite(15);
     const ui18 = this.spriteLoader?.getUISprite(18);
     const ui19 = this.spriteLoader?.getUISprite(19);
     const ui29 = this.spriteLoader?.getUISprite(29);
@@ -535,8 +546,7 @@ export class BuildBarSystem {
       // 价格: 金图标 + q1100 (J() 行8064-8078)
       if (ui19) r.drawImageRegion(ui19, UI19_GOLD_SX, 0, UI19_GOLD_W, 12, 210, var8 + 2, UI19_GOLD_W, 12);
       r.drawText(`${TOWER_COST_Q1100[item]}`, 224, stripTextY, COLOR_TEXT, 8);
-      // 大图标 (原版为整塔精灵, H5简化为 ui_15 帧2x)
-      if (ui15) r.drawImageRegion(ui15, item * 16, 0, 16, 16, iconCX - 16, iconCY - 16, 32, 32);
+      this.renderTowerPreview(item, 1, iconCX, iconCY, panelY);
     } else if (this.aC === BAR_CAT_TECH && item >= 11 && item <= 15) {
       // ===== 科技装置项 (J() 行8091-8131: aC==1 分支) =====
       const techIdx = item - 11;
@@ -552,9 +562,8 @@ export class BuildBarSystem {
       }
     } else if (this.aC === BAR_CAT_TOWER && this.ay) {
       // ===== 塔操作项 (J() 行7966-8053: aC>=2 分支) =====
-      const origId = H5_TO_ORIG_TOWER[this.ay.type] ?? 0;
-      // 大图标 = 当前塔图标 (原版画整塔 a(type,level,28,y,0,2,0) 行10701; H5简化为2x图标)
-      if (ui15) r.drawImageRegion(ui15, origId * 16, 0, 16, 16, iconCX - 16, iconCY - 16, 32, 32);
+      const origId = this.ay.type;
+      this.renderTowerPreview(origId, this.ay.level, iconCX, iconCY, panelY);
       // 塔名图条
       if (ui18) r.drawImageRegion(ui18, 0, origId * 11, 35, 11, 2, var8 + 2, 35, 11);
       // 价格: 升级费用 / 拆除返还 (J() 行7996-8046)
@@ -586,6 +595,17 @@ export class BuildBarSystem {
       desc = ORIG_ACTION_DESC[item - 16] ?? '';
     }
     this.drawWrapped(desc, 67, descY, 163, COLOR_TEXT, 8, 10);
+  }
+
+  private renderTowerPreview(type: number, level: number, centerX: number, centerY: number, panelY: number): void {
+    if (!this.host) return;
+    const vctx = this.renderer.virtualContext;
+    vctx.save();
+    vctx.beginPath();
+    vctx.rect(0, panelY, 57, Math.max(0, BAR_BOTTOM + 21 - panelY));
+    vctx.clip();
+    this.host.renderTowerPreview(type, level, centerX, centerY);
+    vctx.restore();
   }
 
   /**

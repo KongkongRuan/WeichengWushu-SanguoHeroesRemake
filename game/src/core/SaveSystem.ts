@@ -303,6 +303,8 @@ export class SaveSystem {
       frame: 0,
       orientation: 0,
       attackAnim: 0,
+      strikeX: t.x * 16,
+      strikeY: t.y * 16,
     }));
   }
 

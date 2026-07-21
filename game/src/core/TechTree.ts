@@ -20,6 +20,7 @@ import {
   Hero,
   TechEffect,
 } from '../data/heroes';
+import { TOWER_UPGRADE_COST_R1101 } from '../data/gameData';
 import { Tower } from './Tower';
 
 // ============================================================
@@ -192,27 +193,22 @@ export class TechTreeSystem {
       return { canUpgrade: false, reason: '该塔无对应科技分支' };
     }
 
-    if (!branch.unlocked) {
-      return { canUpgrade: false, reason: '需要先升级城池解锁此分支' };
-    }
-
+    // 原版塔等级是 0..5（H5实体层用 1..6 表示），费用来自 r1101，
+    // 不是科技描述里的 100/150/200 金。科技建筑负责“能否建造”，
+    // 已建成的塔可以按原版费用逐级升级。
     const nextLevel = tower.level;
-    if (nextLevel >= branch.maxLevel) {
+    if (nextLevel >= 6) {
       return { canUpgrade: false, reason: '该塔已是最高级' };
     }
 
-    // 获取下一个科技效果
-    const effectIdx = this.getNextEffectIndex(tower);
-    if (effectIdx < 0 || effectIdx >= TECH_EFFECTS.length) {
-      return { canUpgrade: false, reason: '无可用科技效果' };
+    const [baseCost, stepCost] = TOWER_UPGRADE_COST_R1101[tower.type] ?? [50, 50];
+    const upgradeCost = baseCost + stepCost * Math.max(0, nextLevel - 1);
+    if (this.gold < upgradeCost) {
+      return { canUpgrade: false, reason: '金币不足', cost: upgradeCost };
     }
 
-    const effect = TECH_EFFECTS[effectIdx];
-    if (this.gold < effect.cost) {
-      return { canUpgrade: false, reason: '金币不足', cost: effect.cost };
-    }
-
-    return { canUpgrade: true, cost: effect.cost };
+    // 获取下一个科技效果（达到顶级时仍允许觉醒武将）
+    return { canUpgrade: true, cost: upgradeCost };
   }
 
   /**
@@ -255,11 +251,13 @@ export class TechTreeSystem {
     }
 
     const effectIdx = this.getNextEffectIndex(tower);
-    const effect = TECH_EFFECTS[effectIdx];
+    const effect = TECH_EFFECTS[effectIdx] ?? TECH_EFFECTS[0];
+    const [baseCost, stepCost] = TOWER_UPGRADE_COST_R1101[tower.type] ?? [50, 50];
+    const upgradeCost = baseCost + stepCost * Math.max(0, tower.level - 1);
 
     // 扣除金币
-    this.gold -= effect.cost;
-    this.onGoldSpent?.(effect.cost);
+    this.gold -= upgradeCost;
+    this.onGoldSpent?.(upgradeCost);
 
     // 解锁科技效果
     this.unlockedEffects.add(effect.id);
@@ -289,7 +287,7 @@ export class TechTreeSystem {
     }
 
     // 检查是否达到分支顶点 -> 觉醒武将
-    if (branch && tower.level >= branch.maxLevel - 1) {
+    if (branch && tower.level >= 5) {
       const hero = this.tryAwakenHero(tower, branch);
       if (hero) {
         return { success: true, effect, hero };
@@ -484,7 +482,6 @@ export class TechTreeSystem {
       const chance = 0.3 + 0.1 * this.aoeFreezeLevel;
       if (Math.random() < chance) {
         enemy.effect = 2; // 冰冻
-        enemy.speed = Math.max(0.1, (enemy.speed ?? 1) * 0.5);
         // 效果16: 冰冻增强 - 延长冰冻时间
         const duration = (towerLevel * 8) * (1 + 0.5 * this.freezeUpLevel);
         enemy.timer = Math.max(enemy.timer ?? 0, duration);
@@ -494,7 +491,9 @@ export class TechTreeSystem {
     // 效果10,11: 范围减速
     if (this.aoeSlowLevel > 0) {
       const slowFactor = Math.max(0.3, 1 - 0.2 * this.aoeSlowLevel);
-      enemy.speed = Math.max(0.2, (enemy.speed ?? 1) * slowFactor);
+      enemy.effect = 5;
+      enemy.slowScale = Math.min(enemy.slowScale ?? 1, slowFactor);
+      enemy.timer = Math.max(enemy.timer ?? 0, towerLevel * 10);
     }
   }
 

@@ -17,19 +17,17 @@
  *   占用标记: a(int,int,boolean) 行11058-11085 (E1163 奇偶位)
  *
  * H5与原版差异 (均已注释标注):
- *   - 原版 p1078 需按'#'键(g1046==35)出下一波; H5触屏无'#'键,
- *     改为波清完后延迟 WAVE_AUTO_DELAY_FRAMES 逻辑帧自动开下一波
- *   - 4向绕行搜索 b(x,y,dir) (行15854-15911) 简化为"原地等待"
- *   - 敌人字段5(var45[12])眩晕/字段15减速等塔效果层 z()/s() 未实现
- *   - 死亡动画/冲城动画统一用 h_2 图集 (原版分别为 h_1/h_2)
- *   - 精英头顶特效 h_9 未绘制, 改为金色标记
+ *   - 原版 p1078 需按'#'键(g1046==35)出下一波; H5同时提供触屏“出兵”按钮
+ *   - 4向绕行搜索 b(x,y,dir) 在路径格被占用时交替顺/逆时针执行
+ *   - 麻痹、冰冻和减速按固定逻辑帧计时，不再永久修改敌人速度
+ *   - 死亡/冲城分别使用 h_1/h_2，精英头顶使用 h_9 四帧特效
  */
 import { Renderer } from './Renderer';
 import { MapData } from './MapData';
 import { SpriteLoader } from './SpriteLoader';
+import { canStartWave as canRequestWave } from './Timing';
 import {
   TILE_SIZE,
-  KILL_REWARD,
   MAP_TOP_BAR_H,
   MAP_VIEW_H,
   MAP_VIEW_W,
@@ -48,7 +46,7 @@ import {
 // 敌人状态 (对应原版 b1066[n][8], var45[var3=8])
 export enum EnemyState {
   WALK = 0,     // 行走
-  // 1/2/3: 原版绕行去程/回程/结束 (H5简化为等待, 不使用)
+  // 1/2/3: 原版绕行中间态由 BLOCKED+退回格中心的等价流程承接
   SIEGE = 4,    // 架炮 (仅兵种4, variant 8/9; 移动照常, 渲染换攻击动画)
   DYING = 5,    // 死亡动画 (9逻辑帧)
   SETTLE = 6,   // 死亡结算 (发金币并移除)
@@ -65,6 +63,8 @@ export interface Enemy {
   hp: number;          // [2]  当前HP
   goldReward: number;  // [3]  aY 击杀金币系数 (原版结算实际用固定值, 见 SETTLE)
   speed: number;       // [4]  速度 px/逻辑帧 (aZ)
+  baseSpeed: number;   // 未受状态效果影响的原始速度
+  slowScale: number;   // 当前减速倍率，效果结束后恢复为 1
   dir: number;         // [5]  方向 0上1右2下3左
   variant: number;     // [6]  变体 = unitType*2 + elite
   animFrame: number;   // [7]  动画序列索引 (ENEMY_ANIM_L1083 下标)
@@ -81,12 +81,6 @@ export interface Enemy {
   effect: number;      // 塔特殊效果 (H5 Tower/TechTree 兼容: 0无 1麻痹 2冰冻 3中毒 4火焰 5减速)
   timer: number;       // 塔效果计时 (H5兼容)
 }
-
-// 逻辑帧时长 = 6 个 60fps 帧 (100ms, 对应原版 10FPS)
-const LOGIC_FRAME_DT = 6;
-
-// 波清完后自动开下一波的延迟 (逻辑帧; 15帧=1.5s, 对应原版按'#'的手动触发)
-const WAVE_AUTO_DELAY_FRAMES = 15;
 
 export class EnemySystem {
   private renderer: Renderer;
@@ -110,24 +104,21 @@ export class EnemySystem {
   private ba: number = 0;      // 名将类型 (0=非名将波)
   private bb: number = 0;      // 名将头像/名单索引 (z1131查得)
   private o1077: boolean = false; // 名将波标志
-  private p1078: boolean = false; // 开下一波标志 (原版按'#', H5自动)
+  private p1078: boolean = false; // 开下一波标志 (原版按'#')
   private faction: number = 0; // X 国家 (0蜀1魏2吴, 暂固定0)
-
-  // H5自动波次计时 (替代原版'#'键)
-  private waveDelayTimer: number = WAVE_AUTO_DELAY_FRAMES;
-
-  // 10FPS 逻辑帧累加器
-  private logicAcc: number = 0;
+  private detourClockwise: boolean = false; // 对应原版 q1082，绕行方向交替
+  private visualFrame: number = 0;
 
   // 统计
   private totalSpawned: number = 0;
   private totalKilled: number = 0;
-  private goldReward: number = 20;
+  // 原版普通敌兵5金、名将50金；z1169 金手指翻倍在 Game 回调层处理。
+  private goldReward: number = 5;
 
   // 回调
   private onEnemyKilled: ((gold: number) => void) | null = null;
   private onEnemyEscaped: (() => void) | null = null;
-  private onBossWave: ((bossType: number) => void) | null = null;
+  private onBossWave: ((bossType: number, bossId: number) => void) | null = null;
 
   // 关卡是否已开始 (剧情阶段不生成敌人)
   private levelStarted: boolean = false;
@@ -141,9 +132,13 @@ export class EnemySystem {
     this.spriteLoader = loader;
   }
 
+  setVisualFrame(frame: number): void {
+    this.visualFrame = frame;
+  }
+
   setLevel(level: number): void {
     this.aN = level <= 8 ? level : level % 9;
-    this.goldReward = KILL_REWARD[level] ?? 20;
+    this.goldReward = 5;
     this.levelStarted = false;
   }
 
@@ -154,7 +149,7 @@ export class EnemySystem {
     this.levelStarted = true;
   }
 
-  setCallbacks(onKilled: (gold: number) => void, onEscaped: () => void, onBossWave?: (bossType: number) => void): void {
+  setCallbacks(onKilled: (gold: number) => void, onEscaped: () => void, onBossWave?: (bossType: number, bossId: number) => void): void {
     this.onEnemyKilled = onKilled;
     this.onEnemyEscaped = onEscaped;
     this.onBossWave = onBossWave ?? null;
@@ -175,11 +170,25 @@ export class EnemySystem {
     this.bb = 0;
     this.o1077 = false;
     this.p1078 = false;
-    this.waveDelayTimer = WAVE_AUTO_DELAY_FRAMES;
-    this.logicAcc = 0;
+    this.detourClockwise = false;
     this.totalSpawned = 0;
     this.totalKilled = 0;
     this.levelStarted = false;
+  }
+
+  /** 金手指：立即清除当前画面上的敌人，不产生额外金币。 */
+  clearAllEnemies(): void {
+    for (const enemy of this.enemies) {
+      this.mapData.releaseTileAtPixel(enemy.x, enemy.y);
+    }
+    this.enemies = [];
+  }
+
+  /** 请求首波/下一波；对应原版 g1046==35 ('#') 的条件判断。 */
+  requestNextWave(): boolean {
+    if (!this.canStartNextWave) return false;
+    this.p1078 = true;
+    return true;
   }
 
   // ============================================================
@@ -243,7 +252,7 @@ export class EnemySystem {
     // 名将标志: 名将波且场上无敌(aP==0) → 首个敌人为精英(10倍HP), 并触发名将登场提示(ab())
     // 否则 o1077 复位 (同波其余敌人为普通兵)
     if (this.o1077 && this.enemies.length === 0) {
-      this.onBossWave?.(this.ba);
+      this.onBossWave?.(this.ba, this.bb);
       // o1077 保持 true (原版行22838)
     } else {
       this.o1077 = false;
@@ -266,8 +275,10 @@ export class EnemySystem {
       x: sp.x,                                // [0] = b1069[aN][0]
       y: sp.y,                                // [1] = b1069[aN][1]
       hp: elite ? this.aW * 10 : this.aW,     // [2] 名将波10倍HP
-      goldReward: this.aY,                    // [3]
+      goldReward: elite ? 50 : 5,             // 原版结算固定奖励，不是波次 aY
       speed: this.aZ,                         // [4]
+      baseSpeed: this.aZ,
+      slowScale: 1,
       dir: this.mapData.getPathDirAtPixel(sp.x, sp.y), // [5] = c(x,y) 出生格方向
       variant: elite ? (this.aV << 1) + 1 : this.aV << 1, // [6]
       animFrame: 0,                           // [7]
@@ -294,16 +305,11 @@ export class EnemySystem {
   }
 
   // ============================================================
-  // 主更新 (dt 为 60fps 归一化帧; 内部按 10FPS 逻辑帧驱动)
+  // 主更新：由 Game 的固定 100ms 时钟调用一次
   // ============================================================
-  update(dt: number): void {
+  update(): void {
     if (!this.levelStarted) return;
-
-    this.logicAcc += dt;
-    while (this.logicAcc >= LOGIC_FRAME_DT) {
-      this.logicAcc -= LOGIC_FRAME_DT;
-      this.logicFrame();
-    }
+    this.logicFrame();
   }
 
   /**
@@ -318,24 +324,13 @@ export class EnemySystem {
       this.aT = 0;
       this.aS++;
       this.computeWaveParams(); // R()
-      // 原版此处: bj=aV+12 切图集, ba!=0 播名将音乐 (k1068[ba]) — H5简化跳过(注释标注)
+      // 名将音乐和横幅在首个名将实体实际生成时通过回调触发。
     }
 
     // 2. l(1) 刷怪
     this.spawnTick();
 
-    // 3. p1078 设置 (原版: aP<=0 && aT==aX && 按'#'; H5: 清场后延时自动)
-    if (this.enemies.length <= 0 && this.aT === this.aX && this.aS < this.totalWaves) {
-      this.waveDelayTimer--;
-      if (this.waveDelayTimer <= 0) {
-        this.p1078 = true;
-        this.waveDelayTimer = WAVE_AUTO_DELAY_FRAMES;
-      }
-    } else {
-      this.waveDelayTimer = WAVE_AUTO_DELAY_FRAMES;
-    }
-
-    // 4. 逐敌人更新 (原版按 o1153 顺序; H5 逆序遍历配合 swap-remove)
+    // 3. 逐敌人更新 (原版按 o1153 顺序; H5 逆序遍历配合 swap-remove)
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       this.updateEnemy(this.enemies[i], i);
     }
@@ -353,10 +348,9 @@ export class EnemySystem {
 
     const nx = enemy.x + (DIRECTIONS_K1081[enemy.dir][0] << 4);
     const ny = enemy.y + (DIRECTIONS_K1081[enemy.dir][1] << 4);
-    const nextFree = (this.mapData.getTerrainAtPixel(nx, ny) & 1) === 0; // d() 行19214
+    const nextFree = this.mapData.isPathFreeAtPixel(nx, ny); // b() 行16868
     if (!nextFree) {
-      // 4向绕行搜索 b(x,y,dir) (行15854-15911) — H5简化为保持原方向"等待":
-      // 下一逻辑帧移动时新格仍被占用则进入 BLOCKED, 待其空闲后继续
+      enemy.dir = this.findDetourDirection(enemy.x, enemy.y, enemy.dir);
       return;
     }
     const nd = this.mapData.getPathDirAtPixel(enemy.x, enemy.y); // c() 行16925
@@ -364,6 +358,27 @@ export class EnemySystem {
     if (nd >= 0 && nd < 4) {
       enemy.dir = nd;
     }
+  }
+
+  /** 还原原版 b(x,y,dir) 的四方向绕行搜索，并交替顺/逆时针尝试。 */
+  private findDetourDirection(x: number, y: number, previousDir: number): number {
+    const pathDir = this.mapData.getPathDirAtPixel(x, y);
+    let candidate = pathDir >= 0 && pathDir < 4 ? pathDir : previousDir;
+    this.detourClockwise = !this.detourClockwise;
+    const step = this.detourClockwise ? 1 : -1;
+
+    for (let i = 0; i < 4; i++) {
+      const nx = x + (DIRECTIONS_K1081[candidate][0] << 4);
+      const ny = y + (DIRECTIONS_K1081[candidate][1] << 4);
+      if (this.mapData.isPathFreeAtPixel(nx, ny)) {
+        const nextPathDir = this.mapData.getPathDirAtPixel(nx, ny);
+        const reversesPath = nextPathDir >= 0 && nextPathDir < 4 && Math.abs(nextPathDir - pathDir) === 2;
+        const reversesPrevious = nextPathDir >= 0 && nextPathDir < 4 && Math.abs(nextPathDir - previousDir) === 2;
+        if (!reversesPath && !reversesPrevious) return candidate;
+      }
+      candidate = (candidate + step + 4) & 3;
+    }
+    return pathDir >= 0 && pathDir < 4 ? pathDir : previousDir;
   }
 
   /**
@@ -402,20 +417,19 @@ export class EnemySystem {
         return;
 
       case EnemyState.SETTLE: { // case 6: 死亡结算
-        // 原版结算: 精英 bz+=100/50, 普通 bz+=10/5 (z1169双倍金标志)
-        // H5按现有 KILL_REWARD 接口回调 (双倍金由 Game 的 techTree.isGoldDouble 处理)
+        // 原版结算: 精英 bz+=50、普通 bz+=5；金手指 z1169 翻倍由 Game 回调层处理。
         this.totalKilled++;
-        this.onEnemyKilled?.(this.goldReward);
+        this.onEnemyKilled?.(enemy.goldReward);
         // 原版: 精英死亡时清空所有敌人[26]及 ba — H5不影响逻辑, 跳过
         this.removeEnemy(index);
         return;
       }
 
       case EnemyState.BLOCKED: // case 7: 被堵
-        this.updateDirection(enemy);
-        // 原版 var45[12]==0 → state=0 (var45[12]=塔眩晕计时, H5未实现恒0)
+        // 原版状态 1/2/3 会先退回当前格中心，再执行四向绕行。
+        if (!this.returnToTileCenter(enemy)) return;
         enemy.state = EnemyState.WALK;
-        return;
+        break;
 
       case EnemyState.CHARGE: // case 8: 冲城
         enemy.chargeTimer++;
@@ -442,6 +456,15 @@ export class EnemySystem {
         break;
     }
 
+    // 状态效果跟随原版 100ms 逻辑帧计时。麻痹停止移动，冰冻/减速仅改变本帧速度。
+    const effectActive = enemy.timer > 0;
+    if (effectActive) enemy.timer--;
+    else {
+      enemy.effect = 0;
+      enemy.slowScale = 1;
+    }
+    if (effectActive && enemy.effect === 1) return;
+
     // label122: 兵种4 (variant 8/9) 架炮周期: 行走时 siegeTimer--, 到0进入架炮
     if (enemy.variant === 8 || enemy.variant === 9) {
       if (enemy.state === EnemyState.WALK) {
@@ -455,8 +478,11 @@ export class EnemySystem {
 
     // label117: 移动
     this.updateDirection(enemy); // o()
-    const nx = enemy.x + DIRECTIONS_K1081[enemy.dir][0] * enemy.speed;
-    const ny = enemy.y + DIRECTIONS_K1081[enemy.dir][1] * enemy.speed;
+    const speedScale = effectActive && enemy.effect === 2 ? 0.5
+      : (effectActive && enemy.effect === 5 ? enemy.slowScale : 1);
+    const moveSpeed = enemy.baseSpeed * speedScale;
+    const nx = enemy.x + DIRECTIONS_K1081[enemy.dir][0] * moveSpeed;
+    const ny = enemy.y + DIRECTIONS_K1081[enemy.dir][1] * moveSpeed;
     this.advanceAnim(enemy); // n()
 
     // 跨入新格检测 (a(nx,ny) != a(x,y))
@@ -479,6 +505,21 @@ export class EnemySystem {
 
     enemy.x = nx;
     enemy.y = ny;
+  }
+
+  /** 被堵在格边界时逐帧退回格中心；到达中心后才允许切换绕行方向。 */
+  private returnToTileCenter(enemy: Enemy): boolean {
+    const centerX = (enemy.x >> 4) * TILE_SIZE + (TILE_SIZE >> 1);
+    const centerY = (enemy.y >> 4) * TILE_SIZE + (TILE_SIZE >> 1);
+    const dx = centerX - enemy.x;
+    const dy = centerY - enemy.y;
+    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return true;
+
+    const step = Math.max(0.1, enemy.baseSpeed);
+    enemy.x += Math.sign(dx) * Math.min(Math.abs(dx), step);
+    enemy.y += Math.sign(dy) * Math.min(Math.abs(dy), step);
+    this.advanceAnim(enemy);
+    return Math.abs(centerX - enemy.x) < 0.001 && Math.abs(centerY - enemy.y) < 0.001;
   }
 
   /**
@@ -538,6 +579,7 @@ export class EnemySystem {
           continue;
         case EnemyState.SIEGE:
           this.renderSiege(enemy, px, py);
+          this.renderEliteMarker(enemy, px, py);
           this.renderHealthBar(enemy, px, py);
           continue;
         default:
@@ -586,9 +628,7 @@ export class EnemySystem {
       vctx.restore();
 
       if (enemy.elite) {
-        // 精英标记 (原版为 h_9 头顶特效, H5简化为金色方块标记)
-        this.renderer.setColor(0xFFD700);
-        this.renderer.fillRect(px - 2, py - 18, 4, 4);
+        this.renderEliteMarker(enemy, px, py);
       }
       return;
     }
@@ -606,7 +646,7 @@ export class EnemySystem {
   /**
    * 架炮渲染 (对应原版 state 4 分支 行9781-9850:
    *   a1013[bj][2] (e4_2), srcX=[17]*21, 21x19, 绘制点=d1091偏移)
-   * 阴影 fillArc 简化跳过
+   * 同时绘制原版脚下阴影。
    */
   private renderSiege(enemy: Enemy, px: number, py: number): void {
     const img = this.spriteLoader?.getByPrefix(`e${enemy.unitType}`, 2) ?? null;
@@ -617,6 +657,14 @@ export class EnemySystem {
       const dy = py + off[1];
       const srcX = enemy.siegeAnim * 21;
       const vctx = this.renderer.virtualContext;
+      // 原版架炮状态先绘制脚下阴影。
+      vctx.save();
+      vctx.globalAlpha = 0.35;
+      vctx.fillStyle = '#000000';
+      vctx.beginPath();
+      vctx.ellipse(Math.floor(px), Math.floor(py - 1), 8, 3, 0, 0, Math.PI * 2);
+      vctx.fill();
+      vctx.restore();
       vctx.drawImage(img, srcX, 0, 21, 19, Math.floor(dx), Math.floor(dy), 21, 19);
       return;
     }
@@ -626,18 +674,38 @@ export class EnemySystem {
 
   /**
    * 死亡/冲城特效帧 (原版: 死亡=h_1 15x30帧, 冲城=h_2 24x24帧, 均画在 (x-8, y-24))
-   * H5统一用 h_2 (本任务限定素材), 帧=计时(封顶4)
+   * 死亡使用 h_1 的 15x30 帧，冲城使用 h_2 的 24x24 帧。
    */
   private renderEffectFrame(enemy: Enemy, px: number, py: number, timer: number): void {
-    const img = this.spriteLoader?.getByPrefix('h', 2) ?? null;
+    const dying = enemy.state === EnemyState.DYING;
+    const spriteIndex = dying ? 1 : 2;
+    const frameW = dying ? 15 : 24;
+    const frameH = dying ? 30 : 24;
+    const frameCount = dying ? 8 : 5;
+    const img = this.spriteLoader?.getByPrefix('h', spriteIndex) ?? null;
     if (img) {
-      const frame = Math.min(Math.max(timer, 0), 4);
+      const frame = Math.min(Math.max(timer, 0), frameCount - 1);
       const vctx = this.renderer.virtualContext;
-      vctx.drawImage(img, frame * 24, 0, 24, 24, Math.floor(px - 8), Math.floor(py - 24), 24, 24);
+      vctx.drawImage(img, frame * frameW, 0, frameW, frameH,
+        Math.floor(px - 8), Math.floor(py - 24), frameW, frameH);
       return;
     }
     this.renderer.setColor(0xFF8800);
     this.renderer.fillRect(px - 8, py - 24, 16, 16);
+  }
+
+  /** 精英/名将头顶 h_9 四帧特效，对应原版 (a1019&3)*22。 */
+  private renderEliteMarker(enemy: Enemy, px: number, py: number): void {
+    if (!enemy.elite) return;
+    const img = this.spriteLoader?.getByPrefix('h', 9) ?? null;
+    if (img) {
+      const frame = this.visualFrame & 3;
+      this.renderer.virtualContext.drawImage(img, frame * 22, 0, 22, 34,
+        Math.floor(px - 11), Math.floor(py - 23), 22, 34);
+      return;
+    }
+    this.renderer.setColor(0xFFD700);
+    this.renderer.fillRect(px - 2, py - 18, 4, 4);
   }
 
   /**
@@ -664,6 +732,19 @@ export class EnemySystem {
 
   get count(): number { return this.enemies.length; }
   get killed(): number { return this.totalKilled; }
+
+  /** 当前是否满足原版按 # 出下一波的条件。 */
+  get canStartNextWave(): boolean {
+    return canRequestWave({
+      levelStarted: this.levelStarted,
+      wavePending: this.p1078,
+      enemyCount: this.enemies.length,
+      spawnedInWave: this.aT,
+      waveSize: this.aX,
+      currentWave: this.aS,
+      totalWaves: this.totalWaves,
+    });
+  }
 
   /** 当前波号 (aS, 从1计) */
   get currentWave(): number { return this.aS; }

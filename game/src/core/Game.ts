@@ -17,6 +17,11 @@ import { TechTreeSystem } from './TechTree';
 import { SaveSystem } from './SaveSystem';
 import { BuildBarSystem, BAR_CAT_BUILD, BAR_CAT_TECH, BAR_CAT_TOWER } from './BuildBar';
 import {
+  FixedStepClock,
+  LOGIC_STEP_NORMALIZED,
+  originalDemolishRefund,
+} from './Timing';
+import {
   LOGICAL_WIDTH,
   LOGICAL_HEIGHT,
   MAP_TOP_BAR_H,
@@ -28,10 +33,10 @@ import {
   BOSS_LIST_Z1131,
   FACTION_OFFSET_A1132,
   COLORS,
-  ORIG_TO_H5_TOWER,
-  H5_TO_ORIG_TOWER,
   TOWER_COST_Q1100,
-  ARCHER_TOWER_TYPE,
+  TOWER_UPGRADE_COST_R1101,
+  TECH_CASTLE_PART_H1060,
+  INITIAL_GOLD_BY_MODE,
   BAR_MESSAGES,
   ORIG_TECH_DESC,
 } from '../data/gameData';
@@ -68,7 +73,7 @@ export enum GameState {
   SOUND_PROMPT = 18,    // 原版 l=18: 声音询问
   ENDING_ANIM = 19,     // 结局动画 (原版 state 46/47/48 的H5重制版)
   CREDITS = 20,         // 关于页 (原版 a(20), 显示 b1015[1])
-  SETTINGS = 22,        // 设置页 (原版 a(8) 音量设置的H5简化版)
+  SETTINGS = 22,        // 设置页 (声音开关与音量)
   SAVE_PANEL = 27,      // 存档面板 (新流程无入口, 保留代码)
   LEVEL_INTRO = 40,     // 关卡剧情 (对应原版 state 23)
 }
@@ -125,11 +130,13 @@ export class Game {
   private state: GameState = GameState.LOGO_ANIM;
   private currentLevel: number = 0;
   private levelIndex: number = 0;
-  private gold: number = 300;
+  private gold: number = INITIAL_GOLD_BY_MODE[0];
   // 城防 (对应原版 by, aj() 行14096 初始化为10; 冲入10个敌人则失败)
   private lives: number = 10;
   private lastTime: number = 0;
-  private frameCount: number = 0;   // 对应原版 a1019 (闪烁计数)
+  private logicClock = new FixedStepClock();
+  private visualClock = new FixedStepClock();
+  private frameCount: number = 0;   // 对应原版 a1019：每 100ms 增加一次
   private cameraX: number = 0;
   private cameraY: number = 0;
 
@@ -161,6 +168,7 @@ export class Game {
   private afterVictoryT1089: boolean = false;  // t1089: 胜利后返回标记 (战役屏取消→标题)
   private k1029: boolean = false;      // k1029: 自由模式标记 (战役名旁显示◀▶)
   private soundEnabled: boolean = true; // 原版 l1031/q (声音开关)
+  private volume: number = 0.5;
 
   // ====== 标题动画字段 (原版 m()/l()) ======
   private titleM: number = 0;          // M: 入场阶段 0..5
@@ -220,6 +228,9 @@ export class Game {
   // ====== 文本页滚动 (帮助/关于) ======
   private textScroll: number = 0;
   private dragLastY: number = -1;
+  // 地图拖动状态（逻辑坐标）
+  private mapDragLastX: number = -1;
+  private mapDragLastY: number = -1;
 
   // 存档槽位 (0-3) — SAVE_PANEL 保留
   private saveSlot: number = 0;
@@ -266,8 +277,11 @@ export class Game {
         this.syncGold(); // 击杀金同步到塔/科技树池 (修复旧版三池脱节)
       },
       () => { this.lives--; if (this.lives <= 0) this.state = GameState.GAME_OVER; },
-      // 名将波登场提示 (对应原版 ab() 横幅, H5简化为消息)
-      (bossType) => { this.uiSystem.showMessage(`敌将来袭！ (名将${bossType}型)`, 90); },
+      // 名将波首个敌人登场：恢复专属横幅、头像和 /8.mid 音乐。
+      (_bossType, bossId) => {
+        this.uiSystem.showBossBanner(HEROES[bossId]?.name ?? `名将 ${bossId}`, bossId);
+        this.playMusic('./mid/8.mid');
+      },
     );
 
     this.towerSystem.setOnGoldSpent((cost) => { this.gold -= cost; this.syncGold(); });
@@ -280,15 +294,13 @@ export class Game {
 
     // 任务B-3: 建塔解锁门禁 (原版 e1105) + 原版建造费 (q1100) + 原版拆除返还 (b(int) 行15818)
     this.towerSystem.setBuildUnlockCheck((h5Type) => this.buildBar.isTowerUnlocked(h5Type));
-    this.towerSystem.setBuildCostProvider((h5Type) => {
-      const orig = H5_TO_ORIG_TOWER[h5Type] ?? -1;
-      return orig >= 0 ? TOWER_COST_Q1100[orig] : null;
+    this.towerSystem.setBuildCostProvider((origType) => {
+      return TOWER_COST_Q1100[origType] ?? null;
     });
     this.towerSystem.setDemolishRefundProvider((tower) => {
-      const orig = H5_TO_ORIG_TOWER[tower.type] ?? -1;
-      if (orig < 0) return null; // 非原版塔用默认公式
-      // 原版返还 = (建造费+升级投入)>>1, 升级投入以 建造费*(等级-1) 近似
-      return (TOWER_COST_Q1100[orig] * tower.level) >> 1;
+      const orig = tower.type;
+      if (orig < 0 || orig >= TOWER_COST_Q1100.length) return null;
+      return this.getOriginalDemolishRefund(orig, tower.level);
     });
 
     // 原版底部建造栏宿主 (任务A/B, 对应原版 M()/k(int) 的上下文)
@@ -304,8 +316,8 @@ export class Game {
       getTowerCount: () => this.towerSystem.getTowers().length,
       // 选塔完成→选位 (原版 K() case 3: bF=1)
       enterPlacement: (origTowerId) => {
-        const h5Type = ORIG_TO_H5_TOWER[origTowerId];
-        this.towerSystem.setBuildType(h5Type);
+        // BuildBar 条目已经是原版塔 id，渲染和数值层统一使用同一编号。
+        this.towerSystem.setBuildType(origTowerId);
         this.towerSystem.enterBuildMode();
         const bt = this.mapData.getBuildingBoxTile();
         this.towerSystem.setBuildPosition(bt.tx, bt.ty);
@@ -322,20 +334,20 @@ export class Game {
         this.syncGold();
       },
       getUpgradeCost: (tower) => {
-        if (tower.type === ARCHER_TOWER_TYPE) {
-          // 弓手塔备用公式 (原版 r1101[0]=(10,2); 上限5级)
-          return tower.level < 5 ? 10 + 2 * (tower.level - 1) : null;
-        }
         const info = this.techTree.canUpgradeTech(tower);
         return info.canUpgrade ? (info.cost ?? null) : null;
       },
       getDemolishRefund: (tower) => {
-        const orig = H5_TO_ORIG_TOWER[tower.type] ?? -1;
+        const orig = tower.type;
         if (orig < 0) return Math.floor((this.towerSystem.getTowerConfig(tower.type)?.cost ?? 0) * tower.level * 0.7);
-        return (TOWER_COST_Q1100[orig] * tower.level) >> 1;
+        return this.getOriginalDemolishRefund(orig, tower.level);
+      },
+      renderTowerPreview: (type, level, centerX, centerY) => {
+        this.towerSystem.renderTowerPreview(type, level, centerX, centerY);
       },
       onTechBuilt: (techIndex) => {
         // 原版: 装置建成即 e1105 解锁两塔 + b1059 城堡部件长出
+        this.castleRenderer.startPartAnimation(TECH_CASTLE_PART_H1060[techIndex] ?? 0);
         this.uiSystem.showMessage(`装置建成: ${ORIG_TECH_DESC[techIndex]}`, 120);
         this.autoSave();
       },
@@ -367,10 +379,30 @@ export class Game {
         }
         this.dragLastY = y;
       }
-      // 建造模式下不跟随鼠标, 建筑方框是唯一的建造位置指示器
-      // (原版逻辑: bN/bO 建筑方框由方向键控制, 塔只能建在方框位置)
+
+      // 战斗中允许鼠标/单指拖动地图；建造选位时拖动只移动镜头，轻触才移动幻影。
+      // 建造栏打开时也可从未被栏遮挡的上半战场拖图。
+      const panBottom = this.buildBar.isOpen ? 245 : MAP_TOP_BAR_H + MAP_VIEW_H;
+      const canPanMap = this.state === GameState.PLAYING
+        && !this.uiSystem.isPaused()
+        && y >= MAP_TOP_BAR_H
+        && y < panBottom;
+      if (canPanMap) {
+        if (this.mapDragLastX >= 0) {
+          this.mapData.panCameraBy(this.mapDragLastX - x, this.mapDragLastY - y);
+        }
+        this.mapDragLastX = x;
+        this.mapDragLastY = y;
+      } else {
+        this.mapDragLastX = -1;
+        this.mapDragLastY = -1;
+      }
     });
-    this.inputSystem.onRelease(() => { this.dragLastY = -1; });
+    this.inputSystem.onRelease(() => {
+      this.dragLastY = -1;
+      this.mapDragLastX = -1;
+      this.mapDragLastY = -1;
+    });
 
     // 键盘输入: 方向键移动建筑方框 / 菜单导航
     window.addEventListener('keydown', (e) => this.handleKeyDown(e));
@@ -424,6 +456,18 @@ export class Game {
             this.towerSystem.exitBuildMode();
             break;
         }
+        e.preventDefault();
+        return;
+      }
+      // 电脑端常用快捷键：Esc/P 打开暂停菜单；建造栏/选位模式在上方分支中优先处理。
+      if (e.key === 'Escape' || e.key === 'p' || e.key === 'P') {
+        this.uiSystem.togglePause();
+        e.preventDefault();
+        return;
+      }
+      // 原版按 # 请求首波/下一波；触屏端同时提供浮动“出兵”按钮。
+      if (e.key === '#') {
+        this.requestNextWave();
         e.preventDefault();
         return;
       }
@@ -504,7 +548,9 @@ export class Game {
         else handled = false;
         break;
       case GameState.SETTINGS:
-        if (k === 'ArrowLeft' || k === 'ArrowRight') this.settingsAction('toggle');
+        if (k === 'ArrowLeft') this.settingsAction('volume_down');
+        else if (k === 'ArrowRight') this.settingsAction('volume_up');
+        else if (k === 'ArrowUp' || k === 'ArrowDown') this.settingsAction('toggle');
         else if (k === 'Enter' || k === ' ') this.settingsAction('ok');
         else if (k === 'Escape') this.settingsAction('cancel');
         else handled = false;
@@ -670,7 +716,8 @@ export class Game {
         this.tryPlacePendingTower();
       } else {
         this.mapData.setBuildingBox(tapTile.tx, tapTile.ty);
-        this.towerSystem.setBuildPosition(tapTile.tx, tapTile.ty);
+        const clamped = this.mapData.getBuildingBoxTile();
+        this.towerSystem.setBuildPosition(clamped.tx, clamped.ty);
       }
       return;
     }
@@ -830,7 +877,7 @@ export class Game {
         this.bossSlotAg = 0;
         this.k1029 = false;
         this.afterVictoryT1089 = false;
-        this.gold = 300;
+        this.gold = INITIAL_GOLD_BY_MODE[0];
         this.state = GameState.COUNTRY_SELECT;
         break;
       case 1: // 自由模式 → l=15 (原版: T=1, af=0, k1029=true)
@@ -842,13 +889,13 @@ export class Game {
         this.bossSlotAg = 0;
         this.k1029 = true;
         this.afterVictoryT1089 = false;
-        this.gold = 300;
+        this.gold = INITIAL_GOLD_BY_MODE[1];
         this.state = GameState.COUNTRY_SELECT;
         break;
       case 2: // 继续游戏 → 读档 → 战斗
         this.continueGame();
         break;
-      case 3: // 设置 → 声音开关 (原版 a(8) 的H5简化)
+      case 3: // 设置 → 声音开关与音量
         this.state = GameState.SETTINGS;
         break;
       case 4: // 帮助 → b1015[0] 文本页 (原版 a(21))
@@ -1063,7 +1110,16 @@ export class Game {
   private persistSoundSetting(): void {
     const settings = this.saveSystem.loadSettings();
     settings.musicEnabled = this.soundEnabled;
+    settings.volume = this.volume;
     this.saveSystem.saveSettings(settings);
+    this.uiSystem.setAudioSettings(this.soundEnabled, this.volume);
+  }
+
+  private changeVolume(delta: number): void {
+    this.volume = Math.max(0, Math.min(1, Math.round((this.volume + delta) * 10) / 10));
+    this.audioSystem.setVolume(this.volume);
+    this.persistSoundSetting();
+    this.uiSystem.showMessage(`音量: ${Math.round(this.volume * 100)}%`, 45);
   }
 
   // ============================================================
@@ -1390,23 +1446,31 @@ export class Game {
   }
 
   // ============================================================
-  // 设置页 (原版 a(8) 音量设置的H5简化版: 声音开/关)
+  // 设置页：声音开关与 0-100% 音量
   // ============================================================
   private handleSettingsTap(x: number, y: number, softLeft: boolean, softRight: boolean): void {
     if (softLeft) { this.settingsAction('ok'); return; }
     if (softRight) { this.settingsAction('cancel'); return; }
     // 声音行区域: 点击切换
-    if (y >= 118 && y <= 146) {
+    if (y >= 110 && y <= 138) {
       this.settingsAction('toggle');
+    } else if (y >= 142 && y <= 174) {
+      this.settingsAction(x < LOGICAL_WIDTH / 2 ? 'volume_down' : 'volume_up');
     }
   }
 
-  private settingsAction(act: 'toggle' | 'ok' | 'cancel'): void {
+  private settingsAction(act: 'toggle' | 'volume_down' | 'volume_up' | 'ok' | 'cancel'): void {
     switch (act) {
       case 'toggle':
         this.soundEnabled = !this.soundEnabled;
         if (!this.soundEnabled) this.audioSystem.stop();
         else this.playMusic('./mid/7.mid');
+        break;
+      case 'volume_down':
+        this.changeVolume(-0.1);
+        break;
+      case 'volume_up':
+        this.changeVolume(0.1);
         break;
       case 'ok':
         this.persistSoundSetting();
@@ -1451,7 +1515,7 @@ export class Game {
     if (!data) return;
     this.levelIndex = data.levelIndex ?? 0;
     this.currentLevel = data.level ?? 0;
-    this.gold = data.gold ?? 300;
+    this.gold = data.gold ?? INITIAL_GOLD_BY_MODE[data.gameModeT === 1 ? 1 : 0];
     this.lives = data.lives ?? 10;
     this.totalKills = data.stats?.totalKills ?? 0;
     this.totalGoldEarned = data.stats?.totalGoldEarned ?? 0;
@@ -1467,14 +1531,26 @@ export class Game {
     this.battleAN = this.currentLevel >= 0 && this.currentLevel <= 8 ? this.currentLevel : 0;
     this.k1029 = this.gameModeT === 1;
     this.techTree.setFaction(this.factionX as Faction);
-    // 恢复科技树
-    if (data.tech) {
-      this.techTree.restoreFromSave(data.tech);
-    }
-    // 恢复塔布局
-    if (data.towers) {
-      this.towerSystem.restoreFromSave(data.towers);
-    }
+    // 恢复科技树。新存档把字段放在根对象，旧版则可能嵌在 data.tech；
+    // 两种格式都兼容，避免读档后升级效果和武将觉醒状态丢失。
+    const savedTech = data.tech ?? {
+      faction: data.factionX ?? data.currentFaction ?? this.factionX,
+      gold: this.gold,
+      unlockedEffects: data.unlockedEffects,
+      effectLevels: {
+        globalAtkUp: Math.round((data.globalAtkBonus ?? 0) * 10),
+        fireRateUp: Math.round((data.globalFireRateBonus ?? 0) * 100),
+        reloadHalf: data.reloadHalf ? 1 : 0,
+        goldDouble: data.goldDouble ? 1 : 0,
+      },
+      towerTypeUnlocked: data.unlockedTowers,
+      branchesState: data.branchProgress,
+      awakenedHeroes: data.awakenedHeroes,
+    };
+    if (savedTech) this.techTree.restoreFromSave(savedTech);
+    // 塔占地需要在关卡地形加载后才能写回 terrain。先记住存档数据，
+    // 在 startLevel 完成异步地图加载后再恢复，避免读档后建筑看得见却仍可重复建造。
+    const savedTowers = data.towers;
     // 任务B-4: 恢复科技建筑层 (原版 a1056/b1059/e1105, 旧存档缺省)
     this.buildBar.restoreSaveState({
       techBuilt: data.techBuildings,
@@ -1483,7 +1559,9 @@ export class Game {
     });
     this.castleRenderer.setOurPartFilter(this.buildBar.castlePartFilter());
     // 加载关卡 (resetTech=false: 保留刚恢复的科技建筑层)
-    this.startLevel(this.currentLevel, false);
+    void this.startLevel(this.currentLevel, false).then(() => {
+      if (savedTowers) this.towerSystem.restoreFromSave(savedTowers);
+    });
   }
 
   /**
@@ -1574,9 +1652,65 @@ export class Game {
         this.uiSystem.cycleGameSpeed();
         this.uiSystem.showMessage(`速度: ${this.uiSystem.getGameSpeed()}x`, 30);
         break;
+      case 'start_wave':
+        this.requestNextWave();
+        break;
       case 'menu':
         // 打开暂停菜单
         this.uiSystem.setPaused(true);
+        break;
+      case 'open_cheats':
+        this.uiSystem.openPausePage('cheats');
+        break;
+      case 'pause_settings':
+        this.uiSystem.openPausePage('settings');
+        break;
+      case 'cheat_back':
+        this.uiSystem.openPausePage('main');
+        break;
+      case 'pause_help':
+        this.uiSystem.openPausePage('help');
+        break;
+      case 'pause_about':
+        this.uiSystem.openPausePage('about');
+        break;
+      case 'toggle_sound':
+        this.soundEnabled = !this.soundEnabled;
+        this.persistSoundSetting();
+        if (this.soundEnabled) this.audioSystem.resume();
+        else this.audioSystem.pause();
+        this.uiSystem.showMessage(this.soundEnabled ? '声音已开启' : '声音已关闭', 60);
+        break;
+      case 'volume_down':
+        this.changeVolume(-0.1);
+        break;
+      case 'volume_up':
+        this.changeVolume(0.1);
+        break;
+      case 'cheat_clear_enemies':
+        this.enemySystem.clearAllEnemies();
+        this.uiSystem.showMessage(GAME_HELP_TEXT.clearEnemies, 90);
+        break;
+      case 'cheat_all_tech':
+        this.techTree.cheatGetAllTech();
+        this.buildBar.cheatUnlockAll();
+        this.castleRenderer.setOurPartFilter(this.buildBar.castlePartFilter());
+        this.syncGold();
+        this.uiSystem.showMessage(GAME_HELP_TEXT.getAllTech, 90);
+        break;
+      case 'cheat_gold':
+        this.gold += 500;
+        this.totalGoldEarned += 500;
+        this.syncGold();
+        this.uiSystem.showMessage(GAME_HELP_TEXT.getGold, 90);
+        break;
+      case 'cheat_defense':
+        this.lives += 10;
+        this.uiSystem.showMessage(GAME_HELP_TEXT.defenseUp, 90);
+        break;
+      case 'cheat_gold_double':
+        this.techTree.setGoldDouble(true);
+        this.uiSystem.showMessage(GAME_HELP_TEXT.goldDouble, 90);
         break;
       case 'resume':
         this.uiSystem.setPaused(false);
@@ -1603,6 +1737,26 @@ export class Game {
     this.mapData.moveBox(dx, dy);
     const bt = this.mapData.getBuildingBoxTile();
     this.towerSystem.setBuildPosition(bt.tx, bt.ty);
+  }
+
+  /** 原版 b(int)：建造费加上逐级升级投入后返还一半。 */
+  private getOriginalDemolishRefund(type: number, level: number): number {
+    return originalDemolishRefund(
+      TOWER_COST_Q1100[type] ?? 0,
+      TOWER_UPGRADE_COST_R1101[type] ?? [0, 0],
+      level,
+    );
+  }
+
+  /** 原版 # 键行为：仅在场上无敌且本波已经刷完时请求下一波。 */
+  private requestNextWave(): void {
+    if (this.enemySystem.requestNextWave()) {
+      const nextWave = this.enemySystem.currentWave + 1;
+      this.uiSystem.setWaveReady(false);
+      this.uiSystem.showMessage(`第 ${nextWave} 波开始`, 45);
+    } else if (!this.enemySystem.isLevelComplete) {
+      this.uiSystem.showMessage('当前还不能出兵', 30);
+    }
   }
 
   /**
@@ -1717,25 +1871,66 @@ export class Game {
    * 游戏主循环
    */
   private gameLoop = (timestamp: number): void => {
-    const dt = Math.min(33, timestamp - this.lastTime) / 16.67; // 归一化到60fps
+    // 最多追赶 1 秒，避免切回后台标签页时一次执行数百个逻辑帧。
+    const elapsedMs = Math.max(0, Math.min(1000, timestamp - this.lastTime));
     this.lastTime = timestamp;
-    this.frameCount++;
 
-    if (this.state === GameState.PLAYING && !this.uiSystem.isPaused()) {
-      const speed = this.uiSystem.getGameSpeed();
-      for (let i = 0; i < speed; i++) {
-        this.update(dt);
-      }
+    // a1019 是真实时间的 10Hz 视觉节拍，不随 60/120/144Hz 或游戏倍速改变。
+    this.frameCount += this.visualClock.advance(elapsedMs, 1, 10);
+
+    this.mapData.setVisualFrame(this.frameCount);
+    this.towerSystem.setVisualFrame(this.frameCount);
+    this.enemySystem.setVisualFrame(this.frameCount);
+
+    // 镜头、底栏和提示层使用真实时间插值，确保高刷屏手感平滑且速度一致。
+    if (this.state === GameState.PLAYING || this.state === GameState.LEVEL_INTRO) {
+      this.mapData.updateCamera(elapsedMs);
+      this.buildBar.update(elapsedMs);
+    }
+    this.uiSystem.update(elapsedMs);
+
+    const playingActive = this.state === GameState.PLAYING && !this.uiSystem.isPaused();
+    const nonPlayingAnimated = this.state !== GameState.PLAYING && this.isAnimatedState();
+    if (playingActive || nonPlayingAnimated) {
+      const speed = playingActive ? this.uiSystem.getGameSpeed() : 1;
+      const steps = this.logicClock.advance(elapsedMs, speed, 10);
+      for (let i = 0; i < steps; i++) this.runLogicStep();
+    } else {
+      // 暂停期间不积攒游戏逻辑，恢复时不会瞬间补帧。
+      this.logicClock.reset();
+    }
+
+    this.render();
+
+    requestAnimationFrame(this.gameLoop);
+  };
+
+  private isAnimatedState(): boolean {
+    return this.state === GameState.LEVEL_INTRO ||
+      this.state === GameState.ENDING_ANIM ||
+      this.state === GameState.LOGO_ANIM ||
+      this.state === GameState.LOADING_SCREEN ||
+      this.state === GameState.TITLE_MENU ||
+      this.state === GameState.COUNTRY_SELECT ||
+      this.state === GameState.UPGRADE_SELECT ||
+      this.state === GameState.CAMPAIGN_SELECT ||
+      this.state === GameState.SETTINGS;
+  }
+
+  /** 执行一次原版 100ms 逻辑帧。 */
+  private runLogicStep(): void {
+    if (this.state === GameState.PLAYING) {
+      if (!this.uiSystem.isPaused()) this.update(LOGIC_STEP_NORMALIZED);
     } else if (this.state === GameState.LEVEL_INTRO) {
-      this.updateLevelIntro(dt);
+      this.updateLevelIntro(LOGIC_STEP_NORMALIZED);
     } else if (this.state === GameState.ENDING_ANIM) {
-      this.updateEndingAnim(dt);
+      this.updateEndingAnim(LOGIC_STEP_NORMALIZED);
     } else if (this.state === GameState.LOGO_ANIM) {
-      this.updateLogoAnim(dt);
+      this.updateLogoAnim(LOGIC_STEP_NORMALIZED);
     } else if (this.state === GameState.LOADING_SCREEN) {
-      this.updateLoadingScreen(dt);
+      this.updateLoadingScreen(LOGIC_STEP_NORMALIZED);
     } else if (this.state === GameState.TITLE_MENU) {
-      this.updateTitleMenu(dt);
+      this.updateTitleMenu(LOGIC_STEP_NORMALIZED);
     } else if (this.state === GameState.COUNTRY_SELECT) {
       this.updateMenuBackground();
     } else if (this.state === GameState.UPGRADE_SELECT) {
@@ -1746,10 +1941,7 @@ export class Game {
     } else if (this.state === GameState.SETTINGS) {
       this.updateMenuBackground();
     }
-    this.render();
-
-    requestAnimationFrame(this.gameLoop);
-  };
+  }
 
   /**
    * 更新游戏状态
@@ -1758,14 +1950,10 @@ export class Game {
     this.playTime += dt * 16.67 / 1000;
     this.totalKills = this.enemySystem.killed;
 
-    // 更新相机 (平滑滚动到目标位置)
-    this.mapData.updateCamera();
-
-    // 原版底部建造栏滑入滑出 (原版 K() 行8146)
-    this.buildBar.update();
-
-    this.enemySystem.update(dt);
+    this.enemySystem.update();
     this.towerSystem.update(this.enemySystem.getActiveEnemies(), 0, MAP_TOP_BAR_H);
+    this.castleRenderer.update();
+    this.uiSystem.setWaveReady(this.enemySystem.canStartNextWave);
 
     // 过关判定 (对应原版 G() case2 行7492-7527:
     //   aS==l1072[aN] 且 场上无敌 且 本波已刷完 且 城防>0)
@@ -1775,14 +1963,12 @@ export class Game {
       if (this.gameModeT === 0) {
         this.campaignAO++;
       }
-      this.gold += 1000; // 通关奖励
-      this.totalGoldEarned += 1000;
+      // 原版通关不会凭空增加 1000 金；金币只来自击杀/金手指。
       // 先存档再切状态 (autoSave 仅在 PLAYING 生效)
       this.autoSave();
       this.state = GameState.LEVEL_COMPLETE;
     }
 
-    this.uiSystem.update();
     this.saveSystem.updateAutoSave(dt, () => this.autoSave());
   }
 
@@ -1795,7 +1981,6 @@ export class Game {
    */
   private updateLevelIntro(dt: number): void {
     this.introTimer += dt;
-    this.mapData.updateCamera();
 
     // 阶段0: 滚动展开动画 (约1秒)
     if (this.introPhase === 0) {
@@ -1813,6 +1998,8 @@ export class Game {
   private endLevelIntro(): void {
     this.state = GameState.PLAYING;
     this.enemySystem.startLevel();
+    this.uiSystem.setWaveReady(true);
+    this.uiSystem.showMessage('建造完成后，点击“出兵”开始第一波', 150);
   }
 
   /**
@@ -2093,7 +2280,7 @@ export class Game {
   private renderArrows(xL: number, xR: number, y: number): void {
     const ui24 = this.spr('ui', 24);
     if (!ui24) return;
-    const blink = (Math.floor(this.frameCount / 12) & 1) << 1; // 原版 a1019&1 (10FPS→200ms一闪)
+    const blink = (this.frameCount & 1) << 1; // 原版 a1019&1 (10FPS→200ms一闪)
     this.renderer.drawImage(ui24, xL + blink, y);
     this.renderer.drawImageFlipped(ui24, xR - blink, y, true);
   }
@@ -2199,7 +2386,7 @@ export class Game {
       // 左右 ui[24] ◀▶ 闪烁
       const ui24 = this.spr('ui', 24);
       if (ui24) {
-        const blink = (Math.floor(this.frameCount / 12) & 1) << 1; // 原版 a1019&1 (10FPS→200ms一闪)
+        const blink = (this.frameCount & 1) << 1; // 原版 a1019&1 (10FPS→200ms一闪)
         r.drawImage(ui24, this.posK - 20 + blink, this.posL + 1);
         r.drawImageFlipped(ui24, this.posK + 47 + 20 - 6 - blink, this.posL + 1, true);
       }
@@ -2371,7 +2558,7 @@ export class Game {
     if (btn) r.drawImageRegion(btn, this.focusAf * 29, 0, 29, 15, 211, btnY, 29, 15);
     const ui24 = this.spr('ui', 24);
     if (ui24) {
-      const blink = (Math.floor(this.frameCount / 12) & 1) << 1; // 原版 a1019&1 (10FPS→200ms一闪)
+      const blink = (this.frameCount & 1) << 1; // 原版 a1019&1 (10FPS→200ms一闪)
       // 原版: af=0 变换4 / af=1 变换6 (旋转箭头); H5近似: 下指/上指
       r.drawImageRotated(ui24, 202, btnY + 2 + blink, this.focusAf === 0 ? 1 : -1);
     }
@@ -2440,7 +2627,7 @@ export class Game {
   }
 
   // ============================================================
-  // 设置页 (原版 a(8) 音量设置的H5简化版)
+  // 设置页 (原版 a(8) 音量设置)
   // ============================================================
   private renderSettings(): void {
     const r = this.renderer;
@@ -2449,14 +2636,16 @@ export class Game {
     r.drawText('设置', 108, 32, 0x53678A, 14);
     // 面板
     r.setColor(0xFCFFCD);
-    r.fillRect(20, 100, 200, 60);
+    r.fillRect(20, 96, 200, 92);
     r.setColor(0x53678A);
-    r.drawRect(20, 100, 200, 60);
+    r.drawRect(20, 96, 200, 92);
     // 声音开关 (b1015[101] 声音 / [102]开 / [103]关)
-    r.drawText('声音', 48, 122, 0x53678A, 12);
-    r.drawText(this.soundEnabled ? '开' : '关', 156, 122, this.soundEnabled ? 0xD5317A : 0x506E91, 12);
-    this.renderArrows(136, 182, 124);
-    r.drawText('点击切换', 98, 142, 0x506E91, 9);
+    r.drawText('声音', 48, 112, 0x53678A, 12);
+    r.drawText(this.soundEnabled ? '开' : '关', 156, 112, this.soundEnabled ? 0xD5317A : 0x506E91, 12);
+    r.drawText('音量', 48, 148, 0x53678A, 12);
+    r.drawText(`${Math.round(this.volume * 100)}%`, 148, 148, 0xD5317A, 12);
+    this.renderArrows(126, 194, 150);
+    r.drawText('上下切声音，左右调音量', 58, 174, 0x506E91, 9);
     // 软键: 确定(左)+返回(右)
     this.uiSystem.renderSoftkeyBar(SOFTKEY_OK, SOFTKEY_BACK);
   }
@@ -2631,8 +2820,10 @@ export class Game {
     // 渲染双方城池 (对应原版 ak() 行14443-14448: m(aK,aL,0) 我城, m(aI,aJ,1) 敌城)
     this.castleRenderer.render();
 
-    // 渲染建筑方框
-    this.mapData.renderBuildingBox();
+    // 普通模式显示 1 格原版定位框；选位模式由 TowerSystem 按完整占地绘制。
+    if (!this.towerSystem.isBuildMode) {
+      this.mapData.renderBuildingBox();
+    }
 
     // 渲染路径高亮 (建造模式)
     if (this.towerSystem.isBuildMode) {
@@ -2650,6 +2841,19 @@ export class Game {
     // 原版底部: J() 底条常驻 (aw=0时亦为米色条, 行7866-7908)
     // 栏打开/选位时软键=确定/取消; 平时=确定/菜单 (原版左功能键确认, 右功能键菜单)
     this.buildBar.render();
+    // 原版底部名称条左侧直接反馈当前定位位置能否建造；建造选位时按完整占地判断。
+    if (!this.buildBar.isOpen) {
+      const canBuild = this.towerSystem.isBuildMode
+        ? this.towerSystem.canBuildAtCurrentPosition()
+        : this.mapData.isBuildingBoxBuildable();
+      this.renderer.drawText(
+        canBuild ? '可造区域' : '不可造区域',
+        2,
+        299,
+        canBuild ? 0x2f7a5a : 0xb23a48,
+        9,
+      );
+    }
     if (this.buildBar.isOpen || this.towerSystem.isBuildMode) {
       this.uiSystem.renderSoftkeyBar(SOFTKEY_OK, SOFTKEY_CANCEL);
     } else {
@@ -2846,6 +3050,9 @@ export class Game {
     // 读取声音设置
     const settings = this.saveSystem.loadSettings();
     this.soundEnabled = settings.musicEnabled;
+    this.volume = settings.volume;
+    this.audioSystem.setVolume(this.volume);
+    this.uiSystem.setAudioSettings(this.soundEnabled, this.volume);
 
     // 地图图集推迟到 LOADING_SCREEN 阶段加载 (对应原版 k() 的 e() 进度)
     // 启动后先播放 LOGO 动画 (原版 l=0)

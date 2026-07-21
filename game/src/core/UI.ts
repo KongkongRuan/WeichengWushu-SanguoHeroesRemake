@@ -5,7 +5,7 @@
  */
 import { Renderer } from './Renderer';
 import { LOGICAL_WIDTH, LOGICAL_HEIGHT, COLORS } from '../data/gameData';
-import { TOWER_NAMES, FACTION_NAMES } from '../data/heroes';
+import { TOWER_NAMES, FACTION_NAMES, GAME_HELP_TEXT, GAME_DESCRIPTION_TEXT, COPYRIGHT_TEXT } from '../data/heroes';
 import type { TechTreeSystem, BranchState } from './TechTree';
 import type { SpriteLoader } from './SpriteLoader';
 
@@ -24,6 +24,7 @@ export interface Button {
 }
 
 type ButtonCallback = (button: Button) => void;
+type PausePage = 'main' | 'cheats' | 'settings' | 'help' | 'about';
 
 export class UISystem {
   private renderer: Renderer;
@@ -43,6 +44,13 @@ export class UISystem {
   private heroAwakenText: string = '';
   private heroAwakenTimer: number = 0;
 
+  private bossBannerName: string = '';
+  private bossBannerPortrait: number = -1;
+  private bossBannerTimer: number = 0;
+
+  // 原版 # 键的触屏入口：只有清场且本波刷完时才显示。
+  private waveReady: boolean = false;
+
   // ====== 新增: 游戏控制状态 (对应原版 isPausedInGame / 速度切换) ======
   // 游戏速度 (1=正常, 2=2倍速, 3=3倍速)
   private gameSpeed: number = 1;
@@ -50,6 +58,10 @@ export class UISystem {
   private paused: boolean = false;
   // 是否显示暂停菜单
   private pauseMenuVisible: boolean = false;
+  // 原版暂停菜单：主菜单/金手指/帮助/关于页
+  private pausePage: PausePage = 'main';
+  private audioEnabled: boolean = true;
+  private audioVolume: number = 0.5;
 
   // ====== 新增: 科技树面板翻页状态 ======
   // 当前科技树页码 (0-based)
@@ -61,6 +73,7 @@ export class UISystem {
 
   constructor(renderer: Renderer) {
     this.renderer = renderer;
+    this.updateButtons();
   }
 
   /**
@@ -136,7 +149,19 @@ export class UISystem {
    */
   showHeroAwakened(heroName: string): void {
     this.heroAwakenText = `武将觉醒: ${heroName}!`;
-    this.heroAwakenTimer = 180; // 3秒
+    this.heroAwakenTimer = 3000;
+  }
+
+  showBossBanner(name: string, portraitId: number): void {
+    this.bossBannerName = name;
+    this.bossBannerPortrait = portraitId;
+    this.bossBannerTimer = 3000;
+  }
+
+  setWaveReady(ready: boolean): void {
+    if (this.waveReady === ready) return;
+    this.waveReady = ready;
+    this.updateButtons();
   }
 
   // ============================================================
@@ -177,7 +202,25 @@ export class UISystem {
   setPaused(paused: boolean): void {
     this.paused = paused;
     this.pauseMenuVisible = paused;
+    if (paused) this.pausePage = 'main';
     this.updateButtons();
+  }
+
+  get pauseMenuPage(): PausePage {
+    return this.pausePage;
+  }
+
+  openPausePage(page: PausePage): void {
+    this.pausePage = page;
+    this.pauseMenuVisible = true;
+    this.paused = true;
+    this.updateButtons();
+  }
+
+  setAudioSettings(enabled: boolean, volume: number): void {
+    this.audioEnabled = enabled;
+    this.audioVolume = Math.max(0, Math.min(1, volume));
+    if (this.pausePage === 'settings') this.updateButtons();
   }
 
   /**
@@ -309,38 +352,44 @@ export class UISystem {
       });
     }
 
+    // 浮在战场右上角的大触控按钮，恢复原版手动出兵节奏。
+    if (this.waveReady && !this.paused) {
+      this.buttons.push({
+        x: LOGICAL_WIDTH - 66, y: 23, w: 62, h: 24,
+        label: '出兵 ▶', icon: '▶', color: 0x2F7A5A,
+        action: 'start_wave', visible: true, enabled: true,
+      });
+    }
     // ====== 暂停菜单按钮 ======
     if (this.pauseMenuVisible) {
-      // 暂停菜单覆盖在屏幕中央
-      const menuW = 120;
-      const menuH = 100;
+      // 原版菜单文字为 b1015[107..112]：继续、金手指、设置、帮助、关于、退出。
+      // 金手指页对应 b1015[175..179] 的五项作弊功能。
+      const menuW = 164;
+      const itemH = 24;
+      const labels = this.pausePage === 'main'
+        ? [
+            ['继续游戏', 'resume'], ['金手指', 'open_cheats'],
+            ['设置', 'pause_settings'], ['帮助', 'pause_help'],
+            ['关于', 'pause_about'], ['退出', 'back_to_menu'],
+          ] : (this.pausePage === 'cheats' ? [
+            ['消灭当前全部敌人', 'cheat_clear_enemies'],
+            ['获得全部科技', 'cheat_all_tech'], ['获得500金', 'cheat_gold'],
+            ['城防加10', 'cheat_defense'], ['消灭敌人金翻倍', 'cheat_gold_double'],
+            ['返回上级', 'cheat_back'],
+          ] : (this.pausePage === 'settings' ? [
+            [`声音：${this.audioEnabled ? '开' : '关'}`, 'toggle_sound'],
+            [`音量：${Math.round(this.audioVolume * 100)}%`, 'volume_up'],
+            ['降低音量', 'volume_down'], ['返回上级', 'cheat_back'],
+          ] : [['返回上级', 'cheat_back']]));
+      const menuH = labels.length * itemH + 20;
       const menuX = (LOGICAL_WIDTH - menuW) / 2;
       const menuY = (LOGICAL_HEIGHT - menuH) / 2;
-      const itemH = 22;
-
-      // 继续
-      this.buttons.push({
-        x: menuX, y: menuY, w: menuW, h: itemH,
-        label: '继续游戏', icon: '▶', color: 0x4CAF50,
-        action: 'resume', visible: true, enabled: true,
-      });
-      // 重新开始
-      this.buttons.push({
-        x: menuX, y: menuY + itemH + 2, w: menuW, h: itemH,
-        label: '重新开始', icon: '↻', color: 0xFFC107,
-        action: 'restart', visible: true, enabled: true,
-      });
-      // 返回主菜单
-      this.buttons.push({
-        x: menuX, y: menuY + (itemH + 2) * 2, w: menuW, h: itemH,
-        label: '返回主菜单', icon: '☰', color: 0xF44336,
-        action: 'back_to_menu', visible: true, enabled: true,
-      });
-      // 存档
-      this.buttons.push({
-        x: menuX, y: menuY + (itemH + 2) * 3, w: menuW, h: itemH,
-        label: '保存进度', icon: '💾', color: 0x2196F3,
-        action: 'save_game', visible: true, enabled: true,
+      labels.forEach(([label, action], index) => {
+        this.buttons.push({
+          x: menuX + 4, y: menuY + 10 + index * itemH, w: menuW - 8, h: itemH - 2,
+          label, icon: '', color: index === labels.length - 1 ? 0xDAB043 : 0x5B7FA3,
+          action, visible: true, enabled: true,
+        });
       });
       return;
     }
@@ -365,7 +414,8 @@ export class UISystem {
    */
   showMessage(text: string, duration: number = 120): void {
     this.messageText = text;
-    this.messageTimer = duration;
+    // 对外仍兼容旧的 60FPS 帧数参数，内部统一换算成真实毫秒。
+    this.messageTimer = duration * (1000 / 60);
   }
 
   /**
@@ -398,15 +448,38 @@ export class UISystem {
       this.renderTechPanel();
     }
 
+    // 暂停遮罩必须先画，按钮再画在遮罩上方；旧实现顺序相反，
+    // 结果是按钮全部被黑色面板盖住，只剩“已暂停”（截图问题）。
+    if (this.pauseMenuVisible) {
+      this.renderPauseMenu();
+    }
+
     // 渲染按钮
     for (const btn of this.buttons) {
       if (!btn.visible) continue;
       this.renderButton(btn);
     }
 
+    if (this.bossBannerTimer > 0) {
+      const x = 18;
+      const y = 54;
+      const w = LOGICAL_WIDTH - 36;
+      const h = 42;
+      this.renderer.setColor(0x2A1410);
+      this.renderer.fillRect(x, y, w, h);
+      this.renderer.setColor(0xFFD36A);
+      this.renderer.drawRect(x, y, w, h);
+      const portrait = this.spriteLoader?.getByPrefix('sp', this.bossBannerPortrait) ?? null;
+      if (portrait) {
+        this.renderer.drawImageRegion(portrait, 0, 0, portrait.width, portrait.height,
+          x + 4, y + 3, 36, 36);
+      }
+      this.renderer.drawText('名将来袭', x + 47, y + 7, 0xFFCC66, 12);
+      this.renderer.drawText(this.bossBannerName, x + 47, y + 23, 0xFCFFCD, 11);
+    }
+
     // 消息提示
     if (this.messageTimer > 0) {
-      this.messageTimer--;
       const tw = this.renderer.virtualContext.measureText(this.messageText).width + 10;
       const mx = (LOGICAL_WIDTH - tw) / 2;
       const my = 100;
@@ -419,7 +492,6 @@ export class UISystem {
 
     // 武将觉醒提示
     if (this.heroAwakenTimer > 0) {
-      this.heroAwakenTimer--;
       const y = 60;
       this.renderer.setColor(0x000000);
       this.renderer.fillRect(0, y, LOGICAL_WIDTH, 30);
@@ -428,10 +500,6 @@ export class UISystem {
       this.renderer.drawText(this.heroAwakenText, (LOGICAL_WIDTH - tw) / 2, y + 8, 0xFFD700, 14);
     }
 
-    // ====== 新增: 暂停菜单遮罩 ======
-    if (this.pauseMenuVisible) {
-      this.renderPauseMenu();
-    }
   }
 
   /**
@@ -559,8 +627,11 @@ export class UISystem {
     return names[index] || `分支${index}`;
   }
 
-  update(): void {
-    // UI更新逻辑
+  update(elapsedMs: number = 0): void {
+    const dt = Math.max(0, elapsedMs);
+    this.messageTimer = Math.max(0, this.messageTimer - dt);
+    this.heroAwakenTimer = Math.max(0, this.heroAwakenTimer - dt);
+    this.bossBannerTimer = Math.max(0, this.bossBannerTimer - dt);
   }
 
   // ============================================================
@@ -569,11 +640,14 @@ export class UISystem {
   private renderPauseMenu(): void {
     // 半透明遮罩
     this.renderer.setColor(0x000000);
+    this.renderer.virtualContext.globalAlpha = 0.72;
     this.renderer.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    this.renderer.virtualContext.globalAlpha = 1;
 
-    // 菜单边框
-    const menuW = 120;
-    const menuH = 100;
+    const menuW = 164;
+    const itemH = 24;
+    const count = this.pausePage === 'settings' ? 4 : (this.pausePage === 'help' || this.pausePage === 'about' ? 1 : 6);
+    const menuH = count * itemH + 20;
     const menuX = (LOGICAL_WIDTH - menuW) / 2;
     const menuY = (LOGICAL_HEIGHT - menuH) / 2;
 
@@ -582,7 +656,39 @@ export class UISystem {
     this.renderer.setColor(0xFFD700);
     this.renderer.drawRect(menuX, menuY, menuW, menuH);
 
-    // 标题
-    this.renderer.drawText('已暂停', (LOGICAL_WIDTH - 36) / 2, menuY - 14, 0xFFD700, 12);
+    // 标题和页说明
+    const title = this.pausePage === 'main' ? '已暂停'
+      : this.pausePage === 'cheats' ? '金手指'
+      : this.pausePage === 'settings' ? '设置'
+      : this.pausePage === 'help' ? '游戏帮助' : '关于';
+    this.renderer.drawText(title, (LOGICAL_WIDTH - title.length * 6) / 2, menuY - 14, 0xFFD700, 12);
+    if (this.pausePage === 'help' || this.pausePage === 'about') {
+      this.renderer.setColor(0x11111D);
+      this.renderer.fillRect(menuX + 6, menuY + 8, menuW - 12, menuH - 16);
+      const text = this.pausePage === 'help' ? GAME_DESCRIPTION_TEXT : COPYRIGHT_TEXT;
+      this.drawWrapped(text, menuX + 10, menuY + 12, menuW - 20, 0xFCFFCD, 8, 11);
+    }
+  }
+
+  /** 在暂停说明页中绘制换行文本。 */
+  private drawWrapped(text: string, x: number, y: number, maxW: number, color: number, size: number, lineH: number): void {
+    const ctx = this.renderer.virtualContext;
+    ctx.font = `${size}px monospace`;
+    const lines: string[] = [];
+    for (const paragraph of text.split('\n')) {
+      let line = '';
+      for (const ch of paragraph) {
+        const next = line + ch;
+        if (ctx.measureText(next).width > maxW && line) {
+          lines.push(line);
+          line = ch;
+        } else {
+          line = next;
+        }
+      }
+      lines.push(line);
+    }
+    const maxLines = Math.max(1, Math.floor((LOGICAL_HEIGHT - y - 30) / lineH));
+    lines.slice(0, maxLines).forEach((line, i) => this.renderer.drawText(line, x, y + i * lineH, color, size));
   }
 }

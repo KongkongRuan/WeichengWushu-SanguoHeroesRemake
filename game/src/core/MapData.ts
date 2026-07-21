@@ -41,6 +41,7 @@ import {
   TILESET_MAP_M1075,
   OVERLAY_ATLAS_N1076,
   SPAWN_POINTS_B1069,
+  CURSOR_CORNER_O1156,
 } from '../data/gameData';
 
 export interface LevelMapData {
@@ -101,6 +102,7 @@ export class MapData {
   // 建筑方框位置 (对应原版 bN/bO, 像素坐标)
   private boxX: number = 0;
   private boxY: number = 0;
+  private cursorRenderFrame: number = 0;
 
   constructor(renderer: Renderer) {
     this.renderer = renderer;
@@ -332,6 +334,20 @@ export class MapData {
     this.setOccupiedAtPixel(px, py, false);
   }
 
+  /** 标记建筑占用草地格；与敌人对路径格的奇偶占用标记分开处理。 */
+  occupyBuildTile(tx: number, ty: number): void {
+    if (!this.mapData || tx < 0 || ty < 0 || tx >= this.mapData.width || ty >= this.mapData.height) return;
+    const idx = ty * this.mapData.width + tx;
+    if (this.terrain[idx] === TERRAIN_BUILDABLE) this.terrain[idx] = 12;
+  }
+
+  /** 释放建筑占地，恢复为原版可建造草地值 8。 */
+  releaseBuildTile(tx: number, ty: number): void {
+    if (!this.mapData || tx < 0 || ty < 0 || tx >= this.mapData.width || ty >= this.mapData.height) return;
+    const idx = ty * this.mapData.width + tx;
+    if (this.terrain[idx] >= 12) this.terrain[idx] = TERRAIN_BUILDABLE;
+  }
+
   /**
    * 扫描我城/敌城锚点 (对应原版 N() 行8469-8516)
    * 行优先扫描第一个 11(我城)/10(敌城) 格, 锚点 = 瓦片坐标*16 (像素)
@@ -437,20 +453,43 @@ export class MapData {
   /**
    * 平滑移动相机到目标位置 (对应原版 ak() 中的渐进滚动)
    */
-  updateCamera(): void {
-    // 简单的线性插值 - 原版使用渐进滚动
+  updateCamera(elapsedMs: number = 100): void {
+    // 以旧版 60Hz 下每帧 0.15 的手感为基准换算为时间插值，
+    // 从而在 60/120/144Hz 上保持相同的镜头跟随速度。
+    const factor = 1 - Math.pow(1 - 0.15, Math.max(0, elapsedMs) / (1000 / 60));
     const dx = this.targetCamX - this.camX;
     const dy = this.targetCamY - this.camY;
     if (Math.abs(dx) > 1) {
-      this.camX += dx * 0.15;
+      this.camX += dx * factor;
     } else {
       this.camX = this.targetCamX;
     }
     if (Math.abs(dy) > 1) {
-      this.camY += dy * 0.15;
+      this.camY += dy * factor;
     } else {
       this.camY = this.targetCamY;
     }
+  }
+
+  /** 注入原版 10Hz 的 a1019 视觉帧，渲染函数本身不再推进计数。 */
+  setVisualFrame(frame: number): void {
+    this.cursorRenderFrame = frame;
+  }
+
+  /**
+   * 触屏/鼠标拖动地图：以屏幕像素增量平移相机，并立即限制在地图边界内。
+   * 建造方框仍然可以通过方向键控制；拖动只改变观察位置，不会改变选位。
+   */
+  panCameraBy(dx: number, dy: number): void {
+    if (!this.mapData) return;
+    const mapWPx = this.mapData.width * TILE_SIZE;
+    const mapHPx = this.mapData.height * TILE_SIZE;
+    const maxX = Math.max(0, mapWPx - MAP_VIEW_W);
+    const maxY = Math.max(0, mapHPx - MAP_VIEW_H);
+    this.targetCamX = Math.max(0, Math.min(maxX, this.targetCamX + dx));
+    this.targetCamY = Math.max(0, Math.min(maxY, this.targetCamY + dy));
+    this.camX = Math.max(0, Math.min(maxX, this.camX + dx));
+    this.camY = Math.max(0, Math.min(maxY, this.camY + dy));
   }
 
   /**
@@ -618,7 +657,8 @@ export class MapData {
   }
 
   /**
-   * 绘制建筑方框 (对应原版在地图上绘制的方框)
+   * 绘制默认建筑定位框 (原版 i(int×4), a.java:22126)。
+   * ui_0 是四个 7×7 粉白角框；ui_1 是框上方上下跳动的红色标记。
    */
   renderBuildingBox(): void {
     const px = this.boxX - this.camX;
@@ -627,15 +667,35 @@ export class MapData {
     // 只在可见范围内绘制
     if (px < -TILE_SIZE || px > MAP_VIEW_W || py < MAP_TOP_BAR_H - TILE_SIZE || py > MAP_TOP_BAR_H + MAP_VIEW_H) return;
 
-    const vctx = this.renderer.virtualContext;
-    vctx.save();
-    vctx.strokeStyle = '#FFD700';
-    vctx.lineWidth = 1;
-    vctx.strokeRect(px, py, TILE_SIZE, TILE_SIZE);
-    // 内部半透明填充
-    vctx.fillStyle = 'rgba(255, 215, 0, 0.15)';
-    vctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
-    vctx.restore();
+    const corner = this.spriteLoader?.getUISprite(0);
+    if (corner) {
+      for (let k = 0; k < 4; k++) {
+        const cx = px + (TILE_SIZE - 7) * CURSOR_CORNER_O1156[k][0];
+        const cy = py + (TILE_SIZE - 7) * CURSOR_CORNER_O1156[k][1];
+        this.renderer.drawSpriteTransform(corner, k * 7, 0, 7, 7, cx, cy, 0);
+      }
+    } else {
+      // 资源加载失败时仍保留清晰的定位反馈。
+      this.renderer.setColor(0xff6fae);
+      this.renderer.drawRect(px, py, TILE_SIZE, TILE_SIZE);
+    }
+
+    const marker = this.spriteLoader?.getUISprite(1);
+    if (marker) {
+      // 原版使用 (a1019 & 1) << 1，每 100ms 在 0/2px 间跳动。
+      const bounce = (this.cursorRenderFrame & 1) << 1;
+      this.renderer.drawImage(
+        marker,
+        px + (TILE_SIZE >> 1) - (marker.width >> 1),
+        py - TILE_SIZE - bounce,
+      );
+    }
+  }
+
+  /** 当前默认定位格是否属于可造区域。 */
+  isBuildingBoxBuildable(): boolean {
+    const { tx, ty } = this.getBuildingBoxTile();
+    return this.isBuildableAt(tx, ty);
   }
 
   /**
