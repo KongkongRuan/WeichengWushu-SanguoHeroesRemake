@@ -8,16 +8,59 @@ import {
 } from '../src/core/Timing';
 import { TowerSystem, type Tower } from '../src/core/Tower';
 import {
-  TOWER_ATTACK_LAYER_TYPES,
-  TOWER_ATTACK_ONLY_AUX_TYPES,
+  TOWER_AMBIENT_LAYER_TYPES,
   TOWER_AUX_LAYER_BY_TYPE,
   TOWER_GATE_LOAD_DIR_S1117,
   TOWER_GATE_LOAD_OFF_T1118,
   TOWER_RIGHT_FACING_TRANSFORMS,
   TOWER_PATH_FACING_TYPES,
   TOWER_ATTACK_DURATION_TICKS,
-  shouldRenderTowerAuxLayer,
 } from '../src/data/gameData';
+
+function createTower(type: number, overrides: Partial<Tower> = {}): Tower {
+  return {
+    x: 0, y: 0, type, level: 1,
+    damage: 30, range: 100, fireRate: 30,
+    cooldown: 0, target: -1, angle: 0, heroId: -1, effectType: 0,
+    hp: 100, maxHp: 100, debuffTimer: 0,
+    frame: 0, orientation: 1, attackAnim: 0,
+    attackState: 0, attackPhase: 0, attackFrame: 0, volleyFrames: [], liquidPattern: 0,
+    buildEffect: 0, buildEffectFrame: 0,
+    strikeX: 0, strikeY: 0,
+    gateLoaded: false, gateState: 0, gateTimer: 0,
+    ...overrides,
+  };
+}
+
+function createEnemy(x: number = 48, y: number = 16, hp: number = 1000) {
+  return { x, y, hp, state: 0, effect: 0, timer: 0, slowScale: 1 } as never;
+}
+
+function systemWithTower(tower: Tower): TowerSystem {
+  const system = new TowerSystem({} as never, {} as never);
+  (system as unknown as { towers: Tower[] }).towers = [tower];
+  return system;
+}
+
+function visualSystem() {
+  const draws: Array<{ key: string; sx: number }> = [];
+  const renderer = {
+    setColor() {},
+    fillRect() {},
+    drawRect() {},
+    drawText() {},
+    drawSpriteTransform(image: { key: string }, sx: number) {
+      draws.push({ key: image.key, sx });
+    },
+  };
+  const system = new TowerSystem(renderer as never, {} as never);
+  (system as unknown as { spriteLoader: unknown }).spriteLoader = {
+    getByPrefix(prefix: string, index: number) {
+      return { key: `${prefix}_${index}`, width: 512, height: 512 };
+    },
+  };
+  return { system, draws };
+}
 
 function countLogicSteps(refreshRate: number, seconds: number, speed: number = 1): number {
   const clock = new FixedStepClock();
@@ -112,20 +155,76 @@ test('11 类建筑始终使用同一套原版辅助层编号', () => {
   ]);
 });
 
-test('只有拥有攻击图集的建筑可以进入独立攻击贴图分支', () => {
-  assert.deepEqual([...TOWER_ATTACK_LAYER_TYPES], [0, 2, 3, 4, 5, 8, 9]);
-  for (const idleOnlyType of [1, 6, 7, 10]) {
-    assert.equal(TOWER_ATTACK_LAYER_TYPES.includes(idleOnlyType), false);
+test('原版常驻 t 动画与攻击 bu 过程层使用独立分支', () => {
+  assert.deepEqual([...TOWER_AMBIENT_LAYER_TYPES], [2, 3, 5, 8, 9]);
+  for (const processOnlyType of [0, 1, 4, 6, 7, 10]) {
+    assert.equal(TOWER_AMBIENT_LAYER_TYPES.includes(processOnlyType), false);
   }
 });
 
-test('擂木、烟火、寒冰和投石的动作辅助层不会在待机时绘制', () => {
-  assert.deepEqual([...TOWER_ATTACK_ONLY_AUX_TYPES], [3, 5, 6, 7]);
-  for (const type of TOWER_ATTACK_ONLY_AUX_TYPES) {
-    assert.equal(shouldRenderTowerAuxLayer(type, 0), false);
-    assert.equal(shouldRenderTowerAuxLayer(type, 1), true);
+test('烟火常驻火焰不依赖攻击状态，bu 蓄力层只在攻击状态绘制', () => {
+  const { system, draws } = visualSystem();
+  const tower = createTower(3, { attackState: 0, frame: 2 });
+  const visual = system as unknown as {
+    renderAmbientAnim(t: Tower, x: number, y: number): boolean;
+    renderAttackProcess(t: Tower, x: number, y: number): boolean;
+  };
+  assert.equal(visual.renderAmbientAnim(tower, 0, 0), true);
+  assert.equal(draws.some(draw => draw.key === 't3_1'), true);
+  draws.length = 0;
+  assert.equal(visual.renderAttackProcess(tower, 0, 0), false);
+  assert.equal(draws.length, 0);
+  tower.attackState = 1;
+  tower.attackPhase = 0;
+  tower.attackFrame = 0;
+  assert.equal(visual.renderAttackProcess(tower, 0, 0), true);
+  assert.equal(draws.some(draw => draw.key === 'bu_18'), true);
+});
+
+test('投石释放层使用动作帧而不是建筑等级选择素材', () => {
+  const { system, draws } = visualSystem();
+  const tower = createTower(7, {
+    level: 6, attackState: 1, attackPhase: 1, attackFrame: 0,
+    strikeX: 48, strikeY: 16,
+  });
+  const visual = system as unknown as {
+    renderAttackProcess(t: Tower, x: number, y: number): boolean;
+  };
+  assert.equal(visual.renderAttackProcess(tower, 0, 0), true);
+  assert.equal(draws.some(draw => draw.key === 'bu_29'), true);
+  assert.equal(draws.some(draw => draw.key === 'bu_28' && draw.sx === 0), true);
+});
+
+test('原版分层顺序先画全部建筑本体，再把攻击过程叠加到顶层', () => {
+  const { system } = visualSystem();
+  const tower = createTower(0, { attackState: 1 });
+  (system as unknown as { towers: Tower[] }).towers = [tower];
+  const order: string[] = [];
+  const visual = system as unknown as {
+    renderModel(t: Tower, x: number, y: number): boolean;
+    renderAmbientAnim(t: Tower, x: number, y: number): boolean;
+    renderAttackProcess(t: Tower, x: number, y: number): boolean;
+  };
+  visual.renderModel = () => { order.push('model'); return true; };
+  visual.renderAmbientAnim = () => { order.push('ambient'); return false; };
+  visual.renderAttackProcess = () => { order.push('attack'); return true; };
+
+  system.render();
+  assert.deepEqual(order, ['model', 'ambient', 'attack']);
+});
+
+test('沸水与滚油会绘制道路上的主要液体攻击层', () => {
+  for (const type of [8, 9]) {
+    const { system, draws } = visualSystem();
+    const tower = createTower(type, {
+      attackState: 1, attackPhase: 1, attackFrame: 4, liquidPattern: 1,
+    });
+    const visual = system as unknown as {
+      renderAttackProcess(t: Tower, x: number, y: number): boolean;
+    };
+    assert.equal(visual.renderAttackProcess(tower, 0, 0), true);
+    assert.equal(draws.some(draw => draw.key === (type === 8 ? 'bu_31' : 'bu_35')), true);
   }
-  assert.equal(shouldRenderTowerAuxLayer(2, 0), true); // 突刺仍保留待机孔洞
 });
 
 test('投石右向原图可转换为上右下左四个道路朝向', () => {
@@ -137,36 +236,184 @@ test('投石与道路机关在攻击和升级期间保持建造时解析出的�
 });
 
 test('每类建筑的攻击状态足够播放原版完整动作', () => {
-  assert.deepEqual([...TOWER_ATTACK_DURATION_TICKS], [28, 13, 13, 20, 28, 20, 6, 30, 25, 25, 10]);
-  assert.equal(TOWER_ATTACK_DURATION_TICKS[7] > 14, true); // 投石原版 13 帧蓄力后仍有 17 帧释放动作
+  assert.deepEqual([...TOWER_ATTACK_DURATION_TICKS], [5, 13, 13, 20, 5, 20, 6, 30, 16, 16, 10]);
+  assert.equal(TOWER_ATTACK_DURATION_TICKS[7], 30); // 13 帧蓄力 + 17 帧释放
 });
 
-test('投石升级和攻击不会改朝向，且攻击总是从第 0 帧完整开始', () => {
-  const system = new TowerSystem({} as never, {} as never);
-  const tower: Tower = {
-    x: 0, y: 0, type: 7, level: 1,
-    damage: 30, range: 100, fireRate: 30,
-    cooldown: 0, target: -1, angle: 0, heroId: -1, effectType: 0,
-    hp: 100, maxHp: 100, debuffTimer: 0,
-    frame: 5, orientation: 3, attackAnim: 0,
-    buildEffect: 0, buildEffectFrame: 0,
-    strikeX: 0, strikeY: 0,
-    gateLoaded: false, gateState: 0, gateTimer: 0,
-  };
+test('投石升级和攻击不会改朝向，也不会重置常驻动画帧', () => {
+  const tower = createTower(7, { frame: 5, orientation: 3 });
+  const system = systemWithTower(tower);
 
   assert.equal(system.upgradeTower(tower), true);
   assert.equal(tower.orientation, 3);
   assert.equal(tower.buildEffect, 2);
 
   tower.buildEffect = 0;
-  (system as unknown as { towers: Tower[] }).towers = [tower];
-  system.update([{
-    x: 48, y: 16, hp: 100, state: 0,
-    effect: 0, timer: 0, slowScale: 1,
-  } as never], 0, 0);
+  system.update([createEnemy()], 0, 0);
   assert.equal(tower.orientation, 3);
-  assert.equal(tower.frame, 0);
+  assert.equal(tower.frame, 6);
+  assert.equal(tower.attackState, 1);
+  assert.equal(tower.attackPhase, 0);
+  assert.equal(tower.attackFrame, 0);
   assert.equal(tower.attackAnim, TOWER_ATTACK_DURATION_TICKS[7]);
+});
+
+test('弓手塔与麻痹矢先进入五箭动作，命中帧才扣血', () => {
+  for (const type of [0, 4]) {
+    const tower = createTower(type);
+    const enemy = createEnemy();
+    const system = systemWithTower(tower);
+    system.update([enemy], 0, 0);
+    assert.equal(enemy.hp, 1000);
+    assert.deepEqual(tower.volleyFrames, [0, 1, 2, 3, 4]);
+    system.update([enemy], 0, 0);
+    assert.equal(enemy.hp, 970);
+    assert.deepEqual(tower.volleyFrames, [-1, 0, 1, 2, 3]);
+  }
+});
+
+test('原版 6 号 Boss 完全免疫麻痹矢命中', () => {
+  const tower = createTower(4);
+  const enemy = createEnemy() as unknown as { hp: number; bossType: number };
+  enemy.bossType = 6;
+  const system = systemWithTower(tower);
+  system.update([enemy as never], 0, 0);
+  system.update([enemy as never], 0, 0);
+  assert.equal(enemy.hp, 1000);
+});
+
+test('石灰瓶在第 4 帧命中并造成 48x48 范围伤害', () => {
+  const tower = createTower(1);
+  const primary = createEnemy(48, 16);
+  const nearby = createEnemy(60, 20);
+  const system = systemWithTower(tower);
+  system.update([primary, nearby], 0, 0);
+  for (let i = 0; i < 3; i++) system.update([primary, nearby], 0, 0);
+  assert.equal(primary.hp, 1000);
+  system.update([primary, nearby], 0, 0);
+  assert.equal(primary.hp, 970);
+  assert.equal(nearby.hp < 1000, true);
+  assert.equal(nearby.hp > primary.hp, true);
+});
+
+test('烟火与寒冰先蓄力 13 帧，再在释放切换帧结算伤害', () => {
+  for (const type of [3, 5]) {
+    const tower = createTower(type);
+    const enemy = createEnemy();
+    const system = systemWithTower(tower);
+    system.update([enemy], 0, 0);
+    for (let i = 0; i < 12; i++) system.update([enemy], 0, 0);
+    assert.equal(enemy.hp, 1000);
+    system.update([enemy], 0, 0);
+    assert.equal(tower.attackPhase, 1);
+    assert.equal(tower.attackFrame, 0);
+    assert.equal(enemy.hp < 1000, true);
+  }
+});
+
+test('投石蓄力后在释放第 3 帧命中，而不是索敌时立即伤害', () => {
+  const tower = createTower(7, { orientation: 3 });
+  const enemy = createEnemy();
+  const system = systemWithTower(tower);
+  system.update([enemy], 0, 0);
+  for (let i = 0; i < 13; i++) system.update([enemy], 0, 0);
+  assert.equal(enemy.hp, 1000);
+  assert.equal(tower.attackPhase, 1);
+  for (let i = 0; i < 2; i++) system.update([enemy], 0, 0);
+  assert.equal(enemy.hp, 1000);
+  system.update([enemy], 0, 0);
+  assert.equal(enemy.hp, 970);
+});
+
+test('突刺按三排时序逐帧结算路径伤害', () => {
+  const tower = createTower(2, { orientation: 1 });
+  const map = {
+    getTerrain() { return 0; },
+  };
+  const system = new TowerSystem({} as never, map as never);
+  (system as unknown as { towers: Tower[] }).towers = [tower];
+  const enemy = createEnemy(56, 8);
+  system.update([enemy], 0, 0);
+  assert.equal(enemy.hp, 1000);
+  system.update([enemy], 0, 0);
+  assert.equal(tower.attackFrame, 1);
+  assert.equal(enemy.hp, 970);
+});
+
+test('擂木在 6 帧释放过程中持续作用道路格', () => {
+  const tower = createTower(6, { orientation: 1 });
+  const map = {
+    getTerrain() { return 0; },
+  };
+  const system = new TowerSystem({} as never, map as never);
+  (system as unknown as { towers: Tower[] }).towers = [tower];
+  const enemy = createEnemy(56, 8);
+  system.update([enemy], 0, 0);
+  system.update([enemy], 0, 0);
+  const afterFirstHit = enemy.hp;
+  system.update([enemy], 0, 0);
+  assert.equal(tower.attackFrame, 2);
+  assert.equal(enemy.hp < afterFirstHit, true);
+  for (let i = 0; i < 4; i++) system.update([enemy], 0, 0);
+  assert.equal(tower.attackState, 2);
+  assert.equal(enemy.hp, 820);
+});
+
+test('沸水和滚油依次经历开启、持续、关闭三个子阶段', () => {
+  for (const type of [8, 9]) {
+    const tower = createTower(type, { orientation: 1 });
+    const map = {
+      getTerrain() { return 0; },
+    };
+    const system = new TowerSystem({} as never, map as never);
+    (system as unknown as { towers: Tower[] }).towers = [tower];
+    const enemy = createEnemy(56, 24);
+    system.update([enemy], 0, 0);
+    assert.equal(tower.attackPhase, 0);
+    for (let i = 0; i < 2; i++) system.update([enemy], 0, 0);
+    assert.equal(enemy.hp, 1000);
+    system.update([enemy], 0, 0);
+    assert.equal(tower.attackPhase, 1);
+    assert.equal(enemy.hp < 1000, true);
+    for (let i = 0; i < 11; i++) system.update([enemy], 0, 0);
+    assert.equal(tower.attackPhase, 2);
+  }
+});
+
+test('断龙闸保持原版落石 5 帧与闸墙 10 帧状态', () => {
+  const tower = createTower(10, { orientation: 1, gateLoaded: true });
+  const map = {
+    getTerrain() { return 0; },
+    setPathDefense() {},
+  };
+  const system = new TowerSystem({} as never, map as never);
+  (system as unknown as { towers: Tower[] }).towers = [tower];
+  assert.equal(system.releaseGate(tower), true);
+  assert.equal(tower.attackPhase, 1);
+  for (let i = 0; i < 5; i++) system.update([], 0, 0);
+  assert.equal(tower.gateState, 2);
+  assert.equal(tower.attackPhase, 2);
+  for (let i = 0; i < 10; i++) system.update([], 0, 0);
+  assert.equal(tower.gateState, 0);
+  assert.equal(tower.attackState, 0);
+});
+
+test('魏国终阶断龙闸使用原版 46 点持久石阵，其余等级为 16', () => {
+  const strengths: number[] = [];
+  const tower = createTower(10, {
+    level: 7, orientation: 1, gateLoaded: true,
+  });
+  const map = {
+    getTerrain() { return 0; },
+    setPathDefense(_x: number, _y: number, strength: number) { strengths.push(strength); },
+  };
+  const system = new TowerSystem({} as never, map as never);
+  system.setFaction(1);
+  (system as unknown as { towers: Tower[] }).towers = [tower];
+  assert.equal(system.releaseGate(tower), true);
+  for (let i = 0; i < 5; i++) system.update([], 0, 0);
+  assert.equal(strengths.length > 0, true);
+  assert.equal(strengths.every(strength => strength === 46), true);
 });
 
 test('投石建造后会自动朝向建筑左右两侧的敌人路径', () => {

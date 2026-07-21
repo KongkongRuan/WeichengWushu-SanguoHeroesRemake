@@ -30,8 +30,8 @@ import {
   TOWER_FOOTPRINT_O1098,
   TOWER_DIRECTION_P1099,
   TOWER_PATH_FACING_TYPES, TOWER_ATTACK_DURATION_TICKS,
-  TOWER_AUX_LAYER_BY_TYPE, TOWER_ATTACK_LAYER_TYPES,
-  TOWER_RIGHT_FACING_TRANSFORMS, shouldRenderTowerAuxLayer,
+  TOWER_AUX_LAYER_BY_TYPE, TOWER_AMBIENT_LAYER_TYPES,
+  TOWER_RIGHT_FACING_TRANSFORMS,
 } from '../data/gameData';
 import { TOWER_NAMES, TOWER_DESCRIPTIONS, HEROES, Hero } from '../data/heroes';
 import type { TechTreeSystem } from './TechTree';
@@ -64,7 +64,12 @@ export interface Tower {
   // ====== 动画状态 (对应原版实体字段) ======
   frame: number;       // 动画帧 (对应原版 entity[7], 按 w1123[type] 序列推进)
   orientation: number; // 朝向 0=上 1=右 2=下 3=左 (对应原版 entity[5])
-  attackAnim: number;  // 攻击状态剩余逻辑帧 (>0 即攻击态, 对应原版 entity[4]==6)
+  attackAnim: number;  // 当前攻击剩余逻辑帧；仅用于兼容/UI，状态以 attackState 为准
+  attackState: number; // 原版 entity[4]：0索敌/1攻击/2冷却/6无敌人待机
+  attackPhase: number; // 原版 entity[10]：各建筑的蓄力/释放/收尾子阶段
+  attackFrame: number; // 原版 entity[13]：当前子阶段动作帧
+  volleyFrames: number[]; // 原版 C1134：弓手塔/麻痹矢五枚投射物帧
+  liquidPattern: number; // 原版 entity[11]：沸水/滚油每次启动时随机的三格液体纹理偏移
   buildEffect: number;  // 0=无，1=建造成功，2=升级成功（对应原版 entity[4] 的 3/4 状态）
   buildEffectFrame: number; // ui_20 白烟帧（0..8）
   strikeX: number;      // 原版 entity[11]：最近一次攻击的地图像素 X
@@ -364,6 +369,11 @@ export class TowerSystem {
       frame: 0,
       orientation: this.resolvePathFacing(tileX, tileY, type),
       attackAnim: 0,
+      attackState: 0,
+      attackPhase: 0,
+      attackFrame: 0,
+      volleyFrames: [],
+      liquidPattern: 0,
       buildEffect: 1,
       buildEffectFrame: 0,
       strikeX: tileX * TILE_SIZE,
@@ -401,8 +411,7 @@ export class TowerSystem {
       // 原版属性不是乘法成长，而是各自数组的“基础值 + 每级增量”。
       tower.level++;
       this.applyOriginalStats(tower);
-      tower.buildEffect = 2;
-      tower.buildEffectFrame = 0;
+      this.beginUpgradeEffect(tower);
 
       // 检查武将觉醒
       if (result.hero) {
@@ -419,8 +428,7 @@ export class TowerSystem {
     if (this.gold < cost) return false;
     tower.level++;
     this.applyOriginalStats(tower);
-    tower.buildEffect = 2;
-    tower.buildEffectFrame = 0;
+    this.beginUpgradeEffect(tower);
     this.gold -= cost;
     this.onGoldSpent?.(cost);
     return true;
@@ -491,12 +499,27 @@ export class TowerSystem {
     return true;
   }
 
+  private beginUpgradeEffect(tower: Tower): void {
+    tower.buildEffect = 2;
+    tower.buildEffectFrame = 0;
+    tower.attackAnim = 0;
+    tower.attackState = 2;
+    tower.attackPhase = 3;
+    tower.attackFrame = 0;
+    tower.volleyFrames = [];
+    tower.liquidPattern = 0;
+    tower.target = -1;
+  }
+
   /** 原版动作19：断龙闸是手动、一次性机关，不进入通用自动索敌循环。 */
   releaseGate(tower: Tower): boolean {
     if (tower.type !== 10 || !tower.gateLoaded || tower.gateState !== 0) return false;
     tower.gateLoaded = false;
     tower.gateState = 1;
     tower.gateTimer = 0;
+    tower.attackState = 1;
+    tower.attackPhase = 1;
+    tower.attackFrame = 0;
     tower.target = -1;
     return true;
   }
@@ -510,138 +533,312 @@ export class TowerSystem {
    * 更新所有塔 - 应用全局科技加成
    */
   update(enemies: Enemy[], offsetX: number, offsetY: number): void {
-    // 新增: 更新 debuff 计时器
     this.updateDebuffs();
-
-    // Game 已按原版 100ms 固定逻辑帧调用本方法，动画每次直接推进一次。
     this.tickAnim();
-
-    // 获取全局科技加成
-    const globalAtkBonus = this.techTree?.getGlobalAtkBonus() ?? 0;
     const globalFireRateBonus = this.techTree?.getGlobalFireRateBonus() ?? 0;
 
     for (const tower of this.towers) {
-      // 原版建造/升级白烟播放期间处于状态 3/4，不会同时索敌或发动攻击。
       if (tower.buildEffect !== 0) continue;
-      // 断龙闸只响应底栏“释放断龙闸”，不能以 fireRate=0 进入通用自动攻击。
       if (tower.type === 10) {
         this.updateGate(tower, enemies);
         continue;
       }
-      if (tower.cooldown > 0) {
-        tower.cooldown--;
+
+      if (tower.attackState === 1) {
+        if (tower.cooldown > 0) tower.cooldown--;
+        this.advanceAttack(tower, enemies, offsetX, offsetY);
         continue;
       }
-      // 必须让当前攻击动作完整播完，不能因为高等级冷却较短而不断从第 0 帧重启。
-      if (tower.attackAnim > 0) continue;
 
-      // 查找目标。实体坐标是占地左上角，瞄准点与模型一样使用 o1098*8 的中心锚点。
-      const renderType = this.spriteType(tower.type);
-      const half = (TOWER_ANCHOR_O1098[renderType] ?? 2) << 3;
-      const tx = offsetX + tower.x * TILE_SIZE + half;
-      const ty = offsetY + tower.y * TILE_SIZE + half;
-      // 突刺/擂木/断龙闸等近身机关在原版范围表中为 0，它们靠敌人进入机关
-      // 占地附近触发；若直接把 0 交给通用距离索敌，攻击动画永远不会启动。
-      const triggerRange = tower.range > 0 ? tower.range : half + TILE_SIZE;
-      const directionalAttack = renderType === 2 || renderType === 6 || renderType === 8 || renderType === 9;
-      const directionalCells = directionalAttack
-        ? new Set(this.projectedDeviceCells(
-          tower.x,
-          tower.y,
-          tower.orientation,
-          renderType === 8 || renderType === 9,
-        ).map(cell => `${cell.tx},${cell.ty}`))
-        : null;
-      let closestDist = directionalAttack ? Number.POSITIVE_INFINITY : triggerRange;
-      let targetIdx = -1;
-
-      for (let i = 0; i < enemies.length; i++) {
-        const enemy = enemies[i];
-        // 跳过死亡动画/已结算敌人 (EnemyState.DYING=5 / SETTLE=6)
-        if (enemy.state === EnemyState.DYING || enemy.state === EnemyState.SETTLE) continue;
-        if (directionalCells && !directionalCells.has(`${enemy.x >> 4},${enemy.y >> 4}`)) continue;
-        const ex = offsetX + enemy.x;
-        const ey = offsetY + enemy.y;
-        const dist = Math.sqrt((ex - tx) ** 2 + (ey - ty) ** 2);
-        if (dist < closestDist) {
-          closestDist = dist;
-          targetIdx = i;
-        }
+      if (tower.cooldown > 0) {
+        tower.cooldown--;
+        tower.attackState = 2;
+        continue;
       }
 
-      if (targetIdx >= 0) {
-        const target = enemies[targetIdx];
-        const ex = offsetX + target.x;
-        const ey = offsetY + target.y;
-        tower.angle = Math.atan2(ey - ty, ex - tx);
-        tower.target = targetIdx;
-        tower.strikeX = target.x;
-        tower.strikeY = target.y;
-
-        // 计算实际伤害 (全局攻击加成 + 武将加成 + 科技效果)
-        // 新增: 使用 TechTree 的 applyEffectsToTowerDamage 方法应用所有伤害相关科技
-        let actualDamage = tower.damage;
-        if (this.techTree) {
-          actualDamage = this.techTree.applyEffectsToTowerDamage(tower, tower.damage);
-          // 效果9: 周围塔增益
-          const nearbyTowers = this.getNearbyTowers(tower, 64);
-          const auraBonus = this.techTree.applyAuraBonus(tower, nearbyTowers);
-          actualDamage = Math.floor(actualDamage * (1 + auraBonus));
-        } else {
-          // 退化方案: 仅使用全局加成
-          actualDamage = tower.damage * (1 + globalAtkBonus);
-        }
-        if (tower.heroId >= 0) {
-          actualDamage *= 1.5; // 武将觉醒后额外50%伤害
-        }
-
-        // 近身机关和范围装置按原版区域触发，同一逻辑帧可命中范围内多个敌人。
-        const victims = directionalCells ? enemies.filter(enemy => {
-          if (enemy.state === EnemyState.DYING || enemy.state === EnemyState.SETTLE) return false;
-          return directionalCells.has(`${enemy.x >> 4},${enemy.y >> 4}`);
-        }) : [target];
-
-        for (const victim of victims) {
-          victim.hp -= Math.floor(actualDamage);
-          if (tower.effectType > 0) {
-            this.applyTowerEffect(victim, tower.effectType, tower.level);
-            if (this.techTree) {
-              const attackTimeBonus = this.techTree.getAttackTimeBonus();
-              if (attackTimeBonus > 0 && victim.timer > 0) {
-                victim.timer = Math.floor(victim.timer * (1 + attackTimeBonus));
-              }
-            }
-          }
-          if (this.techTree) {
-            this.techTree.applyAoeEffectsToEnemy(victim, tower.type, tower.level);
-          }
-        }
-
-        // 攻速受全局加成影响
-        const actualFireRate = Math.max(5, Math.floor(tower.fireRate * (1 - globalFireRateBonus)));
-        tower.cooldown = actualFireRate;
-
-        // 进入攻击状态 (对应原版 c1107[4]==6; H5简化: 按固定时长计时)
-        tower.frame = 0;
-        tower.attackAnim = TOWER_ATTACK_DURATION_TICKS[renderType] ?? 10;
-        // 普通远程塔朝向目标；投石与道路机关保持建造时解析出的道路朝向。
-        if (!TOWER_PATH_FACING_TYPES.includes(renderType)) {
-          tower.orientation = this.angleToOrientation(tower.angle);
-        }
-      } else {
+      tower.attackState = 0;
+      const targetIdx = this.findTargetIndex(tower, enemies, offsetX, offsetY);
+      if (targetIdx < 0) {
         tower.target = -1;
+        if (enemies.length === 0) tower.attackState = 6;
+        continue;
       }
+
+      this.updateStrikeTarget(tower, targetIdx, enemies[targetIdx], offsetX, offsetY);
+      tower.cooldown = Math.max(5, Math.floor(tower.fireRate * (1 - globalFireRateBonus)));
+      this.startAttack(tower);
     }
 
-    // 新增: 应用持续伤害效果 (中毒/火焰) 到所有活跃敌人
     if (this.techTree) {
       for (const enemy of enemies) {
-        if (enemy.state === EnemyState.DYING || enemy.state === EnemyState.SETTLE) continue;
-        this.techTree.applyDamageOverTime(enemy, 1);
+        if (this.isActiveEnemy(enemy)) this.techTree.applyDamageOverTime(enemy, 1);
       }
     }
   }
 
+  private isActiveEnemy(enemy: Enemy | undefined): enemy is Enemy {
+    return !!enemy
+      && enemy.hp > 0
+      && enemy.state !== EnemyState.DYING
+      && enemy.state !== EnemyState.SETTLE;
+  }
+
+  private findTargetIndex(tower: Tower, enemies: Enemy[], offsetX: number, offsetY: number): number {
+    const type = this.spriteType(tower.type);
+    const half = (TOWER_ANCHOR_O1098[type] ?? 2) << 3;
+    const tx = offsetX + tower.x * TILE_SIZE + half;
+    const ty = offsetY + tower.y * TILE_SIZE + half;
+    const directional = type === 2 || type === 6 || type === 8 || type === 9;
+    const fullLiquidSpread = (type === 8 || type === 9)
+      && this.faction === 0
+      && tower.level - 1 === 6;
+    const cells = directional
+      ? new Set(this.projectedDeviceCells(
+        tower.x,
+        tower.y,
+        tower.orientation,
+        (type === 8 || type === 9) && !fullLiquidSpread,
+      ).map(cell => `${cell.tx},${cell.ty}`))
+      : null;
+    let bestDistance = directional
+      ? Number.POSITIVE_INFINITY
+      : (tower.range > 0 ? tower.range : half + TILE_SIZE);
+    let best = -1;
+    for (let i = 0; i < enemies.length; i++) {
+      const enemy = enemies[i];
+      if (!this.isActiveEnemy(enemy)) continue;
+      if (cells && !cells.has(`${enemy.x >> 4},${enemy.y >> 4}`)) continue;
+      const distance = Math.hypot(offsetX + enemy.x - tx, offsetY + enemy.y - ty);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  private updateStrikeTarget(
+    tower: Tower,
+    targetIdx: number,
+    target: Enemy,
+    offsetX: number,
+    offsetY: number,
+  ): void {
+    const type = this.spriteType(tower.type);
+    const half = (TOWER_ANCHOR_O1098[type] ?? 2) << 3;
+    const tx = offsetX + tower.x * TILE_SIZE + half;
+    const ty = offsetY + tower.y * TILE_SIZE + half;
+    tower.target = targetIdx;
+    tower.strikeX = target.x;
+    tower.strikeY = target.y;
+    tower.angle = Math.atan2(offsetY + target.y - ty, offsetX + target.x - tx);
+    if (!TOWER_PATH_FACING_TYPES.includes(type)) {
+      tower.orientation = this.angleToOrientation(tower.angle);
+    }
+  }
+
+  private startAttack(tower: Tower): void {
+    const type = this.spriteType(tower.type);
+    tower.attackState = 1;
+    tower.attackPhase = type === 0 || type === 1 || type === 4 || type === 6 ? 1 : 0;
+    tower.attackFrame = 0;
+    tower.volleyFrames = type === 0 || type === 4 ? [0, 1, 2, 3, 4] : [];
+    if (type === 8 || type === 9) tower.liquidPattern = (Math.random() * 3) | 0;
+    const extendedLiquid = (type === 8 || type === 9)
+      && this.faction === 1
+      && tower.level - 1 === 6;
+    tower.attackAnim = extendedLiquid ? 26 : (TOWER_ATTACK_DURATION_TICKS[type] ?? 10);
+  }
+
+  private finishAttack(tower: Tower): void {
+    tower.attackAnim = 0;
+    tower.attackPhase = 0;
+    tower.attackFrame = 0;
+    tower.volleyFrames = [];
+    tower.target = -1;
+    tower.attackState = tower.cooldown > 0 ? 2 : 0;
+  }
+
+  private advanceAttack(tower: Tower, enemies: Enemy[], offsetX: number, offsetY: number): void {
+    const type = this.spriteType(tower.type);
+    if (tower.attackAnim > 0) tower.attackAnim--;
+    switch (type) {
+      case 0:
+      case 4:
+        tower.attackFrame = Math.min(4, tower.attackFrame + 1);
+        tower.volleyFrames = tower.volleyFrames.map(frame => Math.max(-1, frame - 1));
+        if (tower.attackFrame === 1) {
+          const target = enemies[tower.target];
+          // 原版麻痹矢对 6 号 Boss 完全无效（A(int) 4944-4964），不能只免疫麻痹而仍扣血。
+          if (type !== 4 || target?.bossType !== 6) this.damageTarget(tower, enemies);
+        }
+        if (tower.volleyFrames.every(frame => frame < 0)) this.finishAttack(tower);
+        break;
+      case 1:
+        tower.attackFrame++;
+        if (tower.attackFrame === 4) {
+          this.damageLimeImpact(tower, enemies);
+        }
+        if (tower.attackFrame > 12) this.finishAttack(tower);
+        break;
+      case 2:
+        tower.attackFrame++;
+        if (tower.attackFrame > 12) {
+          this.finishAttack(tower);
+        } else {
+          this.damageEnemiesInCells(tower, enemies, this.spikeActiveCells(tower, tower.attackFrame));
+        }
+        break;
+      case 3:
+      case 5:
+      case 7:
+        if (tower.attackPhase === 0) {
+          tower.attackFrame++;
+          if (tower.attackFrame > 12) {
+            const targetIdx = this.findTargetIndex(tower, enemies, offsetX, offsetY);
+            if (targetIdx < 0) {
+              tower.attackFrame = 12;
+              break;
+            }
+            this.updateStrikeTarget(tower, targetIdx, enemies[targetIdx], offsetX, offsetY);
+            tower.attackPhase = 1;
+            tower.attackFrame = 0;
+            const target = enemies[tower.target];
+            if (type === 5 || (type === 3 && target?.bossType !== 5)) {
+              this.damageTarget(tower, enemies);
+            }
+          }
+          break;
+        }
+        tower.attackFrame++;
+        if (type === 7 && tower.attackFrame === 3) {
+          const primary = enemies[tower.target];
+          if (this.isActiveEnemy(primary)) {
+            this.damageEnemy(tower, primary);
+            for (const enemy of enemies) {
+              if (enemy === primary || !this.isActiveEnemy(enemy)) continue;
+              if (Math.abs(enemy.x - tower.strikeX) < 24
+                && Math.abs(enemy.y - tower.strikeY) < 24) {
+                this.damageEnemy(tower, enemy, 0.25, false);
+              }
+            }
+          }
+        }
+        if (tower.attackFrame > (type === 7 ? 16 : 6)) this.finishAttack(tower);
+        break;
+      case 6:
+        tower.attackFrame++;
+        // 原版即使在第 6 帧结束动作后仍会再调用一次 h(...) 结算当前道路格。
+        this.damageEnemiesInCells(
+          tower,
+          enemies,
+          this.projectedDeviceCells(tower.x, tower.y, tower.orientation),
+        );
+        if (tower.attackFrame > 5) this.finishAttack(tower);
+        break;
+      case 8:
+      case 9: {
+        let liquidActive = tower.attackPhase !== 0;
+        tower.attackFrame++;
+        if (tower.attackPhase === 0 && tower.attackFrame > 2) {
+          tower.attackPhase = 1;
+          tower.attackFrame = 0;
+          liquidActive = true;
+        } else if (tower.attackPhase === 1) {
+          const extended = this.faction === 1 && tower.level - 1 === 6;
+          if (tower.attackFrame > (extended ? 20 : 10)) {
+            tower.attackPhase = 2;
+            tower.attackFrame = 0;
+          }
+        } else if (tower.attackPhase === 2 && tower.attackFrame > 1) {
+          this.finishAttack(tower);
+        }
+        // 开启的前三帧只移动阀门；原版在切到阶段 1、液体真正出现后才调用 h(...) 命中。
+        if (liquidActive) {
+          const fullSpread = this.faction === 0 && tower.level - 1 === 6;
+          this.damageEnemiesInCells(
+            tower,
+            enemies,
+            this.projectedDeviceCells(tower.x, tower.y, tower.orientation, !fullSpread),
+          );
+        }
+        break;
+      }
+      default:
+        this.finishAttack(tower);
+    }
+  }
+
+  private towerDamage(tower: Tower): number {
+    let damage = tower.damage;
+    if (this.techTree) {
+      damage = this.techTree.applyEffectsToTowerDamage(tower, damage);
+      damage *= 1 + this.techTree.applyAuraBonus(tower, this.getNearbyTowers(tower, 64));
+    }
+    if (tower.heroId >= 0) damage *= 1.5;
+    return Math.floor(damage);
+  }
+
+  private damageEnemy(tower: Tower, enemy: Enemy, scale: number = 1, applyEffect: boolean = true): void {
+    enemy.hp -= Math.max(1, Math.floor(this.towerDamage(tower) * scale));
+    if (applyEffect && tower.effectType > 0) {
+      this.applyTowerEffect(enemy, tower.effectType, tower.level);
+      const bonus = this.techTree?.getAttackTimeBonus() ?? 0;
+      if (bonus > 0 && enemy.timer > 0) enemy.timer = Math.floor(enemy.timer * (1 + bonus));
+    }
+    this.techTree?.applyAoeEffectsToEnemy(enemy, tower.type, tower.level);
+  }
+
+  private damageTarget(tower: Tower, enemies: Enemy[]): void {
+    const target = enemies[tower.target];
+    if (this.isActiveEnemy(target)) this.damageEnemy(tower, target);
+  }
+
+  private damageLimeImpact(tower: Tower, enemies: Enemy[]): void {
+    const primary = enemies[tower.target];
+    if (this.isActiveEnemy(primary) && primary.bossType !== 8) {
+      this.damageEnemy(tower, primary);
+    }
+    for (const enemy of enemies) {
+      if (enemy === primary || !this.isActiveEnemy(enemy) || enemy.bossType === 8) continue;
+      if (Math.abs(enemy.x - tower.strikeX) < 24 && Math.abs(enemy.y - tower.strikeY) < 24) {
+        this.damageEnemy(tower, enemy, 0.25, false);
+      }
+    }
+  }
+
+  private damageEnemiesInCells(
+    tower: Tower,
+    enemies: Enemy[],
+    cells: { tx: number; ty: number }[],
+  ): void {
+    const keys = new Set(cells.map(cell => `${cell.tx},${cell.ty}`));
+    for (const enemy of enemies) {
+      if (!this.isActiveEnemy(enemy)) continue;
+      if (keys.has(`${enemy.x >> 4},${enemy.y >> 4}`)) this.damageEnemy(tower, enemy);
+    }
+  }
+
+  private spikeActiveCells(tower: Tower, phase: number): { tx: number; ty: number }[] {
+    const orientation = tower.orientation & 3;
+    const spread = TOWER_DIR_SPREAD_M1084[orientation];
+    const cells: { tx: number; ty: number }[] = [];
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        const line = orientation === 0 || orientation === 2 ? j : i;
+        const active = (line === 0 && phase >= 0 && phase < 7)
+          || (line === 1 && phase > 3 && phase < 10)
+          || (line === 2 && phase > 6 && phase < 12);
+        if (!active) continue;
+        const px = tower.x * TILE_SIZE + (i << 4) * spread[0] + spread[2];
+        const py = tower.y * TILE_SIZE + (j << 4) * spread[1] + spread[3];
+        cells.push({ tx: px >> 4, ty: py >> 4 });
+      }
+    }
+    return cells;
+  }
+
+  /** 旧版统一倒计时实现，仅保留到本轮状态机迁移完成。 */
   /**
    * 获取指定塔周围的塔列表 (新增方法)
    * 用于效果9 (auraAtkUp) 周围塔攻击增加
@@ -705,7 +902,7 @@ export class TowerSystem {
   private tickAnim(): void {
     for (const tower of this.towers) {
       const st = this.spriteType(tower.type); // 弓手塔19→原版塔0动画序列
-      const seq = TOWER_ANIM_W1123[st];
+      const seq = TOWER_ANIM_W1123[st === 4 ? 0 : st];
       if (seq && seq.length > 2) {
         const next = tower.frame + 1;
         if (next > seq.length - 3) {
@@ -716,9 +913,6 @@ export class TowerSystem {
         } else {
           tower.frame = next;
         }
-      }
-      if (tower.attackAnim > 0) {
-        tower.attackAnim--;
       }
       if (tower.buildEffect !== 0) {
         tower.buildEffectFrame++;
@@ -761,18 +955,20 @@ export class TowerSystem {
       const py = offsetY + tower.y * TILE_SIZE;
       const config = this.towerConfigs[tower.type];
 
-      // 原版两层渲染 (对应 ag() 行13592): bu 基座层 (y(int) 行26281)
-      // + t 攻击动画层 (d(int×6) 行18882); 删除原猜测公式 type*8+(level-1)*2
+      // 原版第一遍先绘制建筑本体与常驻机件层；攻击过程由循环结束后的第二遍统一叠加。
+      // 不能在这里先画 bu 攻击层，否则随后的建筑本体会遮住箭矢、擂木和投石等动作。
       let spriteDrawn = false;
       if (this.spriteLoader) {
-        spriteDrawn = this.renderBase(tower, px, py);
+        if (this.spriteType(tower.type) === 2) {
+          spriteDrawn = this.renderSpikeBase(tower, px, py, -1) || spriteDrawn;
+        }
         if (tower.type === 10) {
           spriteDrawn = this.renderGatePathStones(tower, offsetX, offsetY) || spriteDrawn;
         }
         // 原版主模型层：t{type}_0。此前遗漏该层，导致截图中的弓手塔/突刺
         // 只剩 bu 图集的攻击效果，外观完全不像原版。
         spriteDrawn = this.renderModel(tower, px, py) || spriteDrawn;
-        spriteDrawn = this.renderAttackAnim(tower, px, py) || spriteDrawn;
+        spriteDrawn = this.renderAmbientAnim(tower, px, py) || spriteDrawn;
         this.renderBuildEffect(tower, px, py);
       }
 
@@ -822,6 +1018,15 @@ export class TowerSystem {
 
     }
 
+    // 原版 ag() 在所有建筑本体完成后另起一遍循环调用 y(int)，确保攻击过程位于建筑层之上。
+    if (this.spriteLoader) {
+      for (const tower of this.towers) {
+        const px = offsetX + tower.x * TILE_SIZE;
+        const py = offsetY + tower.y * TILE_SIZE;
+        this.renderAttackProcess(tower, px, py);
+      }
+    }
+
     // 绘制建造预览 (对应原版 am() case 1 行14719: 范围圈+逐格指示+角标+塔幻影)
     if (this.buildMode) {
       this.renderBuildPreview(offsetX, offsetY);
@@ -829,13 +1034,13 @@ export class TowerSystem {
   }
 
   // ============================================================
-  // 原版塔渲染: 基座层 + 攻击动画层
+  // 原版塔渲染: 主模型/常驻层 + 顶层攻击过程
   // ============================================================
 
   /**
    * 绘制原版 t0_0..t10_0 主模型。
-   * a.java 的 ag() 先画 y() 的 bu 效果层，再按 f1112/g1113/q1114
-   * 拼出 t 图集主模型，最后才叠加攻击动画。
+   * a.java 的 ag() 第一遍按 f1112/g1113/q1114 拼出 t 图集主模型，
+   * 第二遍才调用 y() 叠加 bu 攻击过程。
    */
   private renderModel(tower: Tower, px: number, py: number): boolean {
     const type = this.spriteType(tower.type);
@@ -1025,6 +1230,7 @@ export class TowerSystem {
       effectType: this.towerConfigs[type]?.effect ?? 0,
       hp: 1, maxHp: 1, debuffTimer: 0,
       frame: 0, orientation: 0, attackAnim: 0,
+      attackState: 0, attackPhase: 0, attackFrame: 0, volleyFrames: [], liquidPattern: 0,
       buildEffect: 0, buildEffectFrame: 0,
       strikeX: 0, strikeY: 0,
       gateLoaded: false, gateState: 0, gateTimer: 0,
@@ -1032,7 +1238,6 @@ export class TowerSystem {
     const half = (TOWER_ANCHOR_O1098[this.spriteType(type)] ?? 2) << 3;
     const px = centerX - half;
     const py = centerY - half;
-    this.renderBase(ghost, px, py);
     this.renderModel(ghost, px, py);
   }
 
@@ -1044,48 +1249,58 @@ export class TowerSystem {
    * 必须始终使用同一个原版 type，不能按视觉猜测重新编号。
    * 实体锚点 = 瓦片左上 + o1098[type]*8 (原版 entity[0]/[1] + o1098<<3)
    * 唯一分派表见 TOWER_AUX_LAYER_BY_TYPE；不要在这里另建一套编号。
-   * 攻击态判定: 原版 entity[10]==0 为待机; H5 用 attackAnim>0 近似攻击态
+   * 仅在 attackState==1 时绘制，并直接使用原版 attackPhase/entity[10]
+   * 与 attackFrame/entity[13]，不能再以建筑等级代替动作帧。
    * @returns 是否画出了精灵
    */
-  private renderBase(tower: Tower, px: number, py: number): boolean {
-    const type = this.spriteType(tower.type); // 弓手塔19→原版塔0渲染路径
-    const level0 = tower.level - 1; // 原版等级字段 entity[3] (0起)
+  private renderAttackProcess(tower: Tower, px: number, py: number): boolean {
+    const type = this.spriteType(tower.type);
+    if (type === 10) {
+      return tower.gateState === 2 && this.renderGateActiveLayer(tower, px, py, tower.gateTimer);
+    }
+    if (tower.attackState !== 1) return false;
+
+    const level0 = tower.level - 1;
     const half = (TOWER_ANCHOR_O1098[type] ?? 2) << 3;
     const ax = px + half;
     const ay = py + half;
-
-    if (!shouldRenderTowerAuxLayer(type, tower.attackAnim)) return false;
-
     switch (TOWER_AUX_LAYER_BY_TYPE[type]) {
       case 'arrow':
-        return this.renderStripBase(tower, ax, ay, level0);
+        return this.renderStripBase(tower, ax, ay, level0, tower.attackFrame);
       case 'lime':
-        return this.renderLimeBottleBase(tower, ax, ay, level0);
+        return this.renderLimeBottleBase(tower, ax, ay, level0, tower.attackFrame);
       case 'spike':
-        return this.renderSpikeBase(
-          tower,
-          px,
-          py,
-          tower.attackAnim > 0
-            ? Math.min(12, Math.max(0, (TOWER_ATTACK_DURATION_TICKS[type] ?? 13) - tower.attackAnim))
-            : -1,
-        );
+        return this.renderSpikeBase(tower, px, py, tower.attackFrame);
       case 'fire-ice':
-        return this.renderFireIceBase(tower, px, py, ax, ay, level0);
+        return this.renderFireIceBase(
+          tower, px, py, ax, ay, level0, tower.attackPhase, tower.attackFrame,
+        );
       case 'log':
-        return this.renderLogBase(tower, ax, ay, level0);
+        return this.renderLogBase(tower, px, py, tower.attackFrame);
       case 'catapult':
-        return this.renderCatapultBase(tower, px, py, ax, ay, level0);
+        return this.renderCatapultBase(
+          tower, px, py, ax, ay, level0, tower.attackPhase, tower.attackFrame,
+        );
       case 'liquid':
-        if (type === 8) {
-          if (tower.attackAnim > 0) return false;
-          return this.renderLiquidBase(tower, px, py, level0, [32, 33, 34]);
+        let liquidDrawn = false;
+        if (tower.attackPhase === 0) {
+          liquidDrawn = this.renderLiquidBase(
+            tower,
+            px,
+            py,
+            tower.attackFrame,
+            type === 8 ? [32, 33, 34] : [36, 37, 38],
+          );
         }
-        if (tower.attackAnim > 0) return this.renderOilSpread(tower, px, py);
-        return this.renderLiquidBase(tower, px, py, level0, [36, 37, 38]);
-      case 'gate':
-        // 原版仅在断龙闸动作状态 entity[10]==2 时叠加九点闸墙效果。
-        return tower.gateState === 2 && this.renderGateActiveLayer(tower, px, py, level0);
+        // 原版 ai() 还会在道路格上绘制 bu_31/bu_35；此前完全漏掉了这层，
+        // 导致沸水和滚油只有阀门动作、看不到真正流出的液体。
+        liquidDrawn = this.renderLiquidAttackSpread(tower, px, py) || liquidDrawn;
+        // bu_39 是滚油命中后与路径状态联动的附加油渍，不属于待机层；
+        // 当前路径效果模型尚未保存 entity[16]，仅在主要喷洒阶段叠加，避免关闭帧常驻。
+        if (type === 9 && tower.attackPhase === 1) {
+          liquidDrawn = this.renderOilSpread(tower, px, py) || liquidDrawn;
+        }
+        return liquidDrawn;
       default:
         return false;
     }
@@ -1096,8 +1311,14 @@ export class TowerSystem {
    * 组: 0=弓手塔(bu_2+bu_1箭矢) 1=麻痹矢(bu_4+bu_3箭矢) 2=石灰瓶(bu_5, 无箭矢)
    * 原版仅等级 entity[13]<3 时绘制
    */
-  private renderStripBase(tower: Tower, ax: number, ay: number, level0: number): boolean {
-    if (level0 < 0 || level0 >= 3) return false;
+  private renderStripBase(
+    tower: Tower,
+    ax: number,
+    ay: number,
+    level0: number,
+    actionFrame: number,
+  ): boolean {
+    if (actionFrame < 0 || actionFrame >= 3) return false;
     const type = this.spriteType(tower.type);
     const group = type === 0 ? 0 : (type === 4 ? 1 : 2);
     const baseImg = this.spr('bu', group === 0 ? 2 : (group === 1 ? 4 : 5));
@@ -1107,7 +1328,7 @@ export class TowerSystem {
     const j = TOWER_BASE_OFFSETS_J1139[group];
     // 原版: 等级行 = (min(entity[3],5)>>1)+4; entity[3] 用 level0 近似
     const lvlRow = (Math.min(level0, 5) >> 1) + 4;
-    const d = TOWER_LEVEL_FRAME_D1135[level0]; // [srcX, 帧宽, 偏移dx, 偏移dy]
+    const d = TOWER_LEVEL_FRAME_D1135[actionFrame]; // entity[13] 对应的装填/发射帧
     const bx = ax + j[orient][0] + j[lvlRow][0]; // 原版 var19
     const by = ay + j[orient][1] + j[lvlRow][1]; // 原版 var20 (+13已并入渲染偏移)
 
@@ -1134,11 +1355,22 @@ export class TowerSystem {
     if (group !== 2) {
       const ballImg = this.spr('bu', group === 0 ? 1 : 3);
       if (ballImg) {
-        const dirX = [0, 1, 0, -1][orient];
-        const dirY = [-1, 0, 1, 0][orient];
+        const [targetX, targetY] = this.strikePoint(tower, ax, ay);
+        const stepX = Math.trunc((targetX - bx) / 5);
+        const stepY = Math.trunc((targetY - by) / 5);
         for (let i = 0; i < 5; i++) {
-          const ballFrame = (tower.frame + i) % 5;
-          this.renderer.drawSpriteTransform(ballImg, ballFrame * 9, 0, 9, 9, bx + dirX * i, by + dirY * i, 0);
+          const ballFrame = tower.volleyFrames[i] ?? -1;
+          if (ballFrame < 0 || ballFrame * 9 >= ballImg.width) continue;
+          this.renderer.drawSpriteTransform(
+            ballImg,
+            ballFrame * 9,
+            0,
+            9,
+            9,
+            bx + stepX * i,
+            by + stepY * i,
+            0,
+          );
         }
       }
     }
@@ -1151,28 +1383,32 @@ export class TowerSystem {
    * 主件: 等级<3 时 bu[I1142[app][0]], srcX = 等级*帧宽, 偏移 k1141[等级][app]
    * 装饰件: 等级1-2 → 件0,1 (srcX=等级*帧宽); 等级3-5 → 件2,3 (srcX=(等级-3)*帧宽)
    */
-  private renderLogBase(tower: Tower, ax: number, ay: number, level0: number): boolean {
+  private renderLogBase(tower: Tower, x: number, y: number, actionFrame: number): boolean {
     const app = tower.orientation & 3;
     let drawn = false;
 
-    if (level0 >= 0 && level0 < 3) {
+    if (actionFrame >= 0 && actionFrame < 3) {
       const main = TOWER_BASE_I1142[app]; // [bu图, transform, 帧宽, 帧高]
       const img = this.spr('bu', main[0]);
       if (img) {
-        const dx = ax + TOWER_BASE_OFF_K1141[level0][app][0];
-        const dy = ay + TOWER_BASE_OFF_K1141[level0][app][1];
-        this.renderer.drawSpriteTransform(img, level0 * main[2], 0, main[2], main[3], dx, dy, main[1]);
+        const dx = x + TOWER_BASE_OFF_K1141[actionFrame][app][0];
+        const dy = y + TOWER_BASE_OFF_K1141[actionFrame][app][1];
+        this.renderer.drawSpriteTransform(
+          img, actionFrame * main[2], 0, main[2], main[3], dx, dy, main[1],
+        );
         drawn = true;
       }
     }
 
-    const pieces = level0 >= 1 && level0 <= 2 ? [0, 1] : (level0 >= 3 && level0 <= 5 ? [2, 3] : []);
+    const pieces = actionFrame >= 1 && actionFrame <= 2
+      ? [0, 1]
+      : (actionFrame >= 3 && actionFrame <= 5 ? [2, 3] : []);
     for (const pi of pieces) {
       const p = TOWER_DECOR_L1143[app][pi]; // [bu图, dx, dy, transform, 帧宽, 帧高]
       const img = this.spr('bu', p[0]);
       if (!img) continue;
-      const srcX = (level0 <= 2 ? level0 : level0 - 3) * p[4];
-      this.renderer.drawSpriteTransform(img, srcX, 0, p[4], p[5], ax + p[1], ay + p[2], p[3]);
+      const srcX = (actionFrame <= 2 ? actionFrame : actionFrame - 3) * p[4];
+      this.renderer.drawSpriteTransform(img, srcX, 0, p[4], p[5], x + p[1], y + p[2], p[3]);
       drawn = true;
     }
     return drawn;
@@ -1185,43 +1421,50 @@ export class TowerSystem {
    * 等级>=4: b(Image,int×4) 行16447 — bu_8 按 H1140 七点绘制 + p() 旗帜
    * 朝向单位向量近似原版 entity[11]/[12] (与 renderStripBase 的条状部件同一简化)
    */
-  private renderLimeBottleBase(tower: Tower, ax: number, ay: number, level0: number): boolean {
+  private renderLimeBottleBase(
+    tower: Tower,
+    ax: number,
+    ay: number,
+    level0: number,
+    actionFrame: number,
+  ): boolean {
     const orient = tower.orientation & 3;
     const j = TOWER_BASE_OFFSETS_J1139[2]; // 组2=石灰瓶
     const lvlRow = (Math.min(level0, 5) >> 1) + 4; // 原版 (min(entity[3],5)>>1)+4
     const offX = j[orient][0] + j[lvlRow][0]; // 原版 var18 (a.java:26347)
     const offY = j[orient][1] + j[lvlRow][1]; // 原版 var19 (a.java:26368, +13 已并入 ay)
-    const dirX = [0, 1, 0, -1][orient];
-    const dirY = [-1, 0, 1, 0][orient];
     let drawn = false;
+    const originX = ax + offX;
+    const originY = ay + offY;
+    const [targetX, targetY] = this.strikePoint(tower, ax, ay);
+    const stepX = Math.trunc((targetX - originX) / 4);
+    const stepY = Math.trunc((targetY - originY) / 4);
 
-    if (level0 < 4) {
-      if (level0 < 3) {
+    if (actionFrame < 4) {
+      if (actionFrame < 3) {
         // bu_5 基座 (a.java:26395 调 a(Image,Image) 行11485, 第二张图为 null → 无球)
-        drawn = this.renderStripBase(tower, ax, ay, level0);
+        drawn = this.renderStripBase(tower, ax, ay, level0, actionFrame);
       }
-      // 瓶列循环 (a.java:26402-26457): i=1..等级 画 bu_7, i==等级 再画端部 bu_6
-      for (let i = 0; i <= level0; i++) {
-        const sx = ax + offX + dirX * i;
-        const sy = ay + offY + dirY * i;
+      for (let i = 0; i <= actionFrame; i++) {
+        const sx = originX + stepX * i;
+        const sy = originY + stepY * i;
         if (i > 0) {
           const seg = this.spr('bu', 7);
-          if (seg) {
+          if (seg && i * 10 < seg.width) {
             this.renderer.drawSpriteTransform(seg, i * 10, 0, 10, 10, sx, sy, 0);
             drawn = true;
           }
         }
-        if (i === level0) {
+        if (i === actionFrame) {
           const tip = this.spr('bu', 6);
-          if (tip) {
+          if (tip && i * 12 < tip.width) {
             this.renderer.drawSpriteTransform(tip, i * 12, 0, 12, 12, sx, sy, 0);
             drawn = true;
           }
         }
       }
     } else {
-      // 高级石灰瓶 (a.java:26458-26469): b(Image,int×4) 行16447
-      drawn = this.renderH1140Points(this.spr('bu', 8), ax + dirX * 4, ay + dirY * 4, level0 - 4);
+      drawn = this.renderH1140Points(this.spr('bu', 8), targetX, targetY, actionFrame - 4);
     }
     return drawn;
   }
@@ -1232,12 +1475,15 @@ export class TowerSystem {
    */
   private renderH1140Points(img: HTMLImageElement | null, x: number, y: number, lvl: number): boolean {
     if (!img) return false;
+    let drawn = false;
     for (const p of TOWER_DEVICE_POINTS_H1140) {
-      this.renderer.drawSpriteTransform(img, (p[2] + lvl) * 16, 0, 16, 16, x + p[0], y + p[1], 0);
+      const srcX = (p[2] + lvl) * 16;
+      if (srcX < 0 || srcX + 16 > img.width) continue;
+      this.renderer.drawSpriteTransform(img, srcX, 0, 16, 16, x + p[0], y + p[1], 0);
+      drawn = true;
     }
-    // p(int×3) 行23940: 旗帜 (a.java:16458, 位置 x-10, y-25)
     this.renderFlag(x - 10, y - 25, lvl);
-    return true;
+    return drawn;
   }
 
   /**
@@ -1248,8 +1494,8 @@ export class TowerSystem {
   private renderFlag(x: number, y: number, lvl: number): void {
     const flag = this.spr('ui', 20);
     if (!flag) return;
-    const frame = Math.min(Math.max(lvl, 0), 8); // ui_20 共 9 帧
-    this.renderer.drawSpriteTransform(flag, frame * 27, 0, 27, 29, x - (lvl === 0 ? 0 : 4), y - 13, 0);
+    if (lvl < 0 || lvl >= 9) return;
+    this.renderer.drawSpriteTransform(flag, lvl * 27, 0, 27, 29, x - (lvl === 0 ? 0 : 4), y - 13, 0);
   }
 
   /**
@@ -1347,43 +1593,55 @@ export class TowerSystem {
    *   + 等级 6+ 高杆 (bu_19/bu_23, 7x45) + 等级 7+ 顶件 (bu_21/bu_25, 15x15)
    * 攻击态 (entity[10]==1): 打击点立柱 (bu_20/bu_24, 12x41, srcX=等级*12) + 顶部 (15x15, srcX=等级*15)
    */
-  private renderFireIceBase(tower: Tower, px: number, py: number, ax: number, ay: number, level0: number): boolean {
+  private renderFireIceBase(
+    tower: Tower,
+    px: number,
+    py: number,
+    ax: number,
+    ay: number,
+    level0: number,
+    phase: number,
+    actionFrame: number,
+  ): boolean {
     const type = this.spriteType(tower.type);
     const isWarmVariant = type === 3;
     const [dx, dy] = isWarmVariant ? TOWER_LOG_BASE_OFF_J1144[Math.min(level0, 5) >> 1] : [-5, -26] as [number, number];
 
-    if (tower.attackAnim <= 0) {
-      // 待机 state 0 (a.java:10868)
-      let drawn = this.renderGroundBase(px + dx, py + dy, level0, true);
-      if (level0 > 1 && level0 < 4) {
-        // 等级 2-3 中层件 (a.java:10873-10911): 烟火 bu_22 (16x16, srcX=(等级-2)*16) @ +21,+16
-        //   寒冰 bu_26 (12x17, srcX=(等级-2)*12) @ +24,+23
+    if (phase === 0) {
+      let drawn = this.renderGroundBase(px + dx, py + dy, actionFrame, true);
+      if (actionFrame > 1 && actionFrame < 4) {
         if (isWarmVariant) {
           const img = this.spr('bu', 22);
           if (img) {
-            this.renderer.drawSpriteTransform(img, (level0 - 2) * 16, 0, 16, 16, px + dx + 21, py + dy + 16, 0);
+            this.renderer.drawSpriteTransform(
+              img, (actionFrame - 2) * 16, 0, 16, 16, px + dx + 21, py + dy + 16, 0,
+            );
             drawn = true;
           }
         } else {
           const img = this.spr('bu', 26);
           if (img) {
-            this.renderer.drawSpriteTransform(img, (level0 - 2) * 12, 0, 12, 17, px + dx + 24, py + dy + 23, 0);
+            this.renderer.drawSpriteTransform(
+              img, (actionFrame - 2) * 12, 0, 12, 17, px + dx + 24, py + dy + 23, 0,
+            );
             drawn = true;
           }
         }
       }
-      if (level0 > 5) {
-        // 等级 6+ 高杆 (a.java:10913-10926): bu_19/bu_23 (7x45, srcX=(等级-6)*7) @ +26,-31
+      if (actionFrame > 5) {
         const pole = this.spr('bu', isWarmVariant ? 19 : 23);
-        if (pole) {
-          this.renderer.drawSpriteTransform(pole, (level0 - 6) * 7, 0, 7, 45, px + dx + 26, py + dy - 31, 0);
+        if (pole && (actionFrame - 6) * 7 < pole.width) {
+          this.renderer.drawSpriteTransform(
+            pole, (actionFrame - 6) * 7, 0, 7, 45, px + dx + 26, py + dy - 31, 0,
+          );
           drawn = true;
         }
-        if (level0 > 6) {
-          // 等级 7+ 顶件 (a.java:10927-10941): bu_21/bu_25 (15x15, srcX=(等级-7)*15) @ +22,-52
+        if (actionFrame > 6) {
           const top = this.spr('bu', isWarmVariant ? 21 : 25);
-          if (top) {
-            this.renderer.drawSpriteTransform(top, (level0 - 7) * 15, 0, 15, 15, px + dx + 22, py + dy - 52, 0);
+          if (top && (actionFrame - 7) * 15 < top.width) {
+            this.renderer.drawSpriteTransform(
+              top, (actionFrame - 7) * 15, 0, 15, 15, px + dx + 22, py + dy - 52, 0,
+            );
             drawn = true;
           }
         }
@@ -1391,17 +1649,16 @@ export class TowerSystem {
       return drawn;
     }
 
-    // 攻击态 state 1 (a.java:10945-10963): 打击点立柱 + 顶部
     const [sx, sy] = this.strikePoint(tower, ax, ay);
     let drawn = false;
     const pole = this.spr('bu', isWarmVariant ? 20 : 24);
-    if (pole) {
-      this.renderer.drawSpriteTransform(pole, level0 * 12, 0, 12, 41, sx, sy, 0);
+    if (pole && actionFrame * 12 < pole.width) {
+      this.renderer.drawSpriteTransform(pole, actionFrame * 12, 0, 12, 41, sx, sy, 0);
       drawn = true;
     }
     const top = this.spr('bu', isWarmVariant ? 21 : 25);
-    if (top) {
-      this.renderer.drawSpriteTransform(top, level0 * 15, 0, 15, 15, sx, sy - 15, 0);
+    if (top && actionFrame * 15 < top.width) {
+      this.renderer.drawSpriteTransform(top, actionFrame * 15, 0, 15, 15, sx, sy - 15, 0);
       drawn = true;
     }
     return drawn;
@@ -1415,42 +1672,52 @@ export class TowerSystem {
    * 攻击态 (entity[10]==1): 等级<3 → bu_29 (L1146帧, transform=2) + bu_28;
    *   等级>=3 → b(Image,int×4) 行16447 (bu_30 H1140 七点 + 旗帜)
    */
-  private renderCatapultBase(tower: Tower, px: number, py: number, ax: number, ay: number, level0: number): boolean {
+  private renderCatapultBase(
+    tower: Tower,
+    px: number,
+    py: number,
+    ax: number,
+    ay: number,
+    level0: number,
+    phase: number,
+    actionFrame: number,
+  ): boolean {
     const [dx, dy] = TOWER_BOIL_BASE_OFF_K1145[Math.min(level0, 5) >> 1]; // a.java:16174-16181
 
-    if (tower.attackAnim <= 0) {
-      // 待机 state 0 (a.java:16190)
-      let drawn = this.renderGroundBase(px + dx, py + dy, level0, false);
-      if (level0 > 2 && level0 < 6) {
-        // a.java:16195-16209: bu_22 (16x16, srcX=(等级&1)<<4) @ +21,+15
+    if (phase === 0) {
+      let drawn = this.renderGroundBase(px + dx, py + dy, actionFrame, false);
+      if (actionFrame > 2 && actionFrame < 6) {
         const img = this.spr('bu', 22);
         if (img) {
-          this.renderer.drawSpriteTransform(img, (level0 & 1) * 16, 0, 16, 16, px + dx + 21, py + dy + 15, 0);
+          this.renderer.drawSpriteTransform(
+            img, (actionFrame & 1) * 16, 0, 16, 16, px + dx + 21, py + dy + 15, 0,
+          );
           drawn = true;
         }
       }
-      if (level0 >= 6) {
-        if (level0 === 6) {
-          // a.java:16217-16229: bu_29 src(0,18) 16x31 @ +21,-15
+      if (actionFrame >= 6) {
+        if (actionFrame === 6) {
           const img = this.spr('bu', 29);
           if (img) {
             this.renderer.drawSpriteTransform(img, 0, 18, 16, 31, px + dx + 21, py + dy - 15, 0);
             drawn = true;
           }
         }
-        if (level0 < 9) {
-          // a.java:16233-16247: bu_27 (21x17, srcX=(等级-6)*21) @ +21,+10
+        if (actionFrame < 9) {
           const img = this.spr('bu', 27);
           if (img) {
-            this.renderer.drawSpriteTransform(img, (level0 - 6) * 21, 0, 21, 17, px + dx + 21, py + dy + 10, 0);
+            this.renderer.drawSpriteTransform(
+              img, (actionFrame - 6) * 21, 0, 21, 17, px + dx + 21, py + dy + 10, 0,
+            );
             drawn = true;
           }
         }
-        if (level0 > 6) {
-          // a.java:16251-16264: bu_28 (29x22, srcX=(等级-7)*29) @ +14,-30
+        if (actionFrame > 6) {
           const img = this.spr('bu', 28);
-          if (img) {
-            this.renderer.drawSpriteTransform(img, (level0 - 7) * 29, 0, 29, 22, px + dx + 14, py + dy - 30, 0);
+          if (img && (actionFrame - 7) * 29 < img.width) {
+            this.renderer.drawSpriteTransform(
+              img, (actionFrame - 7) * 29, 0, 29, 22, px + dx + 14, py + dy - 30, 0,
+            );
             drawn = true;
           }
         }
@@ -1458,26 +1725,25 @@ export class TowerSystem {
       return drawn;
     }
 
-    // 攻击态 state 1 (a.java:16268)
     const [sx, sy] = this.strikePoint(tower, ax, ay);
-    if (level0 < 3) {
-      // a.java:16271-16301: bu_29 (L1146[等级]=[dy,srcY,宽,高], transform=2) + bu_28 (srcX=等级*29, dy=L1146[0][0])
+    if (actionFrame < 3) {
       let drawn = false;
-      const f = TOWER_BOIL_ANIM_L1146[level0];
+      const f = TOWER_BOIL_ANIM_L1146[actionFrame];
       const img29 = this.spr('bu', 29);
       if (img29 && f) {
         this.renderer.drawSpriteTransform(img29, 0, f[1], f[2], f[3], sx, sy + f[0], 2);
         drawn = true;
       }
       const img28 = this.spr('bu', 28);
-      if (img28) {
-        this.renderer.drawSpriteTransform(img28, level0 * 29, 0, 29, 22, sx, sy + TOWER_BOIL_ANIM_L1146[0][0], 0);
+      if (img28 && actionFrame * 29 < img28.width) {
+        this.renderer.drawSpriteTransform(
+          img28, actionFrame * 29, 0, 29, 22, sx, sy + TOWER_BOIL_ANIM_L1146[0][0], 0,
+        );
         drawn = true;
       }
       return drawn;
     }
-    // 等级>=3: b(Image,int×4) 行16447 (a.java:16302-16311, entity[8] 参数原版未参与定位)
-    return this.renderH1140Points(this.spr('bu', 30), sx + 10, sy + 40, level0 - 3);
+    return this.renderH1140Points(this.spr('bu', 30), sx + 10, sy + 40, actionFrame - 3);
   }
 
   /**
@@ -1486,8 +1752,8 @@ export class TowerSystem {
    * 朝向0: imgs[0] (14x33帧, srcX=等级*14); 朝向1: imgs[2] (50x12帧, srcX=(2-等级)*50, transform=1)
    * 朝向2: imgs[1] (13x52帧, srcX=等级*13); 朝向3: imgs[2] (50x12帧, srcX=等级*50)
    */
-  private renderLiquidBase(tower: Tower, px: number, py: number, level0: number, imgs: [number, number, number]): boolean {
-    if (level0 < 0 || level0 >= 3) return false;
+  private renderLiquidBase(tower: Tower, px: number, py: number, actionFrame: number, imgs: [number, number, number]): boolean {
+    if (actionFrame < 0 || actionFrame >= 3) return false;
     const o = tower.orientation & 3;
     const dx = px + TOWER_FOUNTAIN_OFF_M1147[o][0]; // a.java:11633
     const dy = py + TOWER_FOUNTAIN_OFF_M1147[o][1]; // a.java:11637 (+13 已并入 py)
@@ -1497,10 +1763,10 @@ export class TowerSystem {
     let sh = 0;
     let tr = 0;
     switch (o) {
-      case 0: img = this.spr('bu', imgs[0]); sx = level0 * 14; sw = 14; sh = 33; break;
-      case 1: img = this.spr('bu', imgs[2]); sx = (2 - level0) * 50; sw = 50; sh = 12; tr = 1; break;
-      case 2: img = this.spr('bu', imgs[1]); sx = level0 * 13; sw = 13; sh = 52; break;
-      case 3: img = this.spr('bu', imgs[2]); sx = level0 * 50; sw = 50; sh = 12; break;
+      case 0: img = this.spr('bu', imgs[0]); sx = actionFrame * 14; sw = 14; sh = 33; break;
+      case 1: img = this.spr('bu', imgs[2]); sx = (2 - actionFrame) * 50; sw = 50; sh = 12; tr = 1; break;
+      case 2: img = this.spr('bu', imgs[1]); sx = actionFrame * 13; sw = 13; sh = 52; break;
+      case 3: img = this.spr('bu', imgs[2]); sx = actionFrame * 50; sw = 50; sh = 12; break;
     }
     if (!img) return false;
     this.renderer.drawSpriteTransform(img, sx, 0, sw, sh, dx, dy, tr);
@@ -1542,36 +1808,36 @@ export class TowerSystem {
    *   塔身 E1136 九点 bu_47 (14x19帧, srcX=等级*14)
    *   旗帜 G1138 四点 p(int×3) (ui_20, 27x29帧)
    */
-  private renderGateActiveLayer(tower: Tower, px: number, py: number, level0: number): boolean {
+  private renderGateActiveLayer(tower: Tower, px: number, py: number, actionFrame: number): boolean {
     const o = tower.orientation & 3;
     const [fx, fy] = TOWER_DEVICE_ORIENT_F1137[o];
     let drawn = false;
     const body = this.spr('bu', 47);
-    if (body) {
-      const frame = Math.min(Math.max(level0, 0), 5); // bu_47 共 6 帧
+    if (body && actionFrame >= 0 && actionFrame < 6) {
       for (const e of TOWER_DEVICE_BODY_E1136) {
-        this.renderer.drawSpriteTransform(body, frame * 14, 0, 14, 19, px + fx + e[0], py + fy + e[1], 0);
+        this.renderer.drawSpriteTransform(
+          body, actionFrame * 14, 0, 14, 19, px + fx + e[0], py + fy + e[1], 0,
+        );
         drawn = true;
       }
     }
-    for (const g of TOWER_DEVICE_FLAG_G1138) {
-      this.renderFlag(px + fx + g[0], py + fy + g[1], level0);
-      drawn = true;
+    if (actionFrame >= 0 && actionFrame < 9) {
+      for (const g of TOWER_DEVICE_FLAG_G1138) {
+        this.renderFlag(px + fx + g[0], py + fy + g[1], actionFrame);
+        drawn = true;
+      }
     }
     return drawn;
   }
 
   /**
-   * 塔攻击动画层 (对应原版 d(int x,int y,int type,int frame,int orientation,int state) 行18882)
-   * 类型0/4: 仅攻击态 (原版 state==6) 画 t0[朝向+1] (+帧3-9叠画 t0_5)
-   * 类型2/3/9: 攻击态绘制 t{type}[1]; 类型5/8: 再叠 t{type}[2] (用 w1123[type-1])
-   * 类型1/6/7: 无动画
+   * 原版 d(int×6) 的常驻机件/环境层，与 y(int) 的攻击过程层相互独立。
+   * 类型2/3/5/8/9持续绘制；类型0/4仅在原版 state==6（无敌人待机）时绘制。
    */
-  private renderAttackAnim(tower: Tower, px: number, py: number): boolean {
-    // t{type}_1/t{type}_2 均为攻击层。任何类型只要尚未进入攻击状态，
-    // 都不能仅因普通动画 frame 在推进而把攻击贴图画到待机建筑上。
+  private renderAmbientAnim(tower: Tower, px: number, py: number): boolean {
     const type = this.spriteType(tower.type); // 弓手塔19→原版塔0 (t0动画)
-    if (tower.attackAnim <= 0 || !TOWER_ATTACK_LAYER_TYPES.includes(type)) return false;
+    const arrowDormantLayer = (type === 0 || type === 4) && tower.attackState === 6;
+    if (!arrowDormantLayer && !TOWER_AMBIENT_LAYER_TYPES.includes(type)) return false;
     const half = (TOWER_ANCHOR_O1098[type] ?? 2) << 3;
     const ax = px + half;
     const ay = py + half;
@@ -1741,13 +2007,13 @@ export class TowerSystem {
       damage: 0, range: 0, fireRate: 0, cooldown: 0, target: -1, angle: 0,
       heroId: -1, effectType: 0, hp: 0, maxHp: 0, debuffTimer: 0,
       frame: 0, orientation: this.resolvePathFacing(this.buildX, this.buildY, type), attackAnim: 0,
+      attackState: 0, attackPhase: 0, attackFrame: 0, volleyFrames: [], liquidPattern: 0,
       buildEffect: 0, buildEffectFrame: 0,
       strikeX: this.buildX * TILE_SIZE, strikeY: this.buildY * TILE_SIZE,
       gateLoaded: false, gateState: 0, gateTimer: 0,
     };
     vctx.save();
     vctx.globalAlpha = 0.55;
-    this.renderBase(ghost, bx, by);
     this.renderModel(ghost, bx, by);
     vctx.restore();
 
@@ -1789,6 +2055,39 @@ export class TowerSystem {
     const px = offsetX + tower.x * TILE_SIZE;
     const py = offsetY + tower.y * TILE_SIZE;
     this.renderSelectedTowerFrame(tower, px, py, selected && this.selectedTower === tower);
+    return true;
+  }
+
+  /**
+   * 沸水/滚油的道路液体层（原版 ai() 行14003 + b(Image,int×8) 行16479）。
+   * 阶段0使用开启帧0..2，阶段1按道路格与随机偏移选择循环纹理2..4，阶段2使用关闭帧1..0。
+   */
+  private renderLiquidAttackSpread(tower: Tower, px: number, py: number): boolean {
+    const type = this.spriteType(tower.type);
+    const img = this.spr('bu', type === 8 ? 31 : 35);
+    if (!img) return false;
+
+    const orient = tower.orientation & 3;
+    const spread = TOWER_DIR_SPREAD_M1084[orient];
+    const fullSpread = this.faction === 0 && tower.level - 1 === 6;
+    const rows = fullSpread || orient === 1 || orient === 3 ? [0, 1, 2] : [1];
+    const cols = fullSpread || orient === 0 || orient === 2 ? [0, 1, 2] : [1];
+    for (const row of rows) {
+      for (const col of cols) {
+        let frame: number;
+        if (tower.attackPhase === 0) {
+          frame = Math.min(2, tower.attackFrame);
+        } else if (tower.attackPhase === 1) {
+          const axisIndex = orient === 0 || orient === 2 ? col : row;
+          frame = (axisIndex + tower.liquidPattern) % 3 + 2;
+        } else {
+          frame = Math.max(0, 1 - tower.attackFrame);
+        }
+        const dx = px + (row << 4) * spread[0] + spread[2];
+        const dy = py + (col << 4) * spread[1] + spread[3];
+        this.renderer.drawSpriteTransform(img, frame * 16, 0, 16, 16, dx, dy, 0);
+      }
+    }
     return true;
   }
 
@@ -1970,6 +2269,11 @@ export class TowerSystem {
           ? (td.orientation & 3)
           : this.resolvePathFacing(td.x ?? 0, td.y ?? 0, td.type ?? 0),
         attackAnim: 0,
+        attackState: 0,
+        attackPhase: 0,
+        attackFrame: 0,
+        volleyFrames: [],
+        liquidPattern: 0,
         buildEffect: 0,
         buildEffectFrame: 0,
         strikeX: (td.x ?? 0) * TILE_SIZE,
@@ -1993,15 +2297,20 @@ export class TowerSystem {
   private updateGate(tower: Tower, enemies: Enemy[]): void {
     if (tower.gateState === 1) {
       tower.gateTimer++;
+      tower.attackFrame = tower.gateTimer;
       if (tower.gateTimer <= 4) return;
 
       tower.gateState = 2;
       tower.gateTimer = 0;
+      tower.attackPhase = 2;
+      tower.attackFrame = 0;
       tower.attackAnim = 10;
       const cells = this.projectedDeviceCells(tower.x, tower.y, tower.orientation)
         .filter(cell => this.mapData.getTerrain(cell.tx, cell.ty) < 8);
       const cellKeys = new Set(cells.map(cell => `${cell.tx},${cell.ty}`));
-      for (const cell of cells) this.mapData.setPathDefense(cell.tx, cell.ty, 16);
+      // 原版 k(type, level)：魏国终阶断龙闸写入 46，其余写入 16，决定石阵可阻挡多久。
+      const defenseStrength = this.faction === 1 && tower.level - 1 === 6 ? 46 : 16;
+      for (const cell of cells) this.mapData.setPathDefense(cell.tx, cell.ty, defenseStrength);
 
       let damage = tower.damage;
       if (this.techTree) damage = this.techTree.applyEffectsToTowerDamage(tower, damage);
@@ -2014,11 +2323,15 @@ export class TowerSystem {
       }
     } else if (tower.gateState === 2) {
       tower.gateTimer++;
+      tower.attackFrame = tower.gateTimer;
       if (tower.gateTimer > 9) {
         // 原版 ah() 会把动作状态恢复为 0；道路上的 3×3 石阵由 D1162 独立保留。
         tower.gateState = 0;
         tower.gateTimer = 0;
         tower.attackAnim = 0;
+        tower.attackState = 0;
+        tower.attackPhase = 0;
+        tower.attackFrame = 0;
       }
     }
   }

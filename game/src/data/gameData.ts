@@ -174,18 +174,11 @@ export const TOWER_AUX_LAYER_BY_TYPE = [
   'gate',       // 10 断龙闸
 ] as const;
 
-/** 拥有独立 t{type}_1/t{type}_2 攻击贴图的建筑；这些层只允许在攻击态绘制。 */
-export const TOWER_ATTACK_LAYER_TYPES: readonly number[] = [0, 2, 3, 4, 5, 8, 9];
-
 /**
- * 这些建筑的 bu 辅助图表现的是已触发的火焰、冰焰、擂木或投石动作，
- * 待机时只绘制 t{type}_0 主模型，避免动作贴图常驻。
+ * 原版 d(int×6) 每帧都会绘制的 t{type}_1/t{type}_2 环境/机件动画。
+ * 它们与 y(int) 的 bu 攻击过程层相互独立，不能由攻击倒计时控制。
  */
-export const TOWER_ATTACK_ONLY_AUX_TYPES: readonly number[] = [3, 5, 6, 7];
-
-export function shouldRenderTowerAuxLayer(type: number, attackAnim: number): boolean {
-  return attackAnim > 0 || !TOWER_ATTACK_ONLY_AUX_TYPES.includes(type);
-}
+export const TOWER_AMBIENT_LAYER_TYPES: readonly number[] = [2, 3, 5, 8, 9];
 
 /** t7_0 投石模型原图面向右；按 0上/1右/2下/3左 转成 J2ME Sprite transform。 */
 export const TOWER_RIGHT_FACING_TRANSFORMS: readonly number[] = [5, 0, 6, 1];
@@ -332,7 +325,7 @@ export const TOWER_ANIM_W1123: number[][] = [
  * 无独立 t 图层的建筑按原版 A(int) 状态机计时；其余建筑至少播完一轮贴图序列。
  */
 export const TOWER_ATTACK_DURATION_TICKS: readonly number[] = [
-  28, 13, 13, 20, 28, 20, 6, 30, 25, 25, 10,
+  5, 13, 13, 20, 5, 20, 6, 30, 16, 16, 10,
 ];
 
 /**
