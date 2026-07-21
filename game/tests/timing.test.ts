@@ -6,7 +6,7 @@ import {
   linearLevelValue,
   originalDemolishRefund,
 } from '../src/core/Timing';
-import { TowerSystem } from '../src/core/Tower';
+import { TowerSystem, type Tower } from '../src/core/Tower';
 import {
   TOWER_ATTACK_LAYER_TYPES,
   TOWER_ATTACK_ONLY_AUX_TYPES,
@@ -14,6 +14,8 @@ import {
   TOWER_GATE_LOAD_DIR_S1117,
   TOWER_GATE_LOAD_OFF_T1118,
   TOWER_RIGHT_FACING_TRANSFORMS,
+  TOWER_PATH_FACING_TYPES,
+  TOWER_ATTACK_DURATION_TICKS,
   shouldRenderTowerAuxLayer,
 } from '../src/data/gameData';
 
@@ -128,6 +130,43 @@ test('擂木、烟火、寒冰和投石的动作辅助层不会在待机时绘�
 
 test('投石右向原图可转换为上右下左四个道路朝向', () => {
   assert.deepEqual([...TOWER_RIGHT_FACING_TRANSFORMS], [5, 0, 6, 1]);
+});
+
+test('投石与道路机关在攻击和升级期间保持建造时解析出的道路朝向', () => {
+  assert.deepEqual([...TOWER_PATH_FACING_TYPES], [2, 6, 7, 8, 9, 10]);
+});
+
+test('每类建筑的攻击状态足够播放原版完整动作', () => {
+  assert.deepEqual([...TOWER_ATTACK_DURATION_TICKS], [28, 13, 13, 20, 28, 20, 6, 30, 25, 25, 10]);
+  assert.equal(TOWER_ATTACK_DURATION_TICKS[7] > 14, true); // 投石原版 13 帧蓄力后仍有 17 帧释放动作
+});
+
+test('投石升级和攻击不会改朝向，且攻击总是从第 0 帧完整开始', () => {
+  const system = new TowerSystem({} as never, {} as never);
+  const tower: Tower = {
+    x: 0, y: 0, type: 7, level: 1,
+    damage: 30, range: 100, fireRate: 30,
+    cooldown: 0, target: -1, angle: 0, heroId: -1, effectType: 0,
+    hp: 100, maxHp: 100, debuffTimer: 0,
+    frame: 5, orientation: 3, attackAnim: 0,
+    buildEffect: 0, buildEffectFrame: 0,
+    strikeX: 0, strikeY: 0,
+    gateLoaded: false, gateState: 0, gateTimer: 0,
+  };
+
+  assert.equal(system.upgradeTower(tower), true);
+  assert.equal(tower.orientation, 3);
+  assert.equal(tower.buildEffect, 2);
+
+  tower.buildEffect = 0;
+  (system as unknown as { towers: Tower[] }).towers = [tower];
+  system.update([{
+    x: 48, y: 16, hp: 100, state: 0,
+    effect: 0, timer: 0, slowScale: 1,
+  } as never], 0, 0);
+  assert.equal(tower.orientation, 3);
+  assert.equal(tower.frame, 0);
+  assert.equal(tower.attackAnim, TOWER_ATTACK_DURATION_TICKS[7]);
 });
 
 test('投石建造后会自动朝向建筑左右两侧的敌人路径', () => {

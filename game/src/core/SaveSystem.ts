@@ -310,6 +310,8 @@ export class SaveSystem {
       frame: 0,
       orientation: t.orientation ?? 0,
       attackAnim: 0,
+      buildEffect: 0,
+      buildEffectFrame: 0,
       strikeX: t.x * 16,
       strikeY: t.y * 16,
       gateLoaded: t.gateLoaded === true,

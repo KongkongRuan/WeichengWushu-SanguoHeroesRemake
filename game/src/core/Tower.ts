@@ -29,6 +29,7 @@ import {
   CURSOR_CORNER_O1156, CURSOR_BRACKET_Q1159,
   TOWER_FOOTPRINT_O1098,
   TOWER_DIRECTION_P1099,
+  TOWER_PATH_FACING_TYPES, TOWER_ATTACK_DURATION_TICKS,
   TOWER_AUX_LAYER_BY_TYPE, TOWER_ATTACK_LAYER_TYPES,
   TOWER_RIGHT_FACING_TRANSFORMS, shouldRenderTowerAuxLayer,
 } from '../data/gameData';
@@ -40,8 +41,7 @@ import { linearLevelValue } from './Timing';
 const HEROES_MAP: Record<number, Hero> = {};
 HEROES.forEach(h => { HEROES_MAP[h.id] = h; });
 
-// 攻击状态持续逻辑帧数 (10FPS节拍; 原版 c1107[4]==6 攻击态, H5用计时近似)
-const TOWER_ATTACK_ANIM_TICKS = 14;
+const BUILD_EFFECT_FRAME_COUNT = 9;
 
 export interface Tower {
   x: number;          // 瓦片X坐标
@@ -65,6 +65,8 @@ export interface Tower {
   frame: number;       // 动画帧 (对应原版 entity[7], 按 w1123[type] 序列推进)
   orientation: number; // 朝向 0=上 1=右 2=下 3=左 (对应原版 entity[5])
   attackAnim: number;  // 攻击状态剩余逻辑帧 (>0 即攻击态, 对应原版 entity[4]==6)
+  buildEffect: number;  // 0=无，1=建造成功，2=升级成功（对应原版 entity[4] 的 3/4 状态）
+  buildEffectFrame: number; // ui_20 白烟帧（0..8）
   strikeX: number;      // 原版 entity[11]：最近一次攻击的地图像素 X
   strikeY: number;      // 原版 entity[12]：最近一次攻击的地图像素 Y
   gateLoaded: boolean;   // 断龙闸 entity[15]：是否已经装填石块
@@ -362,6 +364,8 @@ export class TowerSystem {
       frame: 0,
       orientation: this.resolvePathFacing(tileX, tileY, type),
       attackAnim: 0,
+      buildEffect: 1,
+      buildEffectFrame: 0,
       strikeX: tileX * TILE_SIZE,
       strikeY: tileY * TILE_SIZE,
       gateLoaded: false,
@@ -397,6 +401,8 @@ export class TowerSystem {
       // 原版属性不是乘法成长，而是各自数组的“基础值 + 每级增量”。
       tower.level++;
       this.applyOriginalStats(tower);
+      tower.buildEffect = 2;
+      tower.buildEffectFrame = 0;
 
       // 检查武将觉醒
       if (result.hero) {
@@ -413,6 +419,8 @@ export class TowerSystem {
     if (this.gold < cost) return false;
     tower.level++;
     this.applyOriginalStats(tower);
+    tower.buildEffect = 2;
+    tower.buildEffectFrame = 0;
     this.gold -= cost;
     this.onGoldSpent?.(cost);
     return true;
@@ -513,6 +521,8 @@ export class TowerSystem {
     const globalFireRateBonus = this.techTree?.getGlobalFireRateBonus() ?? 0;
 
     for (const tower of this.towers) {
+      // 原版建造/升级白烟播放期间处于状态 3/4，不会同时索敌或发动攻击。
+      if (tower.buildEffect !== 0) continue;
       // 断龙闸只响应底栏“释放断龙闸”，不能以 fireRate=0 进入通用自动攻击。
       if (tower.type === 10) {
         this.updateGate(tower, enemies);
@@ -522,6 +532,8 @@ export class TowerSystem {
         tower.cooldown--;
         continue;
       }
+      // 必须让当前攻击动作完整播完，不能因为高等级冷却较短而不断从第 0 帧重启。
+      if (tower.attackAnim > 0) continue;
 
       // 查找目标。实体坐标是占地左上角，瞄准点与模型一样使用 o1098*8 的中心锚点。
       const renderType = this.spriteType(tower.type);
@@ -610,9 +622,10 @@ export class TowerSystem {
         tower.cooldown = actualFireRate;
 
         // 进入攻击状态 (对应原版 c1107[4]==6; H5简化: 按固定时长计时)
-        tower.attackAnim = TOWER_ATTACK_ANIM_TICKS;
-        // 朝向取瞄准方向 (原版 entity[5]; 弓手塔/麻痹矢会在动画回绕时随机, 见 tickAnim)
-        if (TOWER_DIRECTION_P1099[renderType] !== 1) {
+        tower.frame = 0;
+        tower.attackAnim = TOWER_ATTACK_DURATION_TICKS[renderType] ?? 10;
+        // 普通远程塔朝向目标；投石与道路机关保持建造时解析出的道路朝向。
+        if (!TOWER_PATH_FACING_TYPES.includes(renderType)) {
           tower.orientation = this.angleToOrientation(tower.angle);
         }
       } else {
@@ -707,6 +720,13 @@ export class TowerSystem {
       if (tower.attackAnim > 0) {
         tower.attackAnim--;
       }
+      if (tower.buildEffect !== 0) {
+        tower.buildEffectFrame++;
+        if (tower.buildEffectFrame >= BUILD_EFFECT_FRAME_COUNT) {
+          tower.buildEffect = 0;
+          tower.buildEffectFrame = 0;
+        }
+      }
     }
   }
 
@@ -753,6 +773,7 @@ export class TowerSystem {
         // 只剩 bu 图集的攻击效果，外观完全不像原版。
         spriteDrawn = this.renderModel(tower, px, py) || spriteDrawn;
         spriteDrawn = this.renderAttackAnim(tower, px, py) || spriteDrawn;
+        this.renderBuildEffect(tower, px, py);
       }
 
       if (!spriteDrawn) {
@@ -859,6 +880,30 @@ export class TowerSystem {
       drawn = true;
     }
     return drawn;
+  }
+
+  /** 原版 d(type,state,x,y)：在建筑四角播放 ui_20 的 9 帧白烟。 */
+  private renderBuildEffect(tower: Tower, px: number, py: number): boolean {
+    if (tower.buildEffect === 0) return false;
+    const smoke = this.spr('ui', 20);
+    if (!smoke) return false;
+    const type = this.spriteType(tower.type);
+    const half = (TOWER_ANCHOR_O1098[type] ?? 2) << 3;
+    const frame = Math.max(0, Math.min(BUILD_EFFECT_FRAME_COUNT - 1, tower.buildEffectFrame));
+    const frameX = frame * 27;
+    const frameShiftX = frame === 0 ? 0 : 4;
+    const offsets: readonly [number, number][] = [
+      [-13, -43], [-24, -32], [-4, -32], [-13, -22],
+    ];
+    for (const [dx, dy] of offsets) {
+      this.renderer.drawSpriteTransform(
+        smoke, frameX, 0, 27, 29,
+        px + half + dx - frameShiftX,
+        py + half + dy,
+        0,
+      );
+    }
+    return true;
   }
 
   /** 原版 am() case 0：四角框包裹完整占地；确认选中后才向外呼吸并显示范围。 */
@@ -980,6 +1025,7 @@ export class TowerSystem {
       effectType: this.towerConfigs[type]?.effect ?? 0,
       hp: 1, maxHp: 1, debuffTimer: 0,
       frame: 0, orientation: 0, attackAnim: 0,
+      buildEffect: 0, buildEffectFrame: 0,
       strikeX: 0, strikeY: 0,
       gateLoaded: false, gateState: 0, gateTimer: 0,
     };
@@ -1021,7 +1067,7 @@ export class TowerSystem {
           px,
           py,
           tower.attackAnim > 0
-            ? Math.min(12, Math.max(0, TOWER_ATTACK_ANIM_TICKS - tower.attackAnim))
+            ? Math.min(12, Math.max(0, (TOWER_ATTACK_DURATION_TICKS[type] ?? 13) - tower.attackAnim))
             : -1,
         );
       case 'fire-ice':
@@ -1695,6 +1741,7 @@ export class TowerSystem {
       damage: 0, range: 0, fireRate: 0, cooldown: 0, target: -1, angle: 0,
       heroId: -1, effectType: 0, hp: 0, maxHp: 0, debuffTimer: 0,
       frame: 0, orientation: this.resolvePathFacing(this.buildX, this.buildY, type), attackAnim: 0,
+      buildEffect: 0, buildEffectFrame: 0,
       strikeX: this.buildX * TILE_SIZE, strikeY: this.buildY * TILE_SIZE,
       gateLoaded: false, gateState: 0, gateTimer: 0,
     };
@@ -1923,6 +1970,8 @@ export class TowerSystem {
           ? (td.orientation & 3)
           : this.resolvePathFacing(td.x ?? 0, td.y ?? 0, td.type ?? 0),
         attackAnim: 0,
+        buildEffect: 0,
+        buildEffectFrame: 0,
         strikeX: (td.x ?? 0) * TILE_SIZE,
         strikeY: (td.y ?? 0) * TILE_SIZE,
         gateLoaded: td.gateLoaded === true,
