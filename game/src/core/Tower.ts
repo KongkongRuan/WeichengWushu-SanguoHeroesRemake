@@ -445,11 +445,11 @@ export class TowerSystem {
       return false;
     }
 
-    // 原版 d(int)：文系为1-5，武系为6-10。非当前开局路线需要先把弓手塔升为君主。
+    // 开局路线严格限定七级觉醒：文系为1-5，武系为6-10。
     const towerMode = type < 6 ? 1 : 0;
-    const leaderReady = this.towers.some(t => this.spriteType(t.type) === 0 && t.heroId >= 0);
-    if (towerMode !== this.upgradeMode && !leaderReady) {
-      this.lastUpgradeFailure = '需要升级弓塔至君主';
+    if (towerMode !== this.upgradeMode) {
+      const selectedMode = this.upgradeMode === 1 ? '文系' : '武系';
+      this.lastUpgradeFailure = `开局选择的${selectedMode}模式只能觉醒${selectedMode}建筑`;
       return false;
     }
     return true;
@@ -936,7 +936,9 @@ export class TowerSystem {
       case 3: // 中毒
         enemy.effect = 3;
         enemy.dotScale = 1;
-        enemy.timer = Math.max(enemy.timer, tower.heroId === 28 ? 96 : 48);
+        enemy.poisonTimer = Math.max(enemy.poisonTimer ?? 0, tower.heroId === 28 ? 96 : 48);
+        enemy.poisonFrame ??= 0;
+        enemy.timer = Math.max(enemy.timer, enemy.poisonTimer);
         enemy.hp -= tower.level * 2;
         break;
       case 4: // 火焰

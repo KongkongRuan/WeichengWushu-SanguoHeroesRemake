@@ -84,6 +84,8 @@ export interface Enemy {
   effect: number;      // 塔特殊效果 (H5 Tower/TechTree 兼容: 0无 1麻痹 2冰冻 3中毒 4火焰 5减速)
   timer: number;       // 塔效果计时 (H5兼容)
   dotScale: number;    // 持续伤害倍率（终阶火焰英雄为2，其余为1）
+  poisonTimer: number; // [14] 石灰瓶中毒计时；原版与其他状态计时彼此独立
+  poisonFrame: number; // [21] 中毒标记动画帧 (0-2)
 }
 
 export class EnemySystem {
@@ -302,6 +304,8 @@ export class EnemySystem {
       effect: 0,
       timer: 0,
       dotScale: 1,
+      poisonTimer: 0,
+      poisonFrame: 0,
     };
     // 出生方向合法性兜底 (路径格 v<8 才有方向0-3)
     if (enemy.dir < 0 || enemy.dir > 3) enemy.dir = 2;
@@ -472,6 +476,15 @@ export class EnemySystem {
       case EnemyState.WALK:
       default:
         break;
+    }
+
+    // 原版 z(int)：中毒使用独立的 [14] 计时和 [21] 三帧动画，不能被麻痹/冰冻等状态覆盖。
+    if (enemy.poisonTimer > 0) {
+      enemy.poisonFrame = (enemy.poisonFrame + 1) % 3;
+      enemy.poisonTimer--;
+    } else {
+      enemy.poisonTimer = 0;
+      enemy.poisonFrame = 0;
     }
 
     // 状态效果跟随原版 100ms 逻辑帧计时。麻痹停止移动，冰冻/减速仅改变本帧速度。
@@ -725,18 +738,18 @@ export class EnemySystem {
     this.renderer.fillRect(px - 8, py - 18, barW * hpRatio, barH);
   }
 
-  /** 原版 /h_0：石灰瓶命中后在敌兵头顶循环显示四帧绿色中毒标记。 */
+  /** 原版 r(int)：[14] 中毒期间用 /h_4 的三帧 14x11 标记覆盖在敌兵上方。 */
   private renderStatusEffect(enemy: Enemy, px: number, py: number): void {
-    if (enemy.effect !== 3 || enemy.timer <= 0) return;
-    const img = this.spriteLoader?.getByPrefix('h', 0) ?? null;
+    if (enemy.poisonTimer <= 0) return;
+    const img = this.spriteLoader?.getByPrefix('h', 4) ?? null;
     if (img) {
-      const frame = this.visualFrame & 3;
-      this.renderer.drawImageRegion(img, frame * 5, 0, 5, 5,
-        Math.floor(px - 2), Math.floor(py - 25), 5, 5);
+      const frame = enemy.poisonFrame % 3;
+      this.renderer.drawImageRegion(img, frame * 14, 0, 14, 11,
+        Math.floor(px - 8), Math.floor(py - 16), 14, 11);
       return;
     }
     this.renderer.setColor(0x20E090);
-    this.renderer.fillRect(px - 2, py - 25, 5, 5);
+    this.renderer.fillRect(px - 8, py - 16, 14, 11);
   }
 
   // ============================================================

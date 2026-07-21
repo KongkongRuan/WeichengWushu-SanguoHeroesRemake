@@ -42,7 +42,10 @@ function createTower(type: number, overrides: Partial<Tower> = {}): Tower {
 }
 
 function createEnemy(x: number = 48, y: number = 16, hp: number = 1000, defense: number = 0) {
-  return { x, y, hp, defense, state: 0, effect: 0, timer: 0, slowScale: 1 } as never;
+  return {
+    x, y, hp, defense, state: 0, effect: 0, timer: 0, slowScale: 1,
+    poisonTimer: 0, poisonFrame: 0,
+  } as never;
 }
 
 function createMovingEnemy(overrides: Partial<Enemy> = {}): Enemy {
@@ -53,6 +56,7 @@ function createMovingEnemy(overrides: Partial<Enemy> = {}): Enemy {
     siegeAnim: 0, siegeTimer: 0, chargeTimer: 0, dieTimer: 0,
     effect: 0, timer: 0,
     dotScale: 1,
+    poisonTimer: 0, poisonFrame: 0,
     ...overrides,
   };
 }
@@ -623,14 +627,29 @@ test('对应开局路线可升到七级并按 y1130 绑定武将', () => {
   assert.equal(system.getUpgradeCost(tower), null);
 });
 
-test('非对应路线在君主未觉醒前不能升七级', () => {
-  const tower = createTower(1, { level: 6 });
+test('君主已经觉醒也不能让建筑跨越开局选择的文武路线升到七级', () => {
+  for (const [upgradeMode, wrongType] of [[0, 1], [1, 6]] as const) {
+    const tower = createTower(wrongType, { level: 6 });
+    const leader = createTower(0, { level: 7, heroId: 1 });
+    const system = systemWithTower(tower);
+    (system as unknown as { towers: Tower[] }).towers = [tower, leader];
+    system.setGold(999);
+    system.setUpgradeMode(upgradeMode);
+    assert.equal(system.upgradeTower(tower), false);
+    assert.equal(tower.level, 6);
+    assert.match(system.getUpgradeFailureMessage(), /只能觉醒/);
+  }
+});
+
+test('武系开局可以把武系建筑升到七级觉醒', () => {
+  const tower = createTower(6, { level: 6 });
   const system = systemWithTower(tower);
   system.setGold(999);
+  system.setFaction(0);
   system.setUpgradeMode(0);
-  assert.equal(system.upgradeTower(tower), false);
-  assert.equal(tower.level, 6);
-  assert.equal(system.getUpgradeFailureMessage(), '需要升级弓塔至君主');
+  assert.equal(system.upgradeTower(tower), true);
+  assert.equal(tower.level, 7);
+  assert.equal(tower.heroId >= 0, true);
 });
 
 test('魏延加持的石灰瓶中毒时同时减速', () => {
@@ -644,6 +663,7 @@ test('魏延加持的石灰瓶中毒时同时减速', () => {
   assert.equal((enemy as unknown as Enemy).effect, 3);
   assert.equal((enemy as unknown as Enemy).slowScale, 0.5);
   assert.equal((enemy as unknown as Enemy).timer > 0, true);
+  assert.equal((enemy as unknown as Enemy).poisonTimer, 48);
 });
 
 test('建筑方框可解析敌人并取得原版兵种名', () => {
@@ -655,11 +675,24 @@ test('建筑方框可解析敌人并取得原版兵种名', () => {
   assert.equal(system.getEnemyAtTile(3, 3), null);
 });
 
-test('中毒敌人使用 h_0 四帧标记绘制在头顶', () => {
-  const draws: Array<{ sx: number; sy: number; sw: number; sh: number }> = [];
+test('石灰瓶实际命中写入独立中毒计时并使用原版 h_4 三帧标记绘制', () => {
+  const tower = createTower(1, { effectType: 3 });
+  const enemy = createEnemy();
+  const towerSystem = systemWithTower(tower);
+  towerSystem.update([enemy], 0, 0);
+  for (let i = 0; i < 4; i++) towerSystem.update([enemy], 0, 0);
+  assert.equal((enemy as unknown as Enemy).poisonTimer, 48);
+
+  const draws: Array<{
+    sx: number; sy: number; sw: number; sh: number;
+    dx: number; dy: number; dw: number; dh: number;
+  }> = [];
   const renderer = {
-    drawImageRegion(_img: unknown, sx: number, sy: number, sw: number, sh: number) {
-      draws.push({ sx, sy, sw, sh });
+    drawImageRegion(
+      _img: unknown, sx: number, sy: number, sw: number, sh: number,
+      dx: number, dy: number, dw: number, dh: number,
+    ) {
+      draws.push({ sx, sy, sw, sh, dx, dy, dw, dh });
     },
     setColor() {},
     fillRect() {},
@@ -667,15 +700,38 @@ test('中毒敌人使用 h_0 四帧标记绘制在头顶', () => {
   const system = new EnemySystem(renderer as never, {} as never);
   (system as unknown as { spriteLoader: unknown; visualFrame: number }).spriteLoader = {
     getByPrefix(prefix: string, index: number) {
-      return prefix === 'h' && index === 0 ? {} : null;
+      return prefix === 'h' && index === 4 ? {} : null;
     },
   };
-  (system as unknown as { visualFrame: number }).visualFrame = 3;
   const renderStatus = (system as unknown as {
     renderStatusEffect(target: Enemy, x: number, y: number): void;
   }).renderStatusEffect;
-  renderStatus.call(system, createMovingEnemy({ effect: 3, timer: 10 }), 24, 24);
-  assert.deepEqual(draws, [{ sx: 15, sy: 0, sw: 5, sh: 5 }]);
+  renderStatus.call(system, enemy as unknown as Enemy, 24, 24);
+  assert.deepEqual(draws, [{
+    sx: 0, sy: 0, sw: 14, sh: 11,
+    dx: 16, dy: 8, dw: 14, dh: 11,
+  }]);
+});
+
+test('其他状态覆盖通用 effect 后仍保留独立的中毒标记', () => {
+  let draws = 0;
+  const system = new EnemySystem({
+    drawImageRegion() { draws++; },
+    setColor() {},
+    fillRect() {},
+  } as never, {} as never);
+  (system as unknown as { spriteLoader: unknown }).spriteLoader = {
+    getByPrefix(prefix: string, index: number) {
+      return prefix === 'h' && index === 4 ? {} : null;
+    },
+  };
+  const renderStatus = (system as unknown as {
+    renderStatusEffect(target: Enemy, x: number, y: number): void;
+  }).renderStatusEffect;
+  renderStatus.call(system, createMovingEnemy({
+    effect: 2, timer: 10, poisonTimer: 30, poisonFrame: 2,
+  }), 24, 24);
+  assert.equal(draws, 1);
 });
 
 test('SoundFont 播放使用 AudioContext 时间而不是把 context 当作时间参数', () => {
