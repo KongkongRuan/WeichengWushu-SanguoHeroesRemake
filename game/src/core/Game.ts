@@ -2174,15 +2174,22 @@ export class Game {
       const frame = (this.logoFrame >> 3) % 4;
       r.drawImageRegion(logo, frame * 57, 0, 57, 51, (240 - 57) >> 1, 96, 57, 51);
     }
-    // 三行字 sflogo_2/3/4 (68x18) 依次淡入
+    // 三行字 sflogo_2/3/4 (68x18) 依次以裁剪揭示，避免 alpha:false 画布上的半透明文字发虚。
     for (let i = 0; i < 3; i++) {
       const img = this.spr('sflogo', 2 + i);
       if (!img) continue;
       const appear = (this.logoFrame - (20 + i * 18)) / 16;
       if (appear <= 0) continue;
-      r.setAlpha(Math.min(1, appear));
-      r.drawImage(img, (240 - 68) >> 1, 164 + i * 26);
-      r.setAlpha(1);
+      const x = (240 - 68) >> 1;
+      const y = 164 + i * 26;
+      const visibleH = Math.max(1, Math.min(img.height, Math.floor(img.height * Math.min(1, appear))));
+      const ctx = r.virtualContext;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x, y, img.width, visibleH);
+      ctx.clip();
+      r.drawImage(img, x, y);
+      ctx.restore();
     }
     // 跳过提示
     if ((this.frameCount & 31) < 20) {
@@ -2866,16 +2873,23 @@ export class Game {
     // 原版底部: J() 底条常驻 (aw=0时亦为米色条, 行7866-7908)
     // 栏打开/选位时软键=确定/取消; 平时=确定/菜单 (原版左功能键确认, 右功能键菜单)
     this.buildBar.render();
-    // 原版底部名称条左侧直接反馈当前定位位置能否建造；建造选位时按完整占地判断。
+    // 原版底部名称条左侧直接反馈当前定位位置能否建造；光标经过建筑时显示建筑名称。
     if (!this.buildBar.isOpen) {
+      const box = this.mapData.getBuildingBoxTile();
+      const hoveredTower = !this.towerSystem.isBuildMode
+        ? this.towerSystem.getTowerAt(box.tx, box.ty)
+        : null;
       const canBuild = this.towerSystem.isBuildMode
         ? this.towerSystem.canBuildAtCurrentPosition()
         : this.mapData.isBuildingBoxBuildable();
+      const label = hoveredTower
+        ? this.towerSystem.getTowerName(hoveredTower)
+        : (canBuild ? '可造区域' : '不可造区域');
       this.renderer.drawText(
-        canBuild ? '可造区域' : '不可造区域',
+        label,
         2,
         299,
-        canBuild ? 0x2f7a5a : 0xb23a48,
+        hoveredTower ? 0xf2c14e : (canBuild ? 0x2f7a5a : 0xb23a48),
         9,
       );
     }

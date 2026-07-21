@@ -29,6 +29,8 @@ import {
   CURSOR_CORNER_O1156, CURSOR_BRACKET_Q1159,
   TOWER_FOOTPRINT_O1098,
   TOWER_DIRECTION_P1099,
+  TOWER_AUX_LAYER_BY_TYPE, TOWER_ATTACK_LAYER_TYPES,
+  TOWER_RIGHT_FACING_TRANSFORMS, shouldRenderTowerAuxLayer,
 } from '../data/gameData';
 import { TOWER_NAMES, TOWER_DESCRIPTIONS, HEROES, Hero } from '../data/heroes';
 import type { TechTreeSystem } from './TechTree';
@@ -246,7 +248,7 @@ export class TowerSystem {
   }
 
   /**
-   * 方向机关投射到建筑外侧的格子（原版 m1084）。寒冰/滚油的常规命中区域只取
+   * 方向机关投射到建筑外侧的格子（原版 m1084）。沸水/滚油的常规命中区域只取
    * 中间一排/列；突刺、擂木和断龙闸使用完整 3×3。
    */
   private projectedDeviceCells(
@@ -283,7 +285,10 @@ export class TowerSystem {
    * 避免突刺/擂木/沸水/滚油/断龙闸在索敌时反复转向。
    */
   private resolvePathFacing(tileX: number, tileY: number, type: number): number {
-    if (TOWER_DIRECTION_P1099[this.spriteType(type)] !== 1) return 0;
+    const renderType = this.spriteType(type);
+    // 投石不是原版的“定向占地机关”，不能因此限制建造位置；但待机模型仍应
+    // 在第一次攻击前朝向道路。攻击后它会继续按实际目标更新朝向。
+    if (TOWER_DIRECTION_P1099[renderType] !== 1 && renderType !== 7) return 0;
     let bestOrientation = 0;
     let bestScore = -1;
     for (let orientation = 0; orientation < 4; orientation++) {
@@ -606,7 +611,7 @@ export class TowerSystem {
 
         // 进入攻击状态 (对应原版 c1107[4]==6; H5简化: 按固定时长计时)
         tower.attackAnim = TOWER_ATTACK_ANIM_TICKS;
-        // 朝向取瞄准方向 (原版 entity[5]; 石灰瓶/烟火会在动画回绕时随机, 见 tickAnim)
+        // 朝向取瞄准方向 (原版 entity[5]; 弓手塔/麻痹矢会在动画回绕时随机, 见 tickAnim)
         if (TOWER_DIRECTION_P1099[renderType] !== 1) {
           tower.orientation = this.angleToOrientation(tower.angle);
         }
@@ -682,7 +687,7 @@ export class TowerSystem {
   /**
    * 动画帧推进 (对应原版 ah() 行13890 + c(int×3) 行16946)
    * 每100ms逻辑帧: 帧+1 > w1123[type].length-3 时归零;
-   * 类型0/4 (石灰瓶/烟火) 归零时朝向随机 (原版: entity[5] = rand & 3)
+   * 类型0/4 (弓手塔/麻痹矢) 归零时朝向随机 (原版: entity[5] = rand & 3)
    */
   private tickAnim(): void {
     for (const tower of this.towers) {
@@ -838,7 +843,19 @@ export class TowerSystem {
       if (!rect) continue;
       const dx = (points[base + 1] ?? 0) + deviceDx;
       const dy = (points[base + 2] ?? 0) + deviceDy;
-      this.renderer.drawSpriteTransform(img, rect[0], rect[1], rect[2], rect[3], ax + dx, ay + dy, 0);
+      let drawX = ax + dx;
+      let drawY = ay + dy;
+      let transform = 0;
+      if (type === 7) {
+        // t7_0 只有一套面向右的投石主模型。按建造时解析出的道路朝向旋转/翻转，
+        // 并在宽高互换时保持原模型中心不动。
+        transform = TOWER_RIGHT_FACING_TRANSFORMS[tower.orientation & 3] ?? 0;
+        if (transform === 5 || transform === 6) {
+          drawX += (rect[2] - rect[3]) / 2;
+          drawY += (rect[3] - rect[2]) / 2;
+        }
+      }
+      this.renderer.drawSpriteTransform(img, rect[0], rect[1], rect[2], rect[3], drawX, drawY, transform);
       drawn = true;
     }
     return drawn;
@@ -974,17 +991,13 @@ export class TowerSystem {
   }
 
   /**
-   * 塔基座层 (对应原版 y(int) 行26281, 按实体类型 entity[2] 分派)
+   * 塔辅助结构层 (对应原版 y(int) 行26281, 按实体类型 entity[2] 分派)。
+   *
+   * 注意：这里的 bu 图集分组并不按建筑名称顺排。例如 0/4 共用箭矢架，
+   * 3/5 共用火/冰装置，6 才使用擂木结构。主模型 t{type}_0、攻击层和这里
+   * 必须始终使用同一个原版 type，不能按视觉猜测重新编号。
    * 实体锚点 = 瓦片左上 + o1098[type]*8 (原版 entity[0]/[1] + o1098<<3)
-   * 各 case 移植情况:
-   *   0/4 瓶类 → renderBottleBase (a(Image,Image) 行11485)
-   *   1 断龙闸 → renderGateBase (基座 bu_5 + 闸段 bu_7/尖端 bu_6, 高级 b(Image) 行16447)
-   *   2 突刺   → renderSpikeBase (g(int×4) 行21008 + r(int×3) 行24522)
-   *   3/5 擂木/投石 → renderLogStoneBase (a(int×8) 行10775)
-   *   6 麻痹矢 → renderStakeBase (f(int×4) 行20267)
-   *   7 沸水   → renderBoilBase (b(int×8) 行16166)
-   *   8/9 寒冰/滚油 → renderFountainBase (a(Image×3) 行11632); 滚油攻击态 renderOilSpread (h(int×5) 行21857)
-   *   10 装置 → renderDeviceBase (y() case 10 行26600)
+   * 唯一分派表见 TOWER_AUX_LAYER_BY_TYPE；不要在这里另建一套编号。
    * 攻击态判定: 原版 entity[10]==0 为待机; H5 用 attackAnim>0 近似攻击态
    * @returns 是否画出了精灵
    */
@@ -995,49 +1008,52 @@ export class TowerSystem {
     const ax = px + half;
     const ay = py + half;
 
-    switch (type) {
-      case 0: // 石灰瓶
-      case 4: // 烟火
-        return this.renderBottleBase(tower, ax, ay, level0);
-      case 1: // 断龙闸
-        return this.renderGateBase(tower, ax, ay, level0);
-      case 2: // 突刺
-        if (tower.attackAnim <= 0) return false;
+    if (!shouldRenderTowerAuxLayer(type, tower.attackAnim)) return false;
+
+    switch (TOWER_AUX_LAYER_BY_TYPE[type]) {
+      case 'arrow':
+        return this.renderStripBase(tower, ax, ay, level0);
+      case 'lime':
+        return this.renderLimeBottleBase(tower, ax, ay, level0);
+      case 'spike':
         return this.renderSpikeBase(
           tower,
           px,
           py,
-          Math.min(12, Math.max(0, TOWER_ATTACK_ANIM_TICKS - tower.attackAnim)),
+          tower.attackAnim > 0
+            ? Math.min(12, Math.max(0, TOWER_ATTACK_ANIM_TICKS - tower.attackAnim))
+            : -1,
         );
-      case 3: // 擂木
-      case 5: // 投石
-        return this.renderLogStoneBase(tower, px, py, ax, ay, level0);
-      case 6: // 麻痹矢
-        return this.renderStakeBase(tower, ax, ay, level0);
-      case 7: // 沸水
-        return this.renderBoilBase(tower, px, py, ax, ay, level0);
-      case 8: // 寒冰 (原版仅待机态 entity[10]==0 绘制, a.java:26543)
-        if (tower.attackAnim > 0) return false;
-        return this.renderFountainBase(tower, px, py, level0, [32, 33, 34]);
-      case 9: // 滚油 (待机=喷泉基座; 攻击态=油渍, a.java:26565)
+      case 'fire-ice':
+        return this.renderFireIceBase(tower, px, py, ax, ay, level0);
+      case 'log':
+        return this.renderLogBase(tower, ax, ay, level0);
+      case 'catapult':
+        return this.renderCatapultBase(tower, px, py, ax, ay, level0);
+      case 'liquid':
+        if (type === 8) {
+          if (tower.attackAnim > 0) return false;
+          return this.renderLiquidBase(tower, px, py, level0, [32, 33, 34]);
+        }
         if (tower.attackAnim > 0) return this.renderOilSpread(tower, px, py);
-        return this.renderFountainBase(tower, px, py, level0, [36, 37, 38]);
-      case 10: // 装置
+        return this.renderLiquidBase(tower, px, py, level0, [36, 37, 38]);
+      case 'gate':
         // 原版仅在断龙闸动作状态 entity[10]==2 时叠加九点闸墙效果。
-        return tower.gateState === 2 && this.renderDeviceBase(tower, px, py, level0);
+        return tower.gateState === 2 && this.renderGateActiveLayer(tower, px, py, level0);
       default:
         return false;
     }
   }
 
   /**
-   * 瓶类基座 (对应原版 a(Image,Image,int×5) 行11485; y() case 0/1/4)
-   * 组: 0=石灰瓶(bu_2基座+bu_1球) 1=烟火(bu_4+bu_3球) 2=断龙闸(bu_5, 无球)
+   * 条状辅助结构 (对应原版 a(Image,Image,int×5) 行11485; y() case 0/1/4)
+   * 组: 0=弓手塔(bu_2+bu_1箭矢) 1=麻痹矢(bu_4+bu_3箭矢) 2=石灰瓶(bu_5, 无箭矢)
    * 原版仅等级 entity[13]<3 时绘制
    */
-  private renderBottleBase(tower: Tower, ax: number, ay: number, level0: number): boolean {
+  private renderStripBase(tower: Tower, ax: number, ay: number, level0: number): boolean {
     if (level0 < 0 || level0 >= 3) return false;
-    const group = this.spriteType(tower.type) === 0 ? 0 : (tower.type === 4 ? 1 : 2);
+    const type = this.spriteType(tower.type);
+    const group = type === 0 ? 0 : (type === 4 ? 1 : 2);
     const baseImg = this.spr('bu', group === 0 ? 2 : (group === 1 ? 4 : 5));
     if (!baseImg) return false;
 
@@ -1066,11 +1082,11 @@ export class TowerSystem {
     }
     this.renderer.drawSpriteTransform(baseImg, sx, sy, sw, sh, dx, dy, transform);
 
-    // 石灰瓶/烟火: 沿朝向画 5 个瓶球 (bu_1/bu_3, 9x9帧; 断龙闸无球)
+    // 弓手塔/麻痹矢: 沿朝向画 5 个箭矢帧 (bu_1/bu_3, 9x9帧；石灰瓶无此层)
     // 原版: 位置 = (bx+entity[11]*i, by+entity[12]*i), 帧 = C1134[entity][i]*9
     // H5简化: entity[11]/[12] 用朝向单位向量近似, 球帧按动画帧滚动
-    if (tower.type !== 1) {
-      const ballImg = this.spr('bu', tower.type === 0 ? 1 : 3);
+    if (group !== 2) {
+      const ballImg = this.spr('bu', group === 0 ? 1 : 3);
       if (ballImg) {
         const dirX = [0, 1, 0, -1][orient];
         const dirY = [-1, 0, 1, 0][orient];
@@ -1084,12 +1100,12 @@ export class TowerSystem {
   }
 
   /**
-   * 麻痹矢基座 (对应原版 f(int x,int y,int type,int level) 行20267)
+   * 擂木辅助结构 (对应原版 f(int x,int y,int type,int level) 行20267)
    * 朝向外观 = tower.orientation (原版 entity[5]); 三表: I1142/k1141/l1143
    * 主件: 等级<3 时 bu[I1142[app][0]], srcX = 等级*帧宽, 偏移 k1141[等级][app]
    * 装饰件: 等级1-2 → 件0,1 (srcX=等级*帧宽); 等级3-5 → 件2,3 (srcX=(等级-3)*帧宽)
    */
-  private renderStakeBase(tower: Tower, ax: number, ay: number, level0: number): boolean {
+  private renderLogBase(tower: Tower, ax: number, ay: number, level0: number): boolean {
     const app = tower.orientation & 3;
     let drawn = false;
 
@@ -1117,15 +1133,15 @@ export class TowerSystem {
   }
 
   /**
-   * 断龙闸基座 (对应原版 y() case 1, a.java:26326-26471)
+   * 石灰瓶辅助结构 (对应原版 y() case 1, a.java:26326-26471)
    * 等级<3: bu_5 基座 (a(Image,Image) 行11485, 无球);
    * 等级<4: 沿朝向画 level 段 bu_7 (10x10帧, srcX=段号*10) + 尖端 bu_6 (12x12帧, srcX=段号*12)
    * 等级>=4: b(Image,int×4) 行16447 — bu_8 按 H1140 七点绘制 + p() 旗帜
-   * 朝向单位向量近似原版 entity[11]/[12] (与 renderBottleBase 瓶球同一简化)
+   * 朝向单位向量近似原版 entity[11]/[12] (与 renderStripBase 的条状部件同一简化)
    */
-  private renderGateBase(tower: Tower, ax: number, ay: number, level0: number): boolean {
+  private renderLimeBottleBase(tower: Tower, ax: number, ay: number, level0: number): boolean {
     const orient = tower.orientation & 3;
-    const j = TOWER_BASE_OFFSETS_J1139[2]; // 组2=断龙闸
+    const j = TOWER_BASE_OFFSETS_J1139[2]; // 组2=石灰瓶
     const lvlRow = (Math.min(level0, 5) >> 1) + 4; // 原版 (min(entity[3],5)>>1)+4
     const offX = j[orient][0] + j[lvlRow][0]; // 原版 var18 (a.java:26347)
     const offY = j[orient][1] + j[lvlRow][1]; // 原版 var19 (a.java:26368, +13 已并入 ay)
@@ -1136,9 +1152,9 @@ export class TowerSystem {
     if (level0 < 4) {
       if (level0 < 3) {
         // bu_5 基座 (a.java:26395 调 a(Image,Image) 行11485, 第二张图为 null → 无球)
-        drawn = this.renderBottleBase(tower, ax, ay, level0);
+        drawn = this.renderStripBase(tower, ax, ay, level0);
       }
-      // 闸段循环 (a.java:26402-26457): i=1..等级 画 bu_7, i==等级 再画尖端 bu_6
+      // 瓶列循环 (a.java:26402-26457): i=1..等级 画 bu_7, i==等级 再画端部 bu_6
       for (let i = 0; i <= level0; i++) {
         const sx = ax + offX + dirX * i;
         const sy = ay + offY + dirY * i;
@@ -1158,7 +1174,7 @@ export class TowerSystem {
         }
       }
     } else {
-      // 高级断龙闸 (a.java:26458-26469): b(Image,int×4) 行16447
+      // 高级石灰瓶 (a.java:26458-26469): b(Image,int×4) 行16447
       drawn = this.renderH1140Points(this.spr('bu', 8), ax + dirX * 4, ay + dirY * 4, level0 - 4);
     }
     return drawn;
@@ -1199,6 +1215,7 @@ export class TowerSystem {
   private renderSpikeBase(tower: Tower, px: number, py: number, phase: number): boolean {
     const orient = tower.orientation & 3;
     const m = TOWER_DIR_SPREAD_M1084[orient];
+    const holes = this.spr('bu', 40);
     const img41 = this.spr('bu', 41);
     const img42 = this.spr('bu', 42);
     if (!img42) return false;
@@ -1209,6 +1226,15 @@ export class TowerSystem {
         const cx = px + (i << 4) * m[0] + m[2];
         const cy = py + (j << 4) * m[1] + m[3];
         const line = orient === 0 || orient === 2 ? j : i;
+        // 待机时原版保留的是 bu_40 的 9×9 地刺孔，bu_42 只属于攻击中的尖刺底层。
+        if (phase < 0) {
+          if (holes) {
+            this.renderer.drawSpriteTransform(holes, 0, 0, 9, 9, cx + 3, cy + 3, 0);
+            drawn = true;
+          }
+          continue;
+        }
+
         // 排与帧判定 (a.java:21032-21082)
         let frame = -1;
         if (line === 0 && phase >= 0 && phase < 7) frame = phase;
@@ -1228,7 +1254,7 @@ export class TowerSystem {
   }
 
   /**
-   * 擂木/投石地基 (对应原版 s(int×3) 行24703 = t() 行25020 + u() 行25238)
+   * 烟火/寒冰/投石地基 (对应原版 s(int×3) 行24703 = t() 行25020 + u() 行25238)
    * t(): 等级<3 画 bu_18 地基帧 (N1149[等级] = [srcX,srcY,宽,高,dx,dy])
    * u(): 等级<2 画 bu_17 碎块 (m1150[等级] 表), 块索引 > 块数-3 时 transform=1 (水平翻转)
    */
@@ -1269,23 +1295,24 @@ export class TowerSystem {
   }
 
   /**
-   * 擂木/投石基座 (对应原版 a(int×8) 行10775, y() case 3/5 调用于 a.java:26480)
-   * 基座偏移: 擂木 = J1144[min(等级,5)>>1], 投石 = (-5,-26)
-   * 待机 (entity[10]==0): s() 地基 + 等级 2-3 中层件 (擂木 bu_22 / 投石 bu_26)
+   * 烟火/寒冰辅助结构 (对应原版 a(int×8) 行10775, y() case 3/5 调用于 a.java:26480)
+   * 基座偏移: 烟火 = J1144[min(等级,5)>>1], 寒冰 = (-5,-26)
+   * 待机 (entity[10]==0): s() 地基 + 等级 2-3 中层件 (烟火 bu_22 / 寒冰 bu_26)
    *   + 等级 6+ 高杆 (bu_19/bu_23, 7x45) + 等级 7+ 顶件 (bu_21/bu_25, 15x15)
    * 攻击态 (entity[10]==1): 打击点立柱 (bu_20/bu_24, 12x41, srcX=等级*12) + 顶部 (15x15, srcX=等级*15)
    */
-  private renderLogStoneBase(tower: Tower, px: number, py: number, ax: number, ay: number, level0: number): boolean {
-    const type = tower.type;
-    const [dx, dy] = type === 3 ? TOWER_LOG_BASE_OFF_J1144[Math.min(level0, 5) >> 1] : [-5, -26] as [number, number];
+  private renderFireIceBase(tower: Tower, px: number, py: number, ax: number, ay: number, level0: number): boolean {
+    const type = this.spriteType(tower.type);
+    const isWarmVariant = type === 3;
+    const [dx, dy] = isWarmVariant ? TOWER_LOG_BASE_OFF_J1144[Math.min(level0, 5) >> 1] : [-5, -26] as [number, number];
 
     if (tower.attackAnim <= 0) {
       // 待机 state 0 (a.java:10868)
       let drawn = this.renderGroundBase(px + dx, py + dy, level0, true);
       if (level0 > 1 && level0 < 4) {
-        // 等级 2-3 中层件 (a.java:10873-10911): 擂木 bu_22 (16x16, srcX=(等级-2)*16) @ +21,+16
-        //   投石 bu_26 (12x17, srcX=(等级-2)*12) @ +24,+23
-        if (type === 3) {
+        // 等级 2-3 中层件 (a.java:10873-10911): 烟火 bu_22 (16x16, srcX=(等级-2)*16) @ +21,+16
+        //   寒冰 bu_26 (12x17, srcX=(等级-2)*12) @ +24,+23
+        if (isWarmVariant) {
           const img = this.spr('bu', 22);
           if (img) {
             this.renderer.drawSpriteTransform(img, (level0 - 2) * 16, 0, 16, 16, px + dx + 21, py + dy + 16, 0);
@@ -1301,14 +1328,14 @@ export class TowerSystem {
       }
       if (level0 > 5) {
         // 等级 6+ 高杆 (a.java:10913-10926): bu_19/bu_23 (7x45, srcX=(等级-6)*7) @ +26,-31
-        const pole = this.spr('bu', type === 3 ? 19 : 23);
+        const pole = this.spr('bu', isWarmVariant ? 19 : 23);
         if (pole) {
           this.renderer.drawSpriteTransform(pole, (level0 - 6) * 7, 0, 7, 45, px + dx + 26, py + dy - 31, 0);
           drawn = true;
         }
         if (level0 > 6) {
           // 等级 7+ 顶件 (a.java:10927-10941): bu_21/bu_25 (15x15, srcX=(等级-7)*15) @ +22,-52
-          const top = this.spr('bu', type === 3 ? 21 : 25);
+          const top = this.spr('bu', isWarmVariant ? 21 : 25);
           if (top) {
             this.renderer.drawSpriteTransform(top, (level0 - 7) * 15, 0, 15, 15, px + dx + 22, py + dy - 52, 0);
             drawn = true;
@@ -1321,12 +1348,12 @@ export class TowerSystem {
     // 攻击态 state 1 (a.java:10945-10963): 打击点立柱 + 顶部
     const [sx, sy] = this.strikePoint(tower, ax, ay);
     let drawn = false;
-    const pole = this.spr('bu', type === 3 ? 20 : 24);
+    const pole = this.spr('bu', isWarmVariant ? 20 : 24);
     if (pole) {
       this.renderer.drawSpriteTransform(pole, level0 * 12, 0, 12, 41, sx, sy, 0);
       drawn = true;
     }
-    const top = this.spr('bu', type === 3 ? 21 : 25);
+    const top = this.spr('bu', isWarmVariant ? 21 : 25);
     if (top) {
       this.renderer.drawSpriteTransform(top, level0 * 15, 0, 15, 15, sx, sy - 15, 0);
       drawn = true;
@@ -1335,14 +1362,14 @@ export class TowerSystem {
   }
 
   /**
-   * 沸水基座 (对应原版 b(int×8) 行16166, y() case 7 调用于 a.java:26530)
+   * 投石辅助结构 (对应原版 b(int×8) 行16166, y() case 7 调用于 a.java:26530)
    * 基座偏移 = K1145[min(等级,5)>>1]
    * 待机 (entity[10]==0): t() 地基 (无 u()) + 等级 3-5 bu_22 (16x16, srcX=(等级&1)*16)
    *   + 等级 6: bu_29 src(0,18,16x31); 等级 6-8: bu_27 (21x17); 等级 7+: bu_28 (29x22)
    * 攻击态 (entity[10]==1): 等级<3 → bu_29 (L1146帧, transform=2) + bu_28;
    *   等级>=3 → b(Image,int×4) 行16447 (bu_30 H1140 七点 + 旗帜)
    */
-  private renderBoilBase(tower: Tower, px: number, py: number, ax: number, ay: number, level0: number): boolean {
+  private renderCatapultBase(tower: Tower, px: number, py: number, ax: number, ay: number, level0: number): boolean {
     const [dx, dy] = TOWER_BOIL_BASE_OFF_K1145[Math.min(level0, 5) >> 1]; // a.java:16174-16181
 
     if (tower.attackAnim <= 0) {
@@ -1408,12 +1435,12 @@ export class TowerSystem {
   }
 
   /**
-   * 寒冰/滚油喷泉基座 (对应原版 a(Image×3,int×4) 行11632, y() case 8/9 调用于 a.java:26542/26565)
+   * 沸水/滚油液体装置基座 (对应原版 a(Image×3,int×4) 行11632, y() case 8/9 调用于 a.java:26542/26565)
    * 仅等级<3 绘制; 偏移 = M1147[朝向]
    * 朝向0: imgs[0] (14x33帧, srcX=等级*14); 朝向1: imgs[2] (50x12帧, srcX=(2-等级)*50, transform=1)
    * 朝向2: imgs[1] (13x52帧, srcX=等级*13); 朝向3: imgs[2] (50x12帧, srcX=等级*50)
    */
-  private renderFountainBase(tower: Tower, px: number, py: number, level0: number, imgs: [number, number, number]): boolean {
+  private renderLiquidBase(tower: Tower, px: number, py: number, level0: number, imgs: [number, number, number]): boolean {
     if (level0 < 0 || level0 >= 3) return false;
     const o = tower.orientation & 3;
     const dx = px + TOWER_FOUNTAIN_OFF_M1147[o][0]; // a.java:11633
@@ -1469,7 +1496,7 @@ export class TowerSystem {
    *   塔身 E1136 九点 bu_47 (14x19帧, srcX=等级*14)
    *   旗帜 G1138 四点 p(int×3) (ui_20, 27x29帧)
    */
-  private renderDeviceBase(tower: Tower, px: number, py: number, level0: number): boolean {
+  private renderGateActiveLayer(tower: Tower, px: number, py: number, level0: number): boolean {
     const o = tower.orientation & 3;
     const [fx, fy] = TOWER_DEVICE_ORIENT_F1137[o];
     let drawn = false;
@@ -1491,11 +1518,14 @@ export class TowerSystem {
   /**
    * 塔攻击动画层 (对应原版 d(int x,int y,int type,int frame,int orientation,int state) 行18882)
    * 类型0/4: 仅攻击态 (原版 state==6) 画 t0[朝向+1] (+帧3-9叠画 t0_5)
-   * 类型2/3/9: t{type}[1] 常驻多点绘制; 类型5/8: 再叠 t{type}[2] (用 w1123[type-1])
+   * 类型2/3/9: 攻击态绘制 t{type}[1]; 类型5/8: 再叠 t{type}[2] (用 w1123[type-1])
    * 类型1/6/7: 无动画
    */
   private renderAttackAnim(tower: Tower, px: number, py: number): boolean {
+    // t{type}_1/t{type}_2 均为攻击层。任何类型只要尚未进入攻击状态，
+    // 都不能仅因普通动画 frame 在推进而把攻击贴图画到待机建筑上。
     const type = this.spriteType(tower.type); // 弓手塔19→原版塔0 (t0动画)
+    if (tower.attackAnim <= 0 || !TOWER_ATTACK_LAYER_TYPES.includes(type)) return false;
     const half = (TOWER_ANCHOR_O1098[type] ?? 2) << 3;
     const ax = px + half;
     const ay = py + half;
@@ -1504,7 +1534,6 @@ export class TowerSystem {
       case 0:
       case 4: {
         // 原版: state==6 且 0<=朝向<=3 才画
-        if (tower.attackAnim <= 0) return false;
         const o = tower.orientation;
         const img = this.spr('t0', o + 1);
         if (!img) return false;
@@ -1528,7 +1557,6 @@ export class TowerSystem {
         return true;
       }
       case 2: {
-        if (tower.attackAnim <= 0) return false;
         const img = this.spr('t2', 1);
         if (!img) return false;
         return this.renderMultiPoint(img, TOWER_ANIM_W1123[type], tower.frame, type, ax, ay);
@@ -1547,7 +1575,7 @@ export class TowerSystem {
           drawn = this.renderMultiPoint(img1, TOWER_ANIM_W1123[type], tower.frame, type, ax, ay);
         }
         // 第二层: t{type}[2], 用 w1123[type-1] 序列与 i1122[type-1] 绘制点
-        // 类型5 drawY 追加 x1124[帧] (投石逐帧Y偏移)
+        // 类型5 drawY 追加 x1124[帧] (寒冰逐帧Y偏移)
         const img2 = this.spr(`t${type}`, 2);
         if (img2) {
           const dyExtra = type === 5 ? (TOWER5_FRAME_YOFF_X1124[tower.frame] ?? 0) : 0;
@@ -1747,6 +1775,10 @@ export class TowerSystem {
    */
   getTowerConfig(type: number) {
     return this.towerConfigs[type];
+  }
+
+  getTowerName(tower: Tower): string {
+    return this.towerConfigs[this.spriteType(tower.type)]?.name ?? '建筑';
   }
 
   /**

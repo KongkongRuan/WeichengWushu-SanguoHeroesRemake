@@ -6,9 +6,15 @@ import {
   linearLevelValue,
   originalDemolishRefund,
 } from '../src/core/Timing';
+import { TowerSystem } from '../src/core/Tower';
 import {
+  TOWER_ATTACK_LAYER_TYPES,
+  TOWER_ATTACK_ONLY_AUX_TYPES,
+  TOWER_AUX_LAYER_BY_TYPE,
   TOWER_GATE_LOAD_DIR_S1117,
   TOWER_GATE_LOAD_OFF_T1118,
+  TOWER_RIGHT_FACING_TRANSFORMS,
+  shouldRenderTowerAuxLayer,
 } from '../src/data/gameData';
 
 function countLogicSteps(refreshRate: number, seconds: number, speed: number = 1): number {
@@ -95,4 +101,48 @@ test('断龙闸装填预览始终是沿朝向的一排三块石头', () => {
   assert.deepEqual(positions[1], [[129, 75], [129, 91], [129, 107]]);
   assert.deepEqual(positions[2], [[101, 107], [117, 107], [133, 107]]);
   assert.deepEqual(positions[3], [[101, 75], [101, 91], [101, 107]]);
+});
+
+test('11 类建筑始终使用同一套原版辅助层编号', () => {
+  assert.deepEqual([...TOWER_AUX_LAYER_BY_TYPE], [
+    'arrow', 'lime', 'spike', 'fire-ice', 'arrow', 'fire-ice',
+    'log', 'catapult', 'liquid', 'liquid', 'gate',
+  ]);
+});
+
+test('只有拥有攻击图集的建筑可以进入独立攻击贴图分支', () => {
+  assert.deepEqual([...TOWER_ATTACK_LAYER_TYPES], [0, 2, 3, 4, 5, 8, 9]);
+  for (const idleOnlyType of [1, 6, 7, 10]) {
+    assert.equal(TOWER_ATTACK_LAYER_TYPES.includes(idleOnlyType), false);
+  }
+});
+
+test('擂木、烟火、寒冰和投石的动作辅助层不会在待机时绘制', () => {
+  assert.deepEqual([...TOWER_ATTACK_ONLY_AUX_TYPES], [3, 5, 6, 7]);
+  for (const type of TOWER_ATTACK_ONLY_AUX_TYPES) {
+    assert.equal(shouldRenderTowerAuxLayer(type, 0), false);
+    assert.equal(shouldRenderTowerAuxLayer(type, 1), true);
+  }
+  assert.equal(shouldRenderTowerAuxLayer(2, 0), true); // 突刺仍保留待机孔洞
+});
+
+test('投石右向原图可转换为上右下左四个道路朝向', () => {
+  assert.deepEqual([...TOWER_RIGHT_FACING_TRANSFORMS], [5, 0, 6, 1]);
+});
+
+test('投石建造后会自动朝向建筑左右两侧的敌人路径', () => {
+  const resolveFacing = (roadX: number): number => {
+    const map = {
+      getTerrain(tx: number, ty: number) {
+        return tx === roadX && ty >= 10 && ty <= 12 ? 0 : 8;
+      },
+    };
+    const system = new TowerSystem({} as never, map as never);
+    return (system as unknown as {
+      resolvePathFacing(x: number, y: number, type: number): number;
+    }).resolvePathFacing(10, 10, 7);
+  };
+
+  assert.equal(resolveFacing(9), 3);  // 道路在左，投石朝左
+  assert.equal(resolveFacing(13), 1); // 道路在右，投石朝右
 });

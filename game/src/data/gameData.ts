@@ -148,6 +148,42 @@ export const TOWER_DIRECTION_P1099: number[] = [
 ];
 
 /**
+ * 原版 y(int) 的 bu 辅助结构层分派。
+ *
+ * 这些素材组并不按建筑名称顺排，曾因此把烟火/寒冰的火焰结构错误套到
+ * 擂木/投石上。主模型、辅助层和攻击层必须共同使用同一个原版 type。
+ */
+export const TOWER_AUX_LAYER_BY_TYPE = [
+  'arrow',      // 0 弓手塔
+  'lime',       // 1 石灰瓶
+  'spike',      // 2 突刺
+  'fire-ice',   // 3 烟火
+  'arrow',      // 4 麻痹矢
+  'fire-ice',   // 5 寒冰
+  'log',        // 6 擂木
+  'catapult',   // 7 投石
+  'liquid',     // 8 沸水
+  'liquid',     // 9 滚油
+  'gate',       // 10 断龙闸
+] as const;
+
+/** 拥有独立 t{type}_1/t{type}_2 攻击贴图的建筑；这些层只允许在攻击态绘制。 */
+export const TOWER_ATTACK_LAYER_TYPES: readonly number[] = [0, 2, 3, 4, 5, 8, 9];
+
+/**
+ * 这些建筑的 bu 辅助图表现的是已触发的火焰、冰焰、擂木或投石动作，
+ * 待机时只绘制 t{type}_0 主模型，避免动作贴图常驻。
+ */
+export const TOWER_ATTACK_ONLY_AUX_TYPES: readonly number[] = [3, 5, 6, 7];
+
+export function shouldRenderTowerAuxLayer(type: number, attackAnim: number): boolean {
+  return attackAnim > 0 || !TOWER_ATTACK_ONLY_AUX_TYPES.includes(type);
+}
+
+/** t7_0 投石模型原图面向右；按 0上/1右/2下/3左 转成 J2ME Sprite transform。 */
+export const TOWER_RIGHT_FACING_TRANSFORMS: readonly number[] = [5, 0, 6, 1];
+
+/**
  * q1100: 击杀奖励金币 (byte[11])
  * 每关击杀敌人获得的金币
  */
@@ -260,27 +296,27 @@ export const TOWER_LEVELS: number[] = [6, 4, 3, 2, 1];
  * (已从字节码逐字节核对)
  */
 export const TOWER_ANIM_W1123: number[][] = [
-  // [0] 石灰瓶 (朝向用法见 d(int×6) 行18882: srcX=y1125[朝向*4+2]*序列值, 朝向0时 srcX=0)
+  // [0] 弓手塔 (朝向用法见 d(int×6) 行18882: srcX=y1125[朝向*4+2]*序列值, 朝向0时 srcX=0)
   [0, 1, 1, 2, 2, 1, 1, 3, 3, 1, 1, 2, 2, 1, 1, 3, 3, 1, 1, 0, 4, 4, 4, 4, 4, 4, 4, 4, 0, 0],
-  // [1] 断龙闸 (无)
+  // [1] 石灰瓶 (无独立 t 攻击层)
   [],
   // [2] 突刺 帧6x12 (t2_1 24x12=4帧)
   [0, 1, 2, 3, 2, 3, 2, 3, 2, 3, 3, 2, 1, 0, 4, 4, 4, 4, 4, 4, 4, 4, 6, 12],
-  // [3] 擂木 帧5x15 (t3_1 60x15=12帧)
+  // [3] 烟火 帧5x15 (t3_1 60x15=12帧)
   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 5, 15],
-  // [4] 烟火 帧12x17
+  // [4] 麻痹矢 帧12x17
   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 17],
-  // [5] 投石 帧12x11 (t5_1 108x11=9帧)
+  // [5] 寒冰 帧12x11 (t5_1 108x11=9帧)
   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 11],
-  // [6] 麻痹矢 (无)
+  // [6] 擂木 (无独立 t 攻击层)
   [],
-  // [7] 沸水 帧13x33 (t7_0 38x100≈3帧, 实际给 t8_2 用)
+  // [7] 投石 帧13x33 (本序列还供 t8_2 使用)
   [0, 1, 2, 0, 1, 2, 0, 1, 2, 13, 33],
-  // [8] 寒冰 帧14x14 (t8_1 84x14=6帧)
+  // [8] 沸水 帧14x14 (t8_1 84x14=6帧)
   [0, 1, 2, 3, 4, 5, 6, 6, 6, 14, 14],
   // [9] 滚油 帧16x12 (t9_1 48x12=3帧)
   [0, 1, 2, 2, 2, 2, 1, 0, 3, 3, 3, 16, 12],
-  // [10] (无)
+  // [10] 断龙闸 (无自动攻击层)
   [],
 ];
 
@@ -337,32 +373,32 @@ export const TOWER_DEVICE_MODEL_OFF_R1115: [number, number][] = [[0, 8], [-6, 8]
  * 每种塔的 t 图集多点绘制偏移 (dx, dy), 对应 a(Image,x,y,type,frame,len) 行11170
  */
 export const TOWER_DRAW_POINTS_I1122: [number, number][][] = [
-  [[-5, -31], [6, -24], [-5, -16], [-14, -24]],   // 0 石灰瓶
-  [],                                            // 1 断龙闸
+  [[-5, -31], [6, -24], [-5, -16], [-14, -24]],   // 0 弓手塔
+  [],                                            // 1 石灰瓶
   [[-3, -2]],                                    // 2 突刺
-  [[-11, -31], [-14, -9], [0, -7], [8, -21]],    // 3 擂木
-  [[-6, -27]],                                   // 4 烟火
-  [[-6, -9]],                                    // 5 投石
-  [],                                            // 6 麻痹矢
-  [[-18, -34], [5, -34]],                        // 7 沸水
-  [[-7, -19]],                                   // 8 寒冰
+  [[-11, -31], [-14, -9], [0, -7], [8, -21]],    // 3 烟火
+  [[-6, -27]],                                   // 4 麻痹矢
+  [[-6, -9]],                                    // 5 寒冰
+  [],                                            // 6 擂木
+  [[-18, -34], [5, -34]],                        // 7 投石
+  [[-7, -19]],                                   // 8 沸水
   [[-8, -18]],                                   // 9 滚油
   [],                                            // 10
 ];
 
 /**
- * x1124: 投石(类型5)攻击动画逐帧Y偏移 (byte[10], a.java:4059)
+ * x1124: 寒冰(类型5)攻击动画逐帧Y偏移 (byte[10], a.java:4059)
  */
 export const TOWER5_FRAME_YOFF_X1124: number[] = [0, 2, 3, 3, 2, 1, 0, -1, -2, -1];
 
 /**
- * y1125: 石灰瓶/烟火(类型0/4)攻击动画朝向表 (byte[16], a.java:4061)
+ * y1125: 弓手塔/麻痹矢(类型0/4)攻击动画朝向表 (byte[16], a.java:4061)
  * 每朝向 4 字节 = (dx, dy, 帧宽, 帧高)
  */
 export const TOWER_ORIENT_Y1125: number[] = [-5, -20, 10, 3, 8, -15, 6, 9, -5, -4, 10, 6, -14, -15, 6, 9];
 
 /**
- * I1142: 麻痹矢(类型6)基座主件表 (byte[4][4], a.java:4449-4474)
+ * I1142: 擂木(类型6)辅助结构主件表 (byte[4][4], a.java:4449-4474)
  * 每朝向外观 = [bu图索引, transform, 帧宽, 帧高], 对应 f(int×4) 行20267
  */
 export const TOWER_BASE_I1142: number[][] = [
@@ -373,7 +409,7 @@ export const TOWER_BASE_I1142: number[][] = [
 ];
 
 /**
- * k1141: 麻痹矢基座绘制偏移 (byte[3][4][2], a.java:4393-4448)
+ * k1141: 擂木辅助结构绘制偏移 (byte[3][4][2], a.java:4393-4448)
  * [等级0-2][朝向0-3] = (dx, dy), 屏幕坐标 = (实体x+dx, 实体y+dy+13-顶栏修正)
  */
 export const TOWER_BASE_OFF_K1141: [number, number][][] = [
@@ -383,7 +419,7 @@ export const TOWER_BASE_OFF_K1141: [number, number][][] = [
 ];
 
 /**
- * l1143: 麻痹矢基座装饰件表 (byte[4][4][6], a.java:4475-4516)
+ * l1143: 擂木辅助结构装饰件表 (byte[4][4][6], a.java:4475-4516)
  * [朝向0-3][件0-3] = [bu图索引, dx, dy, transform, 帧宽, 帧高]
  * 等级1-2 画件0,1 (srcX=等级*帧宽); 等级3-5 画件2,3 (srcX=(等级-3)*帧宽)
  */
@@ -395,8 +431,8 @@ export const TOWER_DECOR_L1143: number[][][] = [
 ];
 
 /**
- * j1139: 石灰瓶/烟火/断龙闸基座偏移 (byte[3][7][2], a.java:4247-4338)
- * [组][朝向0-3 或 等级行4-6] = (dx, dy); 组: 0=石灰瓶 1=烟火 2=断龙闸
+ * j1139: 弓手塔/麻痹矢/石灰瓶条状结构偏移 (byte[3][7][2], a.java:4247-4338)
+ * [组][朝向0-3 或 等级行4-6] = (dx, dy); 组: 0=弓手塔 1=麻痹矢 2=石灰瓶
  * 对应 a(Image,Image,int×5) 行11485
  */
 export const TOWER_BASE_OFFSETS_J1139: [number, number][][] = [
@@ -460,7 +496,7 @@ export const TOWER_GATE_FALL_RECTS_H1121: [number, number][][] = [
 export const TOWER_SPIKE_YOFF_Z1148: number[] = [0, -6, -8, -12, -14];
 
 /**
- * N1149: 擂木/投石/沸水(类型3/5/7)地基帧表 (byte[3][6], a.java:4599-4606)
+ * N1149: 烟火/寒冰/投石(类型3/5/7)地基帧表 (byte[3][6], a.java:4599-4606)
  * [等级0-2] = [srcX, srcY, 宽, 高, dx, dy], bu_18 图集, 对应 t(int×3) 行25020
  */
 export const TOWER_GROUND_FRAME_N1149: number[][] = [
@@ -470,7 +506,7 @@ export const TOWER_GROUND_FRAME_N1149: number[][] = [
 ];
 
 /**
- * m1150: 擂木/投石地基碎块表 (byte[2][][], a.java:4607-4638)
+ * m1150: 烟火/寒冰地基碎块表 (byte[2][][], a.java:4607-4638)
  * [等级0-1][块] = [srcX, srcY, 宽, 高, dx, dy], bu_17 图集, 对应 u(int×3) 行25238
  * 原版: 块索引 > 数组长度-3 时 transform=1 (水平翻转)
  */
@@ -487,20 +523,20 @@ export const TOWER_GROUND_PIECES_M1150: number[][][] = [
 ];
 
 /**
- * J1144: 擂木(类型3)基座偏移 (byte[3][2], a.java:4517-4530)
+ * J1144: 烟火(类型3)基座偏移 (byte[3][2], a.java:4517-4530)
  * [min(entity[3],5)>>1] = (dx, dy), 对应 a(int×8) 行10775
  */
 export const TOWER_LOG_BASE_OFF_J1144: [number, number][] = [[-14, -27], [-14, -32], [-14, -27]];
 
 /**
- * K1145: 沸水(类型7)基座偏移 (byte[3][2], a.java:4531-4544)
+ * K1145: 投石(类型7)基座偏移 (byte[3][2], a.java:4531-4544)
  * [min(entity[3],5)>>1] = (dx, dy), 对应 b(int×8) 行16166
  */
 export const TOWER_BOIL_BASE_OFF_K1145: [number, number][] = [[-14, -11], [4, -16], [-14, -15]];
 
 /**
- * L1146: 沸水(类型7)攻击态等级帧表 (byte[3][4], a.java:4545-4564)
- * [等级0-2] = [dy, srcY, 宽, 高] (bu_29 竖直沸水柱), 对应 b(int×8) case 1 行16268
+ * L1146: 投石(类型7)攻击态等级帧表 (byte[3][4], a.java:4545-4564)
+ * [等级0-2] = [dy, srcY, 宽, 高] (bu_29 投石落点), 对应 b(int×8) case 1 行16268
  */
 export const TOWER_BOIL_ANIM_L1146: number[][] = [
   [-80, 31, 16, 18],
@@ -509,13 +545,13 @@ export const TOWER_BOIL_ANIM_L1146: number[][] = [
 ];
 
 /**
- * M1147: 寒冰/滚油(类型8/9)基座朝向偏移 (byte[4][2], a.java:4565-4582)
+ * M1147: 沸水/滚油(类型8/9)基座朝向偏移 (byte[4][2], a.java:4565-4582)
  * [朝向0-3] = (dx, dy), 对应 a(Image×3,int×4) 行11632
  */
 export const TOWER_FOUNTAIN_OFF_M1147: [number, number][] = [[16, -39], [46, 14], [19, 48], [-48, 14]];
 
 /**
- * H1140: 断龙闸高级(等级>=4)/沸水高级 装饰点表 (byte[7][3], a.java:4356-4392)
+ * H1140: 石灰瓶高级(等级>=4)/投石高级 装饰点表 (byte[7][3], a.java:4356-4392)
  * [点] = [dx, dy, 帧偏移]; 对应 b(Image,int×4) 行16447: srcX = (帧偏移+等级-4)*16
  */
 export const TOWER_DEVICE_POINTS_H1140: number[][] = [
@@ -523,7 +559,7 @@ export const TOWER_DEVICE_POINTS_H1140: number[][] = [
 ];
 
 /**
- * E1136: 装置(类型10)塔身绘制点 (byte[9][2], a.java:4173-4210)
+ * E1136: 断龙闸(类型10)释放态闸墙绘制点 (byte[9][2], a.java:4173-4210)
  * bu_47 图集 (14x19帧), 对应 y() case 10 行26600
  */
 export const TOWER_DEVICE_BODY_E1136: [number, number][] = [
