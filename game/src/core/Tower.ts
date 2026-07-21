@@ -31,8 +31,9 @@ import {
   TOWER_DIRECTION_P1099,
   TOWER_PATH_FACING_TYPES, TOWER_ATTACK_DURATION_TICKS,
   TOWER_AUX_LAYER_BY_TYPE, TOWER_AMBIENT_LAYER_TYPES, TOWER_PROJECTILE_RANGE_TYPES,
+  AWAKEN_ORDER_Y1130,
 } from '../data/gameData';
-import { TOWER_NAMES, TOWER_DESCRIPTIONS, HEROES, Hero } from '../data/heroes';
+import { TOWER_NAMES, TOWER_DESCRIPTIONS, HEROES, Hero, HERO_EFFECT_DESCRIPTIONS } from '../data/heroes';
 import type { TechTreeSystem } from './TechTree';
 import { linearLevelValue } from './Timing';
 
@@ -94,6 +95,8 @@ export class TowerSystem {
   private mapLevel: number = 0;
   // X: 国家 0蜀/1魏/2吴；类型8/9的终阶机关效果会按国家分支变化。
   private faction: number = 0;
+  // ac: 开局升级模式，0武系/1文系；决定哪一组建筑可直接升至终阶武将。
+  private upgradeMode: number = 0;
   // 预览动画帧计数 (对应原版 a1019, 角标呼吸/不可建格闪烁)
   private previewFrame: number = 0;
   private onGoldSpent: ((gold: number) => void) | null = null;
@@ -106,6 +109,8 @@ export class TowerSystem {
   private buildCostProvider: ((h5Type: number) => number | null) | null = null;
   // 拆除返还 (原版 b(int) 行15818; 返回null=用默认公式)
   private demolishRefundProvider: ((tower: Tower) => number | null) | null = null;
+  private leaderUpgradeCheck: (() => boolean) | null = null;
+  private lastUpgradeFailure = '';
   // 精灵图缓存 (避免 getByPrefix 每帧线性查找)
   private spriteCache: Map<string, HTMLImageElement | null> = new Map();
 
@@ -176,6 +181,10 @@ export class TowerSystem {
     this.demolishRefundProvider = fn;
   }
 
+  setLeaderUpgradeCheck(fn: () => boolean): void {
+    this.leaderUpgradeCheck = fn;
+  }
+
   /**
    * 设置精灵图加载器
    */
@@ -226,6 +235,10 @@ export class TowerSystem {
 
   setFaction(faction: number): void {
     this.faction = Math.max(0, Math.min(2, faction | 0));
+  }
+
+  setUpgradeMode(mode: number): void {
+    this.upgradeMode = mode === 1 ? 1 : 0;
   }
 
   /** 注入原版 10Hz 的 a1019 视觉帧，渲染本身不再推进计数。 */
@@ -394,7 +407,7 @@ export class TowerSystem {
 
   /** 原版动作16显示的逐级升级费用；塔升级不等于购买科技建筑。 */
   getUpgradeCost(tower: Tower): number | null {
-    if (tower.level >= 6) return null;
+    if (tower.level >= 7) return null;
     const [baseCost, stepCost] = TOWER_UPGRADE_COST_R1101[this.spriteType(tower.type)] ?? [50, 50];
     return baseCost + stepCost * Math.max(0, tower.level - 1);
   }
@@ -404,15 +417,56 @@ export class TowerSystem {
    * 普通塔升级不会创建全局科技效果；科技效果只由底部科技建筑/作弊入口管理。
    */
   upgradeTower(tower: Tower): boolean {
+    this.lastUpgradeFailure = '';
     const cost = this.getUpgradeCost(tower);
-    if (cost == null) return false;
-    if (this.gold < cost) return false;
+    if (cost == null) {
+      this.lastUpgradeFailure = '该塔已是最高级';
+      return false;
+    }
+    if (tower.level === 6 && !this.canAwakenHero(tower)) return false;
+    if (this.gold < cost) {
+      this.lastUpgradeFailure = '金币不足，消灭敌人可获得金钱';
+      return false;
+    }
     tower.level++;
     this.applyOriginalStats(tower);
+    if (tower.level === 7) this.awakenHero(tower);
     this.beginUpgradeEffect(tower);
     this.gold -= cost;
     this.onGoldSpent?.(cost);
     return true;
+  }
+
+  private canAwakenHero(tower: Tower): boolean {
+    const type = this.spriteType(tower.type);
+    if (type === 0) {
+      if (this.leaderUpgradeCheck?.() === true) return true;
+      this.lastUpgradeFailure = '现在还不能升级这个建筑，需要将城池全部建筑升级';
+      return false;
+    }
+
+    // 原版 d(int)：文系为1-5，武系为6-10。非当前开局路线需要先把弓手塔升为君主。
+    const towerMode = type < 6 ? 1 : 0;
+    const leaderReady = this.towers.some(t => this.spriteType(t.type) === 0 && t.heroId >= 0);
+    if (towerMode !== this.upgradeMode && !leaderReady) {
+      this.lastUpgradeFailure = '需要升级弓塔至君主';
+      return false;
+    }
+    return true;
+  }
+
+  private awakenHero(tower: Tower): void {
+    const type = this.spriteType(tower.type);
+    const heroId = AWAKEN_ORDER_Y1130[this.faction]?.[type] ?? -1;
+    const hero = HEROES_MAP[heroId];
+    if (!hero) return;
+    tower.heroId = heroId;
+    this.techTree?.registerAwakenedHero(tower, hero);
+    this.onHeroAwakened?.(hero, tower);
+  }
+
+  getUpgradeFailureMessage(): string {
+    return this.lastUpgradeFailure;
   }
 
   /**
@@ -467,7 +521,7 @@ export class TowerSystem {
     if (tower.type !== 10 || tower.gateLoaded || tower.gateState !== 0) return null;
     const [baseCost, stepCost] = TOWER_UPGRADE_COST_R1101[this.spriteType(tower.type)] ?? [50, 50];
     const fullCost = baseCost + stepCost * Math.max(0, tower.level - 1);
-    return this.techTree?.isReloadHalf() ? fullCost >> 1 : fullCost;
+    return this.techTree?.isReloadHalf() || tower.heroId === 23 ? fullCost >> 1 : fullCost;
   }
 
   /** 原版动作18：付费装填石块，之后菜单切换为“释放断龙闸”。 */
@@ -545,7 +599,7 @@ export class TowerSystem {
       this.updateStrikeTarget(tower, targetIdx, enemies[targetIdx], offsetX, offsetY);
       // 原版攻击动画与冷却分开计时；冷却只在 state=2 下降，不能在攻击动画
       // 播放期间提前消耗，否则投石等长动作会获得近乎双倍的攻击频率。
-      tower.cooldown = Math.max(5, Math.floor(tower.fireRate));
+      tower.cooldown = Math.max(5, Math.floor(this.effectiveFireRate(tower)));
       this.startAttack(tower);
     }
 
@@ -750,23 +804,49 @@ export class TowerSystem {
   }
 
   private towerDamage(tower: Tower): number {
-    // s1102 是建筑本身的攻击力。普通升级和武将显示不会额外乘一个
-    // H5 自造的全局科技/1.5 倍英雄系数。
-    return Math.max(0, Math.floor(tower.damage));
+    let damage = tower.damage;
+    // y1130 的每国0号武将（君主）使所有塔攻击+5，对应原版 a(type,s1102,level)。
+    if (this.towers.some(t => t.heroId === 0 || t.heroId === 11 || t.heroId === 22)) damage += 5;
+    if ([8, 13, 14, 17, 18, 19].includes(tower.heroId)) damage *= 1.25;
+    // 吴国投石终阶在50px内给其他塔 +10 攻击（原版 tower[17] 与 n(x,y)）。
+    if (this.towers.some(t => t !== tower && t.heroId === 25
+      && Math.hypot((t.x - tower.x) * TILE_SIZE, (t.y - tower.y) * TILE_SIZE) <= 50)) damage += 10;
+    return Math.max(0, Math.floor(damage));
   }
 
-  private damageEnemy(tower: Tower, enemy: Enemy, scale: number = 1, applyEffect: boolean = true): void {
+  private effectiveFireRate(tower: Tower): number {
+    return [24, 29].includes(tower.heroId) ? tower.fireRate - 10 : tower.fireRate;
+  }
+
+  private damageEnemy(tower: Tower, enemy: Enemy, scale: number = 1, applyEffect: boolean = true): boolean {
     const rawDamage = Math.max(1, Math.floor(this.towerDamage(tower) * scale));
     // 原版 b1066[3]=aY 是敌人防御力；每次受击至少扣1点。
-    enemy.hp -= Math.max(1, rawDamage - Math.max(0, enemy.defense ?? 0));
+    const ignoresDefense = [1, 2, 7].includes(tower.heroId);
+    enemy.hp -= Math.max(1, rawDamage - (ignoresDefense ? 0 : Math.max(0, enemy.defense ?? 0)));
     if (applyEffect && tower.effectType > 0) {
-      this.applyTowerEffect(enemy, tower.effectType, tower.level);
+      return this.applyTowerEffect(enemy, tower);
+    } else if (applyEffect) {
+      return this.applyHeroSlow(enemy, tower);
     }
+    return false;
   }
 
   private damageTarget(tower: Tower, enemies: Enemy[]): void {
     const target = enemies[tower.target];
-    if (this.isActiveEnemy(target)) this.damageEnemy(tower, target);
+    if (!this.isActiveEnemy(target)) return;
+    const effectApplied = this.damageEnemy(tower, target);
+    if (effectApplied) this.applyHeroAreaEffect(tower, target, enemies);
+  }
+
+  private applyHeroAreaEffect(tower: Tower, target: Enemy, enemies: Enemy[]): void {
+    const effect = tower.heroId === 20 ? 1 : (tower.heroId === 21 ? 2 : 0);
+    if (effect === 0) return;
+    for (const enemy of enemies) {
+      if (enemy === target || !this.isActiveEnemy(enemy)) continue;
+      if (Math.abs(enemy.x - target.x) >= 24 || Math.abs(enemy.y - target.y) >= 24) continue;
+      enemy.effect = effect;
+      enemy.timer = Math.max(enemy.timer, 48);
+    }
   }
 
   private damageLimeImpact(tower: Tower, enemies: Enemy[]): void {
@@ -839,34 +919,59 @@ export class TowerSystem {
   /**
    * 应用塔特殊效果到敌人
    */
-  private applyTowerEffect(enemy: Enemy, effectType: number, towerLevel: number): void {
-    switch (effectType) {
+  private applyTowerEffect(enemy: Enemy, tower: Tower): boolean {
+    switch (tower.effectType) {
       case 1: // 麻痹
+        if (!this.rollStatusEffect(tower)) return false;
         enemy.effect = 1;
-        enemy.timer = Math.max(enemy.timer, towerLevel * 10);
+        enemy.dotScale = 1;
+        enemy.timer = Math.max(enemy.timer, tower.heroId === 9 ? 96 : 48);
         break;
       case 2: // 冰冻
+        if (!this.rollStatusEffect(tower)) return false;
         enemy.effect = 2;
-        enemy.timer = Math.max(enemy.timer, towerLevel * 8);
+        enemy.dotScale = 1;
+        enemy.timer = Math.max(enemy.timer, tower.heroId === 10 ? 96 : 48);
         break;
       case 3: // 中毒
         enemy.effect = 3;
-        enemy.timer = Math.max(enemy.timer, towerLevel * 10);
-        enemy.hp -= towerLevel * 2;
+        enemy.dotScale = 1;
+        enemy.timer = Math.max(enemy.timer, tower.heroId === 28 ? 96 : 48);
+        enemy.hp -= tower.level * 2;
         break;
       case 4: // 火焰
         enemy.effect = 4;
-        enemy.timer = Math.max(enemy.timer, towerLevel * 8);
-        enemy.hp -= towerLevel * 3;
+        enemy.dotScale = tower.heroId === 8 ? 2 : 1;
+        enemy.timer = Math.max(enemy.timer, tower.heroId === 30 ? 96 : 48);
+        enemy.hp -= tower.level * 3;
         break;
       case 5: // 减速
         enemy.effect = 5;
+        enemy.dotScale = 1;
         enemy.slowScale = Math.min(enemy.slowScale, 0.7);
-        enemy.timer = Math.max(enemy.timer, towerLevel * 10);
+        enemy.timer = Math.max(enemy.timer, 48);
         break;
       default:
-        break;
+        return this.applyHeroSlow(enemy, tower);
     }
+    this.applyHeroSlow(enemy, tower);
+    return true;
+  }
+
+  private rollStatusEffect(tower: Tower): boolean {
+    // 原版 A1151={6,6,5,5,4,4,4}，随机值为0..7；吴国终阶将阈值降为0。
+    const threshold = tower.heroId === 31 || tower.heroId === 32
+      ? 0
+      : ([6, 6, 5, 5, 4, 4, 4][Math.max(0, Math.min(6, tower.level - 1))] ?? 4);
+    return ((Math.random() * 8) | 0) > threshold;
+  }
+
+  private applyHeroSlow(enemy: Enemy, tower: Tower): boolean {
+    if (![3, 6, 26, 27].includes(tower.heroId)) return false;
+    enemy.slowScale = Math.min(enemy.slowScale, 0.5);
+    enemy.timer = Math.max(enemy.timer, 48);
+    if (enemy.effect === 0) enemy.effect = 5;
+    return true;
   }
 
   /**
@@ -2098,6 +2203,14 @@ export class TowerSystem {
     return this.towerConfigs[this.spriteType(tower.type)]?.name ?? '建筑';
   }
 
+  getTowerDisplayDamage(tower: Tower): number {
+    return this.towerDamage(tower);
+  }
+
+  getHeroEffectDescription(tower: Tower): string {
+    return tower.heroId >= 0 ? (HERO_EFFECT_DESCRIPTIONS[tower.heroId] ?? '') : '';
+  }
+
   /**
    * 获取所有可建造的原版塔类型（0-10；装置升级链仍由科技解锁门禁控制）。
    */
@@ -2214,7 +2327,7 @@ export class TowerSystem {
       const config = this.towerConfigs[td.type];
       if (!config) continue;
       const maxHp = td.maxHp ?? (100 + config.cost);
-      const level = Math.max(1, Math.min(6, td.level ?? 1));
+      const level = Math.max(1, Math.min(7, td.level ?? 1));
       const stats = this.originalStats(td.type ?? 0, level);
       const tower: Tower = {
         x: td.x ?? 0,

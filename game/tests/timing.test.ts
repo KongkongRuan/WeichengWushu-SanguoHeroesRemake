@@ -9,6 +9,8 @@ import {
 import { TowerSystem, type Tower } from '../src/core/Tower';
 import { EnemyState, EnemySystem, type Enemy } from '../src/core/Enemy';
 import { MapData } from '../src/core/MapData';
+import { BAR_CAT_TOWER, BuildBarSystem, type BuildBarHost } from '../src/core/BuildBar';
+import { AudioSystem } from '../src/core/AudioSystem';
 import {
   TOWER_AMBIENT_LAYER_TYPES,
   TOWER_AUX_LAYER_BY_TYPE,
@@ -50,6 +52,7 @@ function createMovingEnemy(overrides: Partial<Enemy> = {}): Enemy {
     maxHp: 100, unitType: 0, elite: false, spawnIndex: 0, bossType: 0,
     siegeAnim: 0, siegeTimer: 0, chargeTimer: 0, dieTimer: 0,
     effect: 0, timer: 0,
+    dotScale: 1,
     ...overrides,
   };
 }
@@ -546,4 +549,148 @@ test('投石建造不会因为道路位置自动改变朝向', () => {
     resolvePathFacing(x: number, y: number, type: number): number;
   }).resolvePathFacing;
   assert.equal(resolveFacing.call(system, 10, 10, 7), 0);
+});
+
+test('建造栏进入关闭动画后忽略连续确认，不会把装填变成释放或拆除', () => {
+  const tower = createTower(10);
+  let loads = 0;
+  let releases = 0;
+  let demolishes = 0;
+  const host: BuildBarHost = {
+    getGold: () => 999,
+    trySpendGold: () => true,
+    getTowerCount: () => 1,
+    enterPlacement() {},
+    upgradeTower: () => true,
+    demolishTower: () => { demolishes++; },
+    loadGate: target => { loads++; target.gateLoaded = true; return true; },
+    releaseGate: target => { releases++; target.gateLoaded = false; target.gateState = 1; return true; },
+    getGateLoadCost: () => 20,
+    getUpgradeCost: () => 20,
+    getDemolishRefund: () => 10,
+    renderTowerPreview() {},
+    deselectTower() {},
+    onTechBuilt() {},
+  };
+  const bar = new BuildBarSystem({} as never);
+  bar.setHost(host);
+  bar.open(BAR_CAT_TOWER, tower);
+  bar.confirm();
+  bar.confirm();
+  bar.confirm();
+  assert.equal(loads, 1);
+  assert.equal(releases, 0);
+  assert.equal(demolishes, 0);
+});
+
+test('升级栏进入关闭动画后忽略第二次确认', () => {
+  const tower = createTower(1);
+  let upgrades = 0;
+  const bar = new BuildBarSystem({} as never);
+  bar.setHost({
+    getGold: () => 999,
+    trySpendGold: () => true,
+    getTowerCount: () => 1,
+    enterPlacement() {},
+    upgradeTower: target => { upgrades++; target.level++; return true; },
+    demolishTower() {},
+    loadGate: () => false,
+    releaseGate: () => false,
+    getGateLoadCost: () => null,
+    getUpgradeCost: () => 20,
+    getDemolishRefund: () => 10,
+    renderTowerPreview() {},
+    deselectTower() {},
+    onTechBuilt() {},
+  });
+  bar.open(BAR_CAT_TOWER, tower);
+  bar.confirm();
+  bar.confirm();
+  assert.equal(upgrades, 1);
+  assert.equal(tower.level, 2);
+});
+
+test('对应开局路线可升到七级并按 y1130 绑定武将', () => {
+  const tower = createTower(1, { level: 6, damage: 25, effectType: 3 });
+  const system = systemWithTower(tower);
+  system.setGold(999);
+  system.setFaction(0);
+  system.setUpgradeMode(1); // 文系：建筑1-5
+  assert.equal(system.upgradeTower(tower), true);
+  assert.equal(tower.level, 7);
+  assert.equal(tower.heroId, 6); // 蜀 y1130[1] = 魏延
+  assert.equal(system.getHeroEffectDescription(tower), '中毒敌人同时减速');
+  assert.equal(system.getUpgradeCost(tower), null);
+});
+
+test('非对应路线在君主未觉醒前不能升七级', () => {
+  const tower = createTower(1, { level: 6 });
+  const system = systemWithTower(tower);
+  system.setGold(999);
+  system.setUpgradeMode(0);
+  assert.equal(system.upgradeTower(tower), false);
+  assert.equal(tower.level, 6);
+  assert.equal(system.getUpgradeFailureMessage(), '需要升级弓塔至君主');
+});
+
+test('魏延加持的石灰瓶中毒时同时减速', () => {
+  const tower = createTower(1, { level: 7, heroId: 6, effectType: 3 });
+  const enemy = createEnemy();
+  const system = systemWithTower(tower);
+  const applyEffect = (system as unknown as {
+    applyTowerEffect(target: Enemy, source: Tower): void;
+  }).applyTowerEffect;
+  applyEffect.call(system, enemy, tower);
+  assert.equal((enemy as unknown as Enemy).effect, 3);
+  assert.equal((enemy as unknown as Enemy).slowScale, 0.5);
+  assert.equal((enemy as unknown as Enemy).timer > 0, true);
+});
+
+test('建筑方框可解析敌人并取得原版兵种名', () => {
+  const enemy = createMovingEnemy({ x: 24, y: 24, unitType: 0 });
+  const system = new EnemySystem({} as never, {} as never);
+  (system as unknown as { enemies: Enemy[] }).enemies = [enemy];
+  assert.equal(system.getEnemyAtTile(1, 1), enemy);
+  assert.equal(system.getEnemyName(enemy), '散兵');
+  assert.equal(system.getEnemyAtTile(3, 3), null);
+});
+
+test('中毒敌人使用 h_0 四帧标记绘制在头顶', () => {
+  const draws: Array<{ sx: number; sy: number; sw: number; sh: number }> = [];
+  const renderer = {
+    drawImageRegion(_img: unknown, sx: number, sy: number, sw: number, sh: number) {
+      draws.push({ sx, sy, sw, sh });
+    },
+    setColor() {},
+    fillRect() {},
+  };
+  const system = new EnemySystem(renderer as never, {} as never);
+  (system as unknown as { spriteLoader: unknown; visualFrame: number }).spriteLoader = {
+    getByPrefix(prefix: string, index: number) {
+      return prefix === 'h' && index === 0 ? {} : null;
+    },
+  };
+  (system as unknown as { visualFrame: number }).visualFrame = 3;
+  const renderStatus = (system as unknown as {
+    renderStatusEffect(target: Enemy, x: number, y: number): void;
+  }).renderStatusEffect;
+  renderStatus.call(system, createMovingEnemy({ effect: 3, timer: 10 }), 24, 24);
+  assert.deepEqual(draws, [{ sx: 15, sy: 0, sw: 5, sh: 5 }]);
+});
+
+test('SoundFont 播放使用 AudioContext 时间而不是把 context 当作时间参数', () => {
+  const calls: unknown[][] = [];
+  const audio = new AudioSystem();
+  Object.assign(audio as unknown as Record<string, unknown>, {
+    audioContext: { currentTime: 12.5, state: 'running' },
+    soundfont: { play: (...args: unknown[]) => calls.push(args) },
+    volume: 0.5,
+  });
+  const handleMidi = (audio as unknown as {
+    handleMidiEvent(event: unknown): void;
+  }).handleMidiEvent;
+  handleMidi.call(audio, { name: 'Note on', noteNumber: 69, velocity: 100 });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 69);
+  assert.equal(calls[0][1], 12.5);
 });

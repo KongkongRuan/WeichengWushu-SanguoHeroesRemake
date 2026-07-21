@@ -20,6 +20,7 @@
 import { Renderer } from './Renderer';
 import { SpriteLoader } from './SpriteLoader';
 import type { Tower } from './Tower';
+import { HEROES, HERO_EFFECT_DESCRIPTIONS } from '../data/heroes';
 import {
   LOGICAL_WIDTH,
   BUILD_BAR_TOWER_ITEMS,
@@ -75,7 +76,7 @@ export interface BuildBarHost {
   /** 选塔完成, 进入选位模式 (原版 aw=3 滑出收尾 → bF=1, K() case 3 行8204-8208) */
   enterPlacement(origTowerId: number): void;
   /** 升级选中塔 (动作16) */
-  upgradeTower(tower: Tower): void;
+  upgradeTower(tower: Tower): boolean;
   /** 拆除选中塔 (动作20) */
   demolishTower(tower: Tower): void;
   /** 断龙闸动作18/19。 */
@@ -152,6 +153,11 @@ export class BuildBarSystem {
   isTowerUnlocked(origType: number): boolean {
     if (origType < 0 || origType >= this.towerUnlocked.length) return true;
     return this.towerUnlocked[origType];
+  }
+
+  /** 原版 e()：弓手塔升君主前要求五座科技建筑全部完成。 */
+  hasAllTechBuildings(): boolean {
+    return this.techBuilt.every(Boolean);
   }
 
   /** 原版塔类型的建造费 (q1100) */
@@ -242,7 +248,7 @@ export class BuildBarSystem {
       default: {
         const tower = this.ay;
         if (!tower) return [ACTION_CANCEL];
-        const levelAction = tower.level >= 6 ? ACTION_RESERVED : ACTION_UPGRADE;
+        const levelAction = tower.level >= 7 ? ACTION_RESERVED : ACTION_UPGRADE;
         if (tower.type === 10 && tower.gateState === 0) {
           const gateAction = tower.gateLoaded ? ACTION_RELEASE_GATE : ACTION_LOAD_GATE;
           return [gateAction, levelAction, ACTION_DEMOLISH, ACTION_CANCEL];
@@ -314,7 +320,9 @@ export class BuildBarSystem {
 
   /** 确认选中 (原版 M() 开火键处理 行8353-8466) */
   confirm(): void {
-    if (this.aw === 0 || !this.host) return;
+    // 原版只有 aw=1（栏打开）才会进入 M()。关闭动画期间继续接受确认会让
+    // 同一个下标从“装填”变成“释放”再变成“拆除”，也会令升级重复执行。
+    if (this.aw !== 1 || !this.host) return;
     const item = this.items()[this.aD];
     if (item === ACTION_CANCEL) {
       // 21=取消选择 (原版行8363-8365)
@@ -350,8 +358,7 @@ export class BuildBarSystem {
           return;
         }
         if (item === ACTION_UPGRADE) {
-          this.host.upgradeTower(tower);
-          this.aw = 2;
+          if (this.host.upgradeTower(tower)) this.aw = 2;
         } else if (item === ACTION_LOAD_GATE) {
           if (this.host.loadGate(tower)) this.aw = 2;
           else this.o = 0;
@@ -594,6 +601,11 @@ export class BuildBarSystem {
       this.renderTowerPreview(origId, this.ay.level, iconCX, iconCY, panelY);
       // 塔名图条
       if (ui18) r.drawImageRegion(ui18, 0, origId * 11, 35, 11, 2, var8 + 2, 35, 11);
+      // 原版 h(type,2,y)：1-5 为文系，6-10 为武系；弓手塔/君主不显示系别。
+      if (ui29 && origId > 0) {
+        const sx = origId < 6 ? 17 : 0;
+        r.drawImageRegion(ui29, sx, 0, 17, 10, 38, var8 + 3, 17, 10);
+      }
       // 价格: 升级费用 / 拆除返还 (J() 行7996-8046)
       if (item === ACTION_UPGRADE) {
         const cost = this.host?.getUpgradeCost(this.ay);
@@ -625,6 +637,11 @@ export class BuildBarSystem {
       desc = ORIG_TOWER_DESC[item]; // b1015[item+2]
     } else if (this.aC === BAR_CAT_TECH && item >= 11 && item <= 15) {
       desc = ORIG_TECH_DESC[item - 11]; // b1015[13+i]
+    } else if (this.aC === BAR_CAT_TOWER && item === ACTION_RESERVED && (this.ay?.heroId ?? -1) >= 0) {
+      const heroId = this.ay?.heroId ?? -1;
+      const hero = HEROES[heroId];
+      const effect = HERO_EFFECT_DESCRIPTIONS[heroId] ?? '';
+      desc = hero ? `${hero.name}：${effect}` : effect;
     } else if (this.aC === BAR_CAT_TOWER && item >= 16) {
       desc = ORIG_ACTION_DESC[item - 16] ?? '';
     }

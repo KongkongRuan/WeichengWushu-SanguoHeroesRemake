@@ -10,64 +10,92 @@ export class AudioSystem {
   private isPlaying: boolean = false;
   private volume: number = 0.5;
   private initialized: boolean = false;
+  private initPromise: Promise<void> | null = null;
+
+  private ensureAudioContext(): AudioContext {
+    if (!this.audioContext) {
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    return this.audioContext;
+  }
 
   /**
    * 初始化音频系统
    */
   async init(): Promise<void> {
     if (this.initialized) return;
+    if (this.initPromise) return this.initPromise;
 
-    try {
-      // 动态导入 MIDI 播放库
-      const { default: MidiPlayer } = await import('midi-player-js');
-      this.midiPlayer = new MidiPlayer.Player();
-
-      // 创建 AudioContext
-      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      await this.audioContext.resume();
-
-      // 加载 SoundFont
+    // AudioContext 可以在非手势阶段创建，但不能在这里 await resume()：浏览器会让
+    // promise 一直等待首次用户手势，后续 MIDI/SoundFont 初始化也就永远到不了。
+    this.ensureAudioContext();
+    this.initPromise = (async () => {
       try {
-        const { default: Soundfont } = await import('soundfont-player');
-        this.soundfont = await Soundfont.instrument(this.audioContext, 'acoustic_grand_piano');
+        const { default: MidiPlayer } = await import('midi-player-js');
+        this.midiPlayer = new MidiPlayer.Player();
+        this.midiPlayer.on('midiEvent', (event: any) => this.handleMidiEvent(event));
+        this.initialized = true;
+        console.log('AudioSystem initialized');
+
+        // SoundFont 来自远端采样，后台加载；加载前和加载失败时用 WebAudio 合成兜底，
+        // 不让“开启声音”变成只运行 MIDI 计时器却没有任何可听输出。
+        void this.loadSoundfont();
       } catch (e) {
-        console.warn('SoundFont loading failed, using fallback:', e);
-        this.soundfont = null;
+        console.error('Failed to initialize AudioSystem:', e);
+        this.initialized = false;
+      } finally {
+        this.initPromise = null;
       }
+    })();
+    return this.initPromise;
+  }
 
-      // 设置 MIDI 事件回调
-      if (this.midiPlayer && this.soundfont) {
-        this.midiPlayer.on('midiEvent', (event: any) => {
-          this.handleMidiEvent(event);
-        });
-      }
-
-      this.initialized = true;
-      console.log('AudioSystem initialized');
+  private async loadSoundfont(): Promise<void> {
+    try {
+      const { default: Soundfont } = await import('soundfont-player');
+      this.soundfont = await Soundfont.instrument(this.ensureAudioContext(), 'acoustic_grand_piano');
     } catch (e) {
-      console.error('Failed to initialize AudioSystem:', e);
-      this.initialized = false;
+      console.warn('SoundFont loading failed, using WebAudio synth:', e);
+      this.soundfont = null;
     }
+  }
+
+  /** 必须由点击/按键处理器同步调用，以解除浏览器的自动播放限制。 */
+  unlock(): Promise<void> {
+    const context = this.ensureAudioContext();
+    return context.state === 'running' ? Promise.resolve() : context.resume();
   }
 
   /**
    * 处理 MIDI 事件
    */
   private handleMidiEvent(event: any): void {
-    if (!this.soundfont) return;
-
     if (event.name === 'Note on' && event.velocity > 0) {
       // 播放音符 (MIDI note number to frequency)
       const noteNumber = Number(event.noteNumber);
       const velocity = Number(event.velocity) / 127;
       // 某些 MIDI 文件会发出不完整的 Note on 事件；不要把 NaN 传给
       // WebAudio，否则浏览器会抛出 "AudioBufferSourceNode ... non-finite"。
-      if (!Number.isFinite(noteNumber) || !Number.isFinite(velocity)) return;
+      if (!Number.isFinite(noteNumber) || !Number.isFinite(velocity) || this.volume <= 0) return;
+      const context = this.ensureAudioContext();
       try {
-        this.soundfont.play(noteNumber, this.audioContext, {
-          duration: 0.5,
-          gain: Math.max(0, Math.min(1, velocity * this.volume)),
-        });
+        if (this.soundfont) {
+          this.soundfont.play(noteNumber, context.currentTime, {
+            duration: 0.5,
+            gain: Math.max(0, Math.min(1, velocity * this.volume)),
+          });
+        } else if (context.state === 'running') {
+          const oscillator = context.createOscillator();
+          const gain = context.createGain();
+          oscillator.type = 'triangle';
+          oscillator.frequency.value = 440 * Math.pow(2, (noteNumber - 69) / 12);
+          gain.gain.setValueAtTime(Math.max(0.001, velocity * this.volume * 0.08), context.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.35);
+          oscillator.connect(gain);
+          gain.connect(context.destination);
+          oscillator.start();
+          oscillator.stop(context.currentTime + 0.36);
+        }
       } catch {
         // 音频只是可选增强，单个坏事件不应中断游戏循环。
       }
@@ -88,6 +116,7 @@ export class AudioSystem {
     }
 
     try {
+      await this.unlock();
       // 停止当前播放
       this.stop();
 
@@ -147,14 +176,16 @@ export class AudioSystem {
    * 恢复
    */
   resume(): void {
-    if (this.midiPlayer) {
-      try {
-        this.midiPlayer.play();
-      } catch (e) {
-        // 忽略
+    void this.unlock().then(() => {
+      if (this.midiPlayer) {
+        try {
+          this.midiPlayer.play();
+        } catch (e) {
+          // 忽略
+        }
       }
-    }
-    this.isPlaying = true;
+      this.isPlaying = true;
+    }).catch(() => {});
   }
 
   /**

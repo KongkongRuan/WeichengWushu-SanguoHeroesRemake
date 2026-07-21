@@ -160,7 +160,7 @@ export class Game {
 
   // ====== 原版流程字段 (a.java) ======
   private factionX: number = 0;        // X: 国家 0蜀/1魏/2吴
-  private upgradeAc: number = 0;       // ac: 升级模式 0武系/1文系 (原版 d(int) 行19056 决定英雄升级路线受限; 本次仅存值)
+  private upgradeAc: number = 0;       // ac: 升级模式 0武系/1文系 (原版 d(int) 行19056 决定终阶武将路线)
   private gameModeT: number = 0;       // T: 模式 0王者之路/1自由模式
   private campaignAO: number = 0;      // aO: 王者之路已通关战役数 (0-7)
   private battleAN: number = 0;        // aN: 当前战役 (地图/关卡索引 0-8)
@@ -306,6 +306,7 @@ export class Game {
       if (orig < 0 || orig >= TOWER_COST_Q1100.length) return null;
       return this.getOriginalDemolishRefund(orig, tower.level);
     });
+    this.towerSystem.setLeaderUpgradeCheck(() => this.buildBar.hasAllTechBuildings());
 
     // 原版底部建造栏宿主 (任务A/B, 对应原版 M()/k(int) 的上下文)
     this.buildBar.setHost({
@@ -327,11 +328,13 @@ export class Game {
         this.towerSystem.setBuildPosition(bt.tx, bt.ty);
       },
       upgradeTower: (tower) => {
-        if (!this.towerSystem.upgradeTower(tower)) {
-          this.uiSystem.showMessage(BAR_MESSAGES[0], 90); // 金不足 (近似, 原版升级失败提示亦为 o=0/满级)
+        const upgraded = this.towerSystem.upgradeTower(tower);
+        if (!upgraded) {
+          this.uiSystem.showMessage(this.towerSystem.getUpgradeFailureMessage() || BAR_MESSAGES[0], 90);
         } else {
           this.syncGold();
         }
+        return upgraded;
       },
       demolishTower: (tower) => {
         this.towerSystem.sellTower(tower); // 返还公式经 demolishRefundProvider = 原版 b(int)
@@ -1095,6 +1098,8 @@ export class Game {
     this.soundEnabled = yes;
     this.persistSoundSetting();
     if (yes) {
+      // 必须仍在这次点击/回车的用户手势栈内恢复 AudioContext。
+      void this.audioSystem.unlock().catch(() => {});
       // 原版 i(): 开启 → l=1 + 播放 /7.mid
       this.gotoTitle();
     } else {
@@ -1175,6 +1180,7 @@ export class Game {
       case 'ok':
         // → l=17 升级模式 (原版: ac=0, 初始化卡片位置)
         this.upgradeAc = 0;
+        this.towerSystem.setUpgradeMode(this.upgradeAc);
         this.upgradeAe = 0;
         this.cardY = (240 - 56) >> 1;
         this.cardZ = (320 - COUNTRY_PANEL_H - 70) >> 1;
@@ -1248,6 +1254,7 @@ export class Game {
         this.upgradeAe = 1;
         break;
       case 'ok':
+        this.towerSystem.setUpgradeMode(this.upgradeAc);
         // → l=16 选择战役
         this.battleAN = this.gameModeT === 0
           ? CAMPAIGN_ORDER_H1074[this.factionX][this.campaignAO]
@@ -1532,6 +1539,7 @@ export class Game {
     this.k1029 = this.gameModeT === 1;
     this.techTree.setFaction(this.factionX as Faction);
     this.towerSystem.setFaction(this.factionX);
+    this.towerSystem.setUpgradeMode(this.upgradeAc);
     // 恢复科技树。新存档把字段放在根对象，旧版则可能嵌在 data.tech；
     // 两种格式都兼容，避免读档后升级效果和武将觉醒状态丢失。
     const savedTech = data.tech ?? {
@@ -2903,40 +2911,8 @@ export class Game {
     // 原版底部: J() 底条常驻 (aw=0时亦为米色条, 行7866-7908)
     // 栏打开/选位时软键=确定/取消; 平时=确定/菜单 (原版左功能键确认, 右功能键菜单)
     this.buildBar.render();
-    // 原版底部名称条左侧直接反馈当前定位位置能否建造；光标经过建筑时显示建筑名称。
-    if (!this.buildBar.isOpen) {
-      const box = this.mapData.getBuildingBoxTile();
-      const hoveredTower = !this.towerSystem.isBuildMode
-        ? this.towerSystem.getTowerAt(box.tx, box.ty)
-        : null;
-      const canBuild = this.towerSystem.isBuildMode
-        ? this.towerSystem.canBuildAtCurrentPosition()
-        : this.mapData.isBuildingBoxBuildable();
-      const label = hoveredTower
-        ? this.towerSystem.getTowerName(hoveredTower)
-        : (canBuild ? '可造区域' : '不可造区域');
-      this.renderer.virtualContext.font = '9px monospace';
-      const labelWidth = Math.min(
-        LOGICAL_WIDTH - 4,
-        Math.max(52, Math.ceil(this.renderer.virtualContext.measureText(label).width) + 10),
-      );
-      const labelCtx = this.renderer.virtualContext;
-      labelCtx.save();
-      labelCtx.fillStyle = hoveredTower
-        ? 'rgba(30, 39, 54, 0.92)'
-        : 'rgba(248, 243, 217, 0.92)';
-      labelCtx.fillRect(0, 296, labelWidth, 14);
-      labelCtx.strokeStyle = hoveredTower ? 'rgba(242, 193, 78, 0.9)' : 'rgba(83, 103, 138, 0.45)';
-      labelCtx.strokeRect(0.5, 296.5, labelWidth - 1, 13);
-      labelCtx.restore();
-      this.renderer.drawText(
-        label,
-        2,
-        299,
-        hoveredTower ? 0xf9e7a7 : (canBuild ? 0x2f7a5a : 0xb23a48),
-        9,
-      );
-    }
+    // 原版 J()→h(2,y)：栏关闭时常驻显示光标下建筑的攻击/等级，或敌人的血量/防御。
+    if (!this.buildBar.isOpen) this.renderHoveredEntityInfo();
     if (this.buildBar.isOpen || this.towerSystem.isBuildMode) {
       this.uiSystem.renderSoftkeyBar(SOFTKEY_OK, SOFTKEY_CANCEL);
     } else {
@@ -2944,6 +2920,54 @@ export class Game {
     }
     this.uiSystem.render(this.gold, this.lives, this.currentLevel,
       this.enemySystem.currentWave, this.enemySystem.totalWaves);
+  }
+
+  private renderHoveredEntityInfo(): void {
+    const box = this.mapData.getBuildingBoxTile();
+    const tower = !this.towerSystem.isBuildMode
+      ? this.towerSystem.getTowerAt(box.tx, box.ty)
+      : null;
+    const enemy = !tower && !this.towerSystem.isBuildMode
+      ? this.enemySystem.getEnemyAtTile(box.tx, box.ty)
+      : null;
+    const ui12 = this.spr('ui', 12);
+    const y = 299;
+
+    if (tower) {
+      const ui18 = this.spr('ui', 18);
+      if (ui18) this.renderer.drawImageRegion(ui18, 0, tower.type * 11, 35, 11, 2, 298, 35, 11);
+      else this.renderer.drawText(this.towerSystem.getTowerName(tower), 2, y, 0x53678A, 9);
+      if (ui12) {
+        this.renderer.drawImageRegion(ui12, 18, 0, 9, 10, 120, y, 9, 10);  // 攻
+        this.renderer.drawImageRegion(ui12, 27, 0, 17, 10, 180, y, 17, 10); // 等级
+      } else {
+        this.renderer.drawText('攻', 120, y, 0x53678A, 9);
+        this.renderer.drawText('等级', 180, y, 0x53678A, 9);
+      }
+      this.renderer.drawText(`${this.towerSystem.getTowerDisplayDamage(tower)}`, 132, y, 0x53678A, 9);
+      this.renderer.drawText(`${tower.level}`, 201, y, 0x53678A, 9);
+      return;
+    }
+
+    if (enemy) {
+      this.renderer.drawText(this.enemySystem.getEnemyName(enemy), 2, y, 0xD5317A, 9);
+      if (ui12) {
+        this.renderer.drawImageRegion(ui12, 0, 0, 9, 10, 120, y, 9, 10);  // 血
+        this.renderer.drawImageRegion(ui12, 9, 0, 9, 10, 180, y, 9, 10);  // 防
+      } else {
+        this.renderer.drawText('血', 120, y, 0xD5317A, 9);
+        this.renderer.drawText('防', 180, y, 0x53678A, 9);
+      }
+      this.renderer.drawText(`${Math.max(0, Math.ceil(enemy.hp))}`, 132, y, 0xD5317A, 9);
+      this.renderer.drawText(`${enemy.defense}`, 192, y, 0x53678A, 9);
+      return;
+    }
+
+    const canBuild = this.towerSystem.isBuildMode
+      ? this.towerSystem.canBuildAtCurrentPosition()
+      : this.mapData.isBuildingBoxBuildable();
+    this.renderer.drawText(canBuild ? '可造区域' : '不可造区域', 2, y,
+      canBuild ? 0x2F7A5A : 0xB23A48, 9);
   }
 
   // ====== 存档面板渲染 (新流程无入口, 保留) ======

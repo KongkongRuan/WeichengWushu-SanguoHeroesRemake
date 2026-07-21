@@ -26,6 +26,7 @@ import { Renderer } from './Renderer';
 import { MapData } from './MapData';
 import { SpriteLoader } from './SpriteLoader';
 import { canStartWave as canRequestWave } from './Timing';
+import { HEROES } from '../data/heroes';
 import {
   TILE_SIZE,
   MAP_TOP_BAR_H,
@@ -82,6 +83,7 @@ export interface Enemy {
   dieTimer: number;    // 死亡动画计时 (原版复用[7], H5独立)
   effect: number;      // 塔特殊效果 (H5 Tower/TechTree 兼容: 0无 1麻痹 2冰冻 3中毒 4火焰 5减速)
   timer: number;       // 塔效果计时 (H5兼容)
+  dotScale: number;    // 持续伤害倍率（终阶火焰英雄为2，其余为1）
 }
 
 export class EnemySystem {
@@ -299,6 +301,7 @@ export class EnemySystem {
       dieTimer: 0,
       effect: 0,
       timer: 0,
+      dotScale: 1,
     };
     // 出生方向合法性兜底 (路径格 v<8 才有方向0-3)
     if (enemy.dir < 0 || enemy.dir > 3) enemy.dir = 2;
@@ -477,6 +480,7 @@ export class EnemySystem {
     else {
       enemy.effect = 0;
       enemy.slowScale = 1;
+      enemy.dotScale = 1;
     }
     if (effectActive && enemy.effect === 1) return;
 
@@ -494,7 +498,7 @@ export class EnemySystem {
     // label117: 移动
     this.updateDirection(enemy); // o()
     const speedScale = effectActive && enemy.effect === 2 ? 0.5
-      : (effectActive && enemy.effect === 5 ? enemy.slowScale : 1);
+      : (effectActive && enemy.slowScale < 1 ? enemy.slowScale : 1);
     const moveSpeed = enemy.baseSpeed * speedScale;
     const nx = enemy.x + DIRECTIONS_K1081[enemy.dir][0] * moveSpeed;
     const ny = enemy.y + DIRECTIONS_K1081[enemy.dir][1] * moveSpeed;
@@ -578,6 +582,7 @@ export class EnemySystem {
           this.renderSiege(enemy, px, py);
           this.renderEliteMarker(enemy, px, py);
           this.renderHealthBar(enemy, px, py);
+          this.renderStatusEffect(enemy, px, py);
           continue;
         default:
           break;
@@ -585,6 +590,7 @@ export class EnemySystem {
 
       this.renderWalking(enemy, px, py);
       this.renderHealthBar(enemy, px, py);
+      this.renderStatusEffect(enemy, px, py);
     }
 
     vctx.restore();
@@ -719,12 +725,44 @@ export class EnemySystem {
     this.renderer.fillRect(px - 8, py - 18, barW * hpRatio, barH);
   }
 
+  /** 原版 /h_0：石灰瓶命中后在敌兵头顶循环显示四帧绿色中毒标记。 */
+  private renderStatusEffect(enemy: Enemy, px: number, py: number): void {
+    if (enemy.effect !== 3 || enemy.timer <= 0) return;
+    const img = this.spriteLoader?.getByPrefix('h', 0) ?? null;
+    if (img) {
+      const frame = this.visualFrame & 3;
+      this.renderer.drawImageRegion(img, frame * 5, 0, 5, 5,
+        Math.floor(px - 2), Math.floor(py - 25), 5, 5);
+      return;
+    }
+    this.renderer.setColor(0x20E090);
+    this.renderer.fillRect(px - 2, py - 25, 5, 5);
+  }
+
   // ============================================================
   // 查询接口
   // ============================================================
 
   getActiveEnemies(): Enemy[] {
     return this.enemies;
+  }
+
+  /** 原版 K()→a(bN,bO)：解析建筑方框覆盖的首个活动敌人。 */
+  getEnemyAtTile(tileX: number, tileY: number): Enemy | null {
+    const left = tileX * TILE_SIZE;
+    const top = tileY * TILE_SIZE;
+    return this.enemies.find(enemy =>
+      enemy.hp > 0
+      && enemy.state !== EnemyState.DYING
+      && enemy.state !== EnemyState.SETTLE
+      && enemy.x >= left && enemy.x <= left + TILE_SIZE
+      && enemy.y >= top && enemy.y <= top + TILE_SIZE
+    ) ?? null;
+  }
+
+  getEnemyName(enemy: Enemy): string {
+    if (enemy.elite) return HEROES[this.bb]?.name ?? '名将';
+    return ['散兵', '步兵', '重装步兵', '骑兵', '弓弩步兵', '投石车兵'][enemy.unitType] ?? '敌兵';
   }
 
   get count(): number { return this.enemies.length; }

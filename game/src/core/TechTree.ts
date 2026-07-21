@@ -167,6 +167,24 @@ export class TechTreeSystem {
     this.onHeroAwakened = cb;
   }
 
+  /** TowerSystem 按原版终阶门禁完成升级后，把觉醒结果登记到存档状态。 */
+  registerAwakenedHero(tower: Tower, hero: Hero): void {
+    const towerId = this.getTowerId(tower);
+    const existing = this.awakenedHeroes.find(h => h.towerId === towerId);
+    if (existing) {
+      existing.hero = hero;
+      existing.awakened = true;
+      existing.faction = this.currentFaction;
+      return;
+    }
+    this.awakenedHeroes.push({
+      hero,
+      towerId,
+      awakened: true,
+      faction: this.currentFaction,
+    });
+  }
+
   /**
    * 获取所有分支状态
    */
@@ -193,11 +211,11 @@ export class TechTreeSystem {
       return { canUpgrade: false, reason: '该塔无对应科技分支' };
     }
 
-    // 原版塔等级是 0..5（H5实体层用 1..6 表示），费用来自 r1101，
+    // 原版塔等级是 0..6（H5实体层用 1..7 表示），费用来自 r1101，
     // 不是科技描述里的 100/150/200 金。科技建筑负责“能否建造”，
     // 已建成的塔可以按原版费用逐级升级。
     const nextLevel = tower.level;
-    if (nextLevel >= 6) {
+    if (nextLevel >= 7) {
       return { canUpgrade: false, reason: '该塔已是最高级' };
     }
 
@@ -513,14 +531,14 @@ export class TechTreeSystem {
         const baseDmg = 2;
         // 效果12: 中毒时间延长 - 延长中毒持续时间
         const multiplier = 1 + 0.5 * this.poisonExtendLevel;
-        enemy.hp = (enemy.hp ?? 0) - Math.floor(baseDmg * deltaTime * multiplier);
+        enemy.hp = (enemy.hp ?? 0) - Math.floor(baseDmg * deltaTime * multiplier * (enemy.dotScale ?? 1));
         break;
       }
       case 4: { // 火焰
         const baseDmg = 3;
         // 效果14: 火焰伤害时间增加
         const multiplier = 1 + 0.5 * this.fireExtendLevel;
-        enemy.hp = (enemy.hp ?? 0) - Math.floor(baseDmg * deltaTime * multiplier);
+        enemy.hp = (enemy.hp ?? 0) - Math.floor(baseDmg * deltaTime * multiplier * (enemy.dotScale ?? 1));
         break;
       }
     }
