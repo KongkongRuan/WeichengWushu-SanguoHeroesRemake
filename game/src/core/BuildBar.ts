@@ -44,8 +44,11 @@ export const BAR_CAT_BUILD = 0;
 export const BAR_CAT_TECH = 1;
 export const BAR_CAT_TOWER = 2;
 
-/** 动作条目id (原版 d1053 项): 16升级 20拆除 21取消 */
+/** 动作条目id (原版 d1053 项) */
 const ACTION_UPGRADE = 16;
+const ACTION_RESERVED = 17;
+const ACTION_LOAD_GATE = 18;
+const ACTION_RELEASE_GATE = 19;
 const ACTION_DEMOLISH = 20;
 const ACTION_CANCEL = 21;
 
@@ -75,6 +78,10 @@ export interface BuildBarHost {
   upgradeTower(tower: Tower): void;
   /** 拆除选中塔 (动作20) */
   demolishTower(tower: Tower): void;
+  /** 断龙闸动作18/19。 */
+  loadGate(tower: Tower): boolean;
+  releaseGate(tower: Tower): boolean;
+  getGateLoadCost(tower: Tower): number | null;
   /** 升级费用 (null=不可升级) */
   getUpgradeCost(tower: Tower): number | null;
   /** 拆除返还 (原版 b(int) 行15818: (建造费+升级投入)>>1) */
@@ -230,7 +237,19 @@ export class BuildBarSystem {
     switch (this.aC) {
       case BAR_CAT_BUILD: return [...BUILD_BAR_TOWER_ITEMS, ACTION_CANCEL];
       case BAR_CAT_TECH: return [...BUILD_BAR_TECH_ITEMS, ACTION_CANCEL];
-      default: return [ACTION_UPGRADE, ACTION_DEMOLISH, ACTION_CANCEL];
+      default: {
+        const tower = this.ay;
+        if (!tower) return [ACTION_CANCEL];
+        const levelAction = tower.level >= 6 ? ACTION_RESERVED : ACTION_UPGRADE;
+        if (tower.type === 10 && tower.gateState === 0) {
+          const gateAction = tower.gateLoaded ? ACTION_RELEASE_GATE : ACTION_LOAD_GATE;
+          return [gateAction, levelAction, ACTION_DEMOLISH, ACTION_CANCEL];
+        }
+        if (tower.type === 10 && tower.gateState !== 0) {
+          return [ACTION_DEMOLISH, ACTION_CANCEL];
+        }
+        return [levelAction, ACTION_DEMOLISH, ACTION_CANCEL];
+      }
     }
   }
 
@@ -329,6 +348,11 @@ export class BuildBarSystem {
         if (item === ACTION_UPGRADE) {
           this.host.upgradeTower(tower);
           this.aw = 2;
+        } else if (item === ACTION_LOAD_GATE) {
+          if (this.host.loadGate(tower)) this.aw = 2;
+          else this.o = 0;
+        } else if (item === ACTION_RELEASE_GATE) {
+          if (this.host.releaseGate(tower)) this.aw = 2;
         } else if (item === ACTION_DEMOLISH) {
           this.host.demolishTower(tower);
           this.aw = 2;
@@ -569,6 +593,12 @@ export class BuildBarSystem {
       // 价格: 升级费用 / 拆除返还 (J() 行7996-8046)
       if (item === ACTION_UPGRADE) {
         const cost = this.host?.getUpgradeCost(this.ay);
+        if (cost != null) {
+          if (ui19) r.drawImageRegion(ui19, UI19_GOLD_SX, 0, UI19_GOLD_W, 12, 210, var8 + 2, UI19_GOLD_W, 12);
+          r.drawText(`${cost}`, 224, stripTextY, COLOR_TEXT, 8);
+        }
+      } else if (item === ACTION_LOAD_GATE) {
+        const cost = this.host?.getGateLoadCost(this.ay);
         if (cost != null) {
           if (ui19) r.drawImageRegion(ui19, UI19_GOLD_SX, 0, UI19_GOLD_W, 12, 210, var8 + 2, UI19_GOLD_W, 12);
           r.drawText(`${cost}`, 224, stripTextY, COLOR_TEXT, 8);

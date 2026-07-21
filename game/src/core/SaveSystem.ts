@@ -44,7 +44,11 @@ export interface SaveData {
   currentFaction: number;
 
   // 塔布局 (可选保存)
-  towers: { x: number; y: number; type: number; level: number; damage: number; range: number; fireRate: number; heroId: number; effectType: number; hp: number; maxHp: number }[];
+  towers: {
+    x: number; y: number; type: number; level: number; damage: number; range: number; fireRate: number;
+    heroId: number; effectType: number; hp: number; maxHp: number;
+    orientation?: number; gateLoaded?: boolean; gateState?: number;
+  }[];
 
   // 统计
   totalKills: number;
@@ -244,6 +248,9 @@ export class SaveSystem {
         // 新增: 保存建筑血量
         hp: t.hp,
         maxHp: t.maxHp,
+        orientation: t.orientation,
+        gateLoaded: t.gateLoaded,
+        gateState: t.gateState,
       })),
       totalKills: stats.totalKills,
       totalGoldEarned: stats.totalGoldEarned,
@@ -301,10 +308,13 @@ export class SaveSystem {
       debuffTimer: 0,
       // 动画状态 (不存档, 按初始值)
       frame: 0,
-      orientation: 0,
+      orientation: t.orientation ?? 0,
       attackAnim: 0,
       strikeX: t.x * 16,
       strikeY: t.y * 16,
+      gateLoaded: t.gateLoaded === true,
+      gateState: t.gateState ?? 0,
+      gateTimer: 0,
     }));
   }
 

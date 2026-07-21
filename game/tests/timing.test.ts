@@ -18,6 +18,17 @@ function countLogicSteps(refreshRate: number, seconds: number, speed: number = 1
   return steps;
 }
 
+function countAnimationFrames(refreshRate: number, seconds: number): number {
+  const clock = new FixedStepClock(1000 / 60);
+  const renderFrames = Math.round(refreshRate * seconds);
+  const elapsedMs = 1000 / refreshRate;
+  let frames = 0;
+  for (let i = 0; i < renderFrames; i++) {
+    frames += clock.advance(elapsedMs, 1, 6);
+  }
+  return frames;
+}
+
 test('60/120/144Hz 在相同时长产生相同的 10Hz 逻辑帧', () => {
   assert.equal(countLogicSteps(60, 10), 100);
   assert.equal(countLogicSteps(120, 10), 100);
@@ -29,6 +40,12 @@ test('倍速只缩放游戏逻辑，不依赖显示刷新率', () => {
     assert.equal(countLogicSteps(hz, 10, 2), 200);
     assert.equal(countLogicSteps(hz, 10, 3), 300);
   }
+});
+
+test('片头动画固定约60FPS推进，不会被10Hz战斗时钟放慢', () => {
+  assert.equal(countAnimationFrames(60, 1), 60);
+  assert.equal(countAnimationFrames(120, 1), 60);
+  assert.equal(countAnimationFrames(144, 1), 60);
 });
 
 test('弓手塔冷却 20 在正常速度下稳定约为 2 秒', () => {

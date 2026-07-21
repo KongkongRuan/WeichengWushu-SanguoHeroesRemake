@@ -86,6 +86,8 @@ export class MapData {
 
   // 运行时属性层 (E1163, 占用标记会直接改在这里, 与原版一致)
   private terrain: number[] = [];
+  // 路径机关层 (D1162)。断龙闸石块与敌人的路径占格必须分开记录。
+  private pathDefense: number[] = [];
 
   // 城锚点 (像素坐标 = 瓦片坐标*16, 对应原版 aK/aL(我城) aI/aJ(敌城), N() 行8469-8516)
   private ourCastleX: number = 0;
@@ -167,6 +169,8 @@ export class MapData {
       // 无属性层数据时全部视为障碍 (兜底, 正常不会发生)
       this.terrain = new Array(total).fill(TERRAIN_OBSTACLE);
     }
+
+    this.pathDefense = new Array(total).fill(0);
 
     // 扫描城锚点 (对应原版 N())
     this.scanCastleAnchors();
@@ -275,6 +279,27 @@ export class MapData {
     return v < 8 ? v >> 1 : -1;
   }
 
+  /** 读取原版 D1162 路径机关强度；>=6 时会阻挡敌人。 */
+  getPathDefense(tx: number, ty: number): number {
+    if (!this.mapData || tx < 0 || ty < 0 || tx >= this.mapData.width || ty >= this.mapData.height) return 0;
+    return this.pathDefense[ty * this.mapData.width + tx] ?? 0;
+  }
+
+  /** 在路径格上放置断龙闸石块（原版释放时写入 D1162=16/46）。 */
+  setPathDefense(tx: number, ty: number, strength: number): void {
+    if (!this.mapData || tx < 0 || ty < 0 || tx >= this.mapData.width || ty >= this.mapData.height) return;
+    const idx = ty * this.mapData.width + tx;
+    if (this.terrain[idx] >= 8) return;
+    this.pathDefense[idx] = Math.max(this.pathDefense[idx] ?? 0, strength);
+  }
+
+  /** 原版 m(int)：敌人每次试图进入被封住的格子都会削弱一次石块。 */
+  private weakenPathDefense(index: number): void {
+    const value = this.pathDefense[index] ?? 0;
+    if (value > 6) this.pathDefense[index] = value - 1;
+    else if (value === 6) this.pathDefense[index] = 1;
+  }
+
   /**
    * 瓦片是否为空闲路径 (对应原版 b(int,int) 行16868:
    *   E1163[idx]&1==0 (未被占用) 且 E1163[idx]<8 (路径) 且 D1162[idx]<6)
@@ -283,6 +308,12 @@ export class MapData {
    */
   isPathFree(tx: number, ty: number): boolean {
     const v = this.getTerrain(tx, ty);
+    if (!this.mapData || tx < 0 || ty < 0 || tx >= this.mapData.width || ty >= this.mapData.height) return false;
+    const idx = ty * this.mapData.width + tx;
+    if ((this.pathDefense[idx] ?? 0) >= 6) {
+      this.weakenPathDefense(idx);
+      return false;
+    }
     return (v & 1) === 0 && v < 8;
   }
 
@@ -290,7 +321,12 @@ export class MapData {
    * 像素坐标处是否为空闲路径 (对应原版 b(int,int) 行16868)
    */
   isPathFreeAtPixel(px: number, py: number): boolean {
-    const v = this.getTerrainAtPixel(px, py);
+    const idx = this.tileIndexAtPixel(px, py);
+    const v = this.terrain[idx] ?? TERRAIN_OBSTACLE;
+    if ((this.pathDefense[idx] ?? 0) >= 6) {
+      this.weakenPathDefense(idx);
+      return false;
+    }
     return (v & 1) === 0 && v < 8;
   }
 
@@ -654,6 +690,30 @@ export class MapData {
     }
 
     vctx.restore();
+  }
+
+  /** 原版 ag() 的 D1162 路径机关层：断龙闸石块在建筑失效后仍保留到被敌人破坏。 */
+  renderPathDefense(): void {
+    if (!this.mapData) return;
+    const stone = this.spriteLoader?.getBuildingSprite(43);
+    if (!stone) return;
+    const { width, height } = this.mapData;
+    const startCol = Math.max(0, Math.floor(this.camX / TILE_SIZE));
+    const endCol = Math.min(width, startCol + Math.ceil(MAP_VIEW_W / TILE_SIZE) + 1);
+    const startRow = Math.max(0, Math.floor(this.camY / TILE_SIZE));
+    const endRow = Math.min(height, startRow + Math.ceil(MAP_VIEW_H / TILE_SIZE) + 1);
+    for (let ty = startRow; ty < endRow; ty++) {
+      for (let tx = startCol; tx < endCol; tx++) {
+        if ((this.pathDefense[ty * width + tx] ?? 0) < 6) continue;
+        this.renderer.drawSpriteTransform(
+          stone,
+          0, 0, 15, 16,
+          tx * TILE_SIZE - this.camX,
+          ty * TILE_SIZE - this.camY + MAP_TOP_BAR_H,
+          0,
+        );
+      }
+    }
   }
 
   /**

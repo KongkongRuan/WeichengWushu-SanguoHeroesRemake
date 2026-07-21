@@ -136,6 +136,8 @@ export class Game {
   private lastTime: number = 0;
   private logicClock = new FixedStepClock();
   private visualClock = new FixedStepClock();
+  // 菜单/片头素材按约60FPS制作，与10Hz战斗逻辑分离，避免片头被放慢6倍。
+  private animationClock = new FixedStepClock(1000 / 60);
   private frameCount: number = 0;   // 对应原版 a1019：每 100ms 增加一次
   private cameraX: number = 0;
   private cameraY: number = 0;
@@ -333,6 +335,17 @@ export class Game {
         this.towerSystem.sellTower(tower); // 返还公式经 demolishRefundProvider = 原版 b(int)
         this.syncGold();
       },
+      loadGate: (tower) => {
+        const loaded = this.towerSystem.loadGate(tower);
+        if (loaded) this.syncGold();
+        return loaded;
+      },
+      releaseGate: (tower) => {
+        const released = this.towerSystem.releaseGate(tower);
+        if (released) this.towerSystem.deselectTower();
+        return released;
+      },
+      getGateLoadCost: (tower) => this.towerSystem.getGateLoadCost(tower),
       getUpgradeCost: (tower) => {
         const info = this.techTree.canUpgradeTech(tower);
         return info.canUpgrade ? (info.cost ?? null) : null;
@@ -1891,13 +1904,20 @@ export class Game {
 
     const playingActive = this.state === GameState.PLAYING && !this.uiSystem.isPaused();
     const nonPlayingAnimated = this.state !== GameState.PLAYING && this.isAnimatedState();
-    if (playingActive || nonPlayingAnimated) {
-      const speed = playingActive ? this.uiSystem.getGameSpeed() : 1;
+    if (playingActive) {
+      this.animationClock.reset();
+      const speed = this.uiSystem.getGameSpeed();
       const steps = this.logicClock.advance(elapsedMs, speed, 10);
       for (let i = 0; i < steps; i++) this.runLogicStep();
+    } else if (nonPlayingAnimated) {
+      this.logicClock.reset();
+      // 动画不追赶后台挂起时间；前台低帧率最多补6个显示帧。
+      const steps = this.animationClock.advance(Math.min(elapsedMs, 100), 1, 6);
+      for (let i = 0; i < steps; i++) this.runAnimationFrame(1);
     } else {
       // 暂停期间不积攒游戏逻辑，恢复时不会瞬间补帧。
       this.logicClock.reset();
+      this.animationClock.reset();
     }
 
     this.render();
@@ -1919,18 +1939,23 @@ export class Game {
 
   /** 执行一次原版 100ms 逻辑帧。 */
   private runLogicStep(): void {
-    if (this.state === GameState.PLAYING) {
-      if (!this.uiSystem.isPaused()) this.update(LOGIC_STEP_NORMALIZED);
-    } else if (this.state === GameState.LEVEL_INTRO) {
-      this.updateLevelIntro(LOGIC_STEP_NORMALIZED);
+    if (this.state === GameState.PLAYING && !this.uiSystem.isPaused()) {
+      this.update(LOGIC_STEP_NORMALIZED);
+    }
+  }
+
+  /** 菜单与片头按固定60Hz显示帧推进，刷新率只影响平滑度、不影响总时长。 */
+  private runAnimationFrame(dt: number): void {
+    if (this.state === GameState.LEVEL_INTRO) {
+      this.updateLevelIntro(dt);
     } else if (this.state === GameState.ENDING_ANIM) {
-      this.updateEndingAnim(LOGIC_STEP_NORMALIZED);
+      this.updateEndingAnim(dt);
     } else if (this.state === GameState.LOGO_ANIM) {
-      this.updateLogoAnim(LOGIC_STEP_NORMALIZED);
+      this.updateLogoAnim(dt);
     } else if (this.state === GameState.LOADING_SCREEN) {
-      this.updateLoadingScreen(LOGIC_STEP_NORMALIZED);
+      this.updateLoadingScreen(dt);
     } else if (this.state === GameState.TITLE_MENU) {
-      this.updateTitleMenu(LOGIC_STEP_NORMALIZED);
+      this.updateTitleMenu(dt);
     } else if (this.state === GameState.COUNTRY_SELECT) {
       this.updateMenuBackground();
     } else if (this.state === GameState.UPGRADE_SELECT) {
@@ -2049,8 +2074,8 @@ export class Game {
   // 开场 LOGO 动画 (原版 l=0: x() 行26145 布局 / y() 行26190 渲染, 35帧)
   // H5简化: sflogo_0 主标帧动画 + sflogo_2/3/4 三行字依次淡入, 1.5秒或可点击跳过
   // ============================================================
-  private updateLogoAnim(_dt: number): void {
-    this.logoFrame++;
+  private updateLogoAnim(dt: number): void {
+    this.logoFrame += dt;
     if (this.logoFrame >= 90) {
       this.startLoadingScreen();
     }
@@ -2816,12 +2841,13 @@ export class Game {
   private renderPlaying(): void {
     // 渲染地图 (使用相机偏移, 不再使用固定offset)
     this.mapData.render();
+    this.mapData.renderPathDefense();
 
     // 渲染双方城池 (对应原版 ak() 行14443-14448: m(aK,aL,0) 我城, m(aI,aJ,1) 敌城)
     this.castleRenderer.render();
 
     // 普通模式显示 1 格原版定位框；选位模式由 TowerSystem 按完整占地绘制。
-    if (!this.towerSystem.isBuildMode) {
+    if (!this.towerSystem.isBuildMode && !this.towerSystem.hasSelectedTower) {
       this.mapData.renderBuildingBox();
     }
 

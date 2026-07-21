@@ -26,6 +26,7 @@ import {
   TOWER_RANGE_T1103, RANGE_CIRCLE_COLORS_L1116, BUILD_BAD_COLORS_Q1158,
   CURSOR_CORNER_O1156, CURSOR_BRACKET_Q1159,
   TOWER_FOOTPRINT_O1098,
+  TOWER_DIRECTION_P1099,
 } from '../data/gameData';
 import { TOWER_NAMES, TOWER_DESCRIPTIONS, HEROES, Hero } from '../data/heroes';
 import type { TechTreeSystem } from './TechTree';
@@ -62,6 +63,9 @@ export interface Tower {
   attackAnim: number;  // 攻击状态剩余逻辑帧 (>0 即攻击态, 对应原版 entity[4]==6)
   strikeX: number;      // 原版 entity[11]：最近一次攻击的地图像素 X
   strikeY: number;      // 原版 entity[12]：最近一次攻击的地图像素 Y
+  gateLoaded: boolean;   // 断龙闸 entity[15]：是否已经装填石块
+  gateState: number;     // 断龙闸 entity[10]：0待命 1释放中 2落闸 3已使用
+  gateTimer: number;     // 断龙闸动作计时，对应 entity[13]
 }
 
 export class TowerSystem {
@@ -233,6 +237,63 @@ export class TowerSystem {
     tower.fireRate = stats.fireRate;
   }
 
+  /** 方向机关投射到建筑外侧的 3x3 格（原版 m1084）。 */
+  private projectedDeviceCells(tileX: number, tileY: number, orientation: number): { tx: number; ty: number }[] {
+    const spread = TOWER_DIR_SPREAD_M1084[orientation & 3];
+    const result: { tx: number; ty: number }[] = [];
+    const seen = new Set<string>();
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        const px = tileX * TILE_SIZE + (i << 4) * spread[0] + spread[2];
+        const py = tileY * TILE_SIZE + (j << 4) * spread[1] + spread[3];
+        const tx = px >> 4;
+        const ty = py >> 4;
+        const key = `${tx},${ty}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          result.push({ tx, ty });
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * 原版方向机关在建造时只允许朝向相邻道路。触屏版自动选择覆盖道路最多的一侧，
+   * 避免突刺/擂木/沸水/滚油/断龙闸在索敌时反复转向。
+   */
+  private resolvePathFacing(tileX: number, tileY: number, type: number): number {
+    if (TOWER_DIRECTION_P1099[this.spriteType(type)] !== 1) return 0;
+    let bestOrientation = 0;
+    let bestScore = -1;
+    for (let orientation = 0; orientation < 4; orientation++) {
+      const score = this.pathFacingScore(tileX, tileY, type, orientation);
+      if (score > bestScore) {
+        bestScore = score;
+        bestOrientation = orientation;
+      }
+    }
+    return bestOrientation;
+  }
+
+  private pathFacingScore(tileX: number, tileY: number, type: number, orientation: number): number {
+    const fp = TOWER_FOOTPRINT_O1098[this.spriteType(type)] ?? 1;
+    let score = this.projectedDeviceCells(tileX, tileY, orientation)
+      .filter(cell => this.mapData.getTerrain(cell.tx, cell.ty) < 8).length * 10;
+    // 紧贴建筑边缘的道路优先，用于原版向下偏移表留有一格间隙的情况。
+    for (let i = 0; i < fp; i++) {
+      const tx = orientation === 1 ? tileX + fp : orientation === 3 ? tileX - 1 : tileX + i;
+      const ty = orientation === 2 ? tileY + fp : orientation === 0 ? tileY - 1 : tileY + i;
+      if (this.mapData.getTerrain(tx, ty) < 8) score++;
+    }
+    return score;
+  }
+
+  private hasPathFacing(tileX: number, tileY: number, type: number): boolean {
+    if (TOWER_DIRECTION_P1099[this.spriteType(type)] !== 1) return true;
+    return [0, 1, 2, 3].some(orientation => this.pathFacingScore(tileX, tileY, type, orientation) > 0);
+  }
+
   /**
    * 放置塔
    * 任务B-3: 接入原版科技建筑门禁 (e1105), 未解锁禁止建造 (原版 M() case 0 行8373-8389)
@@ -274,10 +335,13 @@ export class TowerSystem {
       debuffTimer: 0,
       // 动画状态初始化 (对应原版 c(int×4) 行17252: entity[7]=0, entity[5]=aA)
       frame: 0,
-      orientation: 0,
+      orientation: this.resolvePathFacing(tileX, tileY, type),
       attackAnim: 0,
       strikeX: tileX * TILE_SIZE,
       strikeY: tileY * TILE_SIZE,
+      gateLoaded: false,
+      gateState: 0,
+      gateTimer: 0,
     };
 
     this.towers.push(tower);
@@ -373,6 +437,34 @@ export class TowerSystem {
         if (this.towers.some(t => this.occupiesTile(t, tx, ty))) return false;
       }
     }
+    return this.hasPathFacing(tileX, tileY, type);
+  }
+
+  /** 断龙闸装填费用与当前等级的升级费用相同；装填减半科技生效时取一半。 */
+  getGateLoadCost(tower: Tower): number | null {
+    if (tower.type !== 10 || tower.gateLoaded || tower.gateState !== 0) return null;
+    const [baseCost, stepCost] = TOWER_UPGRADE_COST_R1101[this.spriteType(tower.type)] ?? [50, 50];
+    const fullCost = baseCost + stepCost * Math.max(0, tower.level - 1);
+    return this.techTree?.isReloadHalf() ? fullCost >> 1 : fullCost;
+  }
+
+  /** 原版动作18：付费装填石块，之后菜单切换为“释放断龙闸”。 */
+  loadGate(tower: Tower): boolean {
+    const cost = this.getGateLoadCost(tower);
+    if (cost == null || this.gold < cost) return false;
+    this.gold -= cost;
+    this.onGoldSpent?.(cost);
+    tower.gateLoaded = true;
+    return true;
+  }
+
+  /** 原版动作19：断龙闸是手动、一次性机关，不进入通用自动索敌循环。 */
+  releaseGate(tower: Tower): boolean {
+    if (tower.type !== 10 || !tower.gateLoaded || tower.gateState !== 0) return false;
+    tower.gateLoaded = false;
+    tower.gateState = 1;
+    tower.gateTimer = 0;
+    tower.target = -1;
     return true;
   }
 
@@ -396,6 +488,11 @@ export class TowerSystem {
     const globalFireRateBonus = this.techTree?.getGlobalFireRateBonus() ?? 0;
 
     for (const tower of this.towers) {
+      // 断龙闸只响应底栏“释放断龙闸”，不能以 fireRate=0 进入通用自动攻击。
+      if (tower.type === 10) {
+        this.updateGate(tower, enemies);
+        continue;
+      }
       if (tower.cooldown > 0) {
         tower.cooldown--;
         continue;
@@ -409,13 +506,18 @@ export class TowerSystem {
       // 突刺/擂木/断龙闸等近身机关在原版范围表中为 0，它们靠敌人进入机关
       // 占地附近触发；若直接把 0 交给通用距离索敌，攻击动画永远不会启动。
       const triggerRange = tower.range > 0 ? tower.range : half + TILE_SIZE;
-      let closestDist = triggerRange;
+      const directionalAttack = renderType === 2 || renderType === 6 || renderType === 8 || renderType === 9;
+      const directionalCells = directionalAttack
+        ? new Set(this.projectedDeviceCells(tower.x, tower.y, tower.orientation).map(cell => `${cell.tx},${cell.ty}`))
+        : null;
+      let closestDist = directionalAttack ? Number.POSITIVE_INFINITY : triggerRange;
       let targetIdx = -1;
 
       for (let i = 0; i < enemies.length; i++) {
         const enemy = enemies[i];
         // 跳过死亡动画/已结算敌人 (EnemyState.DYING=5 / SETTLE=6)
         if (enemy.state === EnemyState.DYING || enemy.state === EnemyState.SETTLE) continue;
+        if (directionalCells && !directionalCells.has(`${enemy.x >> 4},${enemy.y >> 4}`)) continue;
         const ex = offsetX + enemy.x;
         const ey = offsetY + enemy.y;
         const dist = Math.sqrt((ex - tx) ** 2 + (ey - ty) ** 2);
@@ -452,11 +554,9 @@ export class TowerSystem {
         }
 
         // 近身机关和范围装置按原版区域触发，同一逻辑帧可命中范围内多个敌人。
-        const areaAttack = tower.type === 2 || tower.type === 6 ||
-          tower.type === 8 || tower.type === 9 || tower.type === 10;
-        const victims = areaAttack ? enemies.filter(enemy => {
+        const victims = directionalCells ? enemies.filter(enemy => {
           if (enemy.state === EnemyState.DYING || enemy.state === EnemyState.SETTLE) return false;
-          return Math.hypot(offsetX + enemy.x - tx, offsetY + enemy.y - ty) < triggerRange;
+          return directionalCells.has(`${enemy.x >> 4},${enemy.y >> 4}`);
         }) : [target];
 
         for (const victim of victims) {
@@ -482,7 +582,9 @@ export class TowerSystem {
         // 进入攻击状态 (对应原版 c1107[4]==6; H5简化: 按固定时长计时)
         tower.attackAnim = TOWER_ATTACK_ANIM_TICKS;
         // 朝向取瞄准方向 (原版 entity[5]; 石灰瓶/烟火会在动画回绕时随机, 见 tickAnim)
-        tower.orientation = this.angleToOrientation(tower.angle);
+        if (TOWER_DIRECTION_P1099[renderType] !== 1) {
+          tower.orientation = this.angleToOrientation(tower.angle);
+        }
       } else {
         tower.target = -1;
       }
@@ -614,6 +716,9 @@ export class TowerSystem {
       let spriteDrawn = false;
       if (this.spriteLoader) {
         spriteDrawn = this.renderBase(tower, px, py);
+        if (tower.type === 10) {
+          spriteDrawn = this.renderGatePathStones(tower, offsetX, offsetY) || spriteDrawn;
+        }
         // 原版主模型层：t{type}_0。此前遗漏该层，导致截图中的弓手塔/突刺
         // 只剩 bu 图集的攻击效果，外观完全不像原版。
         spriteDrawn = this.renderModel(tower, px, py) || spriteDrawn;
@@ -664,15 +769,9 @@ export class TowerSystem {
         }
       }
 
-      // 绘制攻击范围 (选中时)
+      // 原版选中框按完整占地放大，范围圆心也位于建筑中心而非左上第一格。
       if (this.selectedTower === tower) {
-        const cx = px + TILE_SIZE / 2;
-        const cy = py + TILE_SIZE / 2;
-        this.renderer.setColor(0xFFFFFF);
-        const r = tower.range;
-        this.renderer.virtualContext.beginPath();
-        this.renderer.virtualContext.arc(cx, cy, r, 0, Math.PI * 2);
-        this.renderer.virtualContext.stroke();
+        this.renderSelectedTowerFrame(tower, px, py);
       }
     }
 
@@ -724,6 +823,53 @@ export class TowerSystem {
     return drawn;
   }
 
+  /** 原版 am() case 0：四角框包裹完整占地，并以 10Hz 轻微向外呼吸。 */
+  private renderSelectedTowerFrame(tower: Tower, px: number, py: number): void {
+    const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(tower.type)] ?? 1;
+    const size = footprint << 4;
+    const center = footprint << 3;
+    if (tower.range > 0) {
+      this.renderer.setColor(0xffffff);
+      const ctx = this.renderer.virtualContext;
+      ctx.beginPath();
+      ctx.arc(px + center, py + center, tower.range, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    const corner = this.spr('ui', 0);
+    if (!corner) return;
+    const pulse = (this.previewFrame & 1) << 1;
+    const pulseDirs: [number, number][] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+    for (let k = 0; k < 4; k++) {
+      const cx = px + (size - 7) * CURSOR_CORNER_O1156[k][0] + pulseDirs[k][0] * pulse;
+      const cy = py + (size - 7) * CURSOR_CORNER_O1156[k][1] + pulseDirs[k][1] * pulse;
+      this.renderer.drawSpriteTransform(corner, k * 7, 0, 7, 7, cx, cy, 0);
+    }
+  }
+
+  /**
+   * 原版对类型10额外使用 bu_43 绘制路径石块。这里显示装填后的朝向预告；
+   * 释放后的持久石块由 MapData 的 D1162 路径机关层统一绘制。
+   */
+  private renderGatePathStones(tower: Tower, offsetX: number, offsetY: number): boolean {
+    const stone = this.spr('bu', 43);
+    if (!stone) return false;
+    let drawn = false;
+    for (const cell of this.projectedDeviceCells(tower.x, tower.y, tower.orientation)) {
+      if (this.mapData.getTerrain(cell.tx, cell.ty) >= 8) continue;
+      if (!tower.gateLoaded && tower.gateState !== 1) continue;
+      this.renderer.drawSpriteTransform(
+        stone,
+        0, 0, 15, 16,
+        offsetX + cell.tx * TILE_SIZE,
+        offsetY + cell.ty * TILE_SIZE,
+        0,
+      );
+      drawn = true;
+    }
+    return drawn;
+  }
+
   /** 底部明细区使用的完整塔模型预览，复用战场的原版素材合成路径。 */
   renderTowerPreview(type: number, level: number, centerX: number, centerY: number): void {
     const stats = this.originalStats(type, level);
@@ -735,6 +881,7 @@ export class TowerSystem {
       hp: 1, maxHp: 1, debuffTimer: 0,
       frame: 0, orientation: 0, attackAnim: 0,
       strikeX: 0, strikeY: 0,
+      gateLoaded: false, gateState: 0, gateTimer: 0,
     };
     const half = (TOWER_ANCHOR_O1098[this.spriteType(type)] ?? 2) << 3;
     const px = centerX - half;
@@ -793,8 +940,8 @@ export class TowerSystem {
         if (tower.attackAnim > 0) return this.renderOilSpread(tower, px, py);
         return this.renderFountainBase(tower, px, py, level0, [36, 37, 38]);
       case 10: // 装置
-        // 原版仅在装置动作状态 entity[10]==2 时叠加该基座效果。
-        return tower.attackAnim > 0 && this.renderDeviceBase(tower, px, py, level0);
+        // 原版仅在断龙闸动作状态 entity[10]==2 时叠加九点闸墙效果。
+        return tower.gateState === 2 && this.renderDeviceBase(tower, px, py, level0);
       default:
         return false;
     }
@@ -1380,12 +1527,13 @@ export class TowerSystem {
 
     // ---- p(int,int) 行23898: 逐格 14x14 斜线格 (b(int×4,boolean) 行16316)
     // 可建 = 0x4CFFAC(5046188); 不可建 = q1158[帧&3] 闪烁; 占用格按不可建显示
-    let allOk = true;
+    const directionOk = this.hasPathFacing(this.buildX, this.buildY, type);
+    let allOk = directionOk;
     for (let i = 0; i < fp; i++) {
       for (let j = 0; j < fp; j++) {
         const tx = this.buildX + i;
         const ty = this.buildY + j;
-        const ok = this.mapData.isBuildableAt(tx, ty) && !this.towers.some(t => this.occupiesTile(t, tx, ty));
+        const ok = directionOk && this.mapData.isBuildableAt(tx, ty) && !this.towers.some(t => this.occupiesTile(t, tx, ty));
         if (!ok) allOk = false;
         const color = ok ? 0x4cffac : BUILD_BAD_COLORS_Q1158[this.previewFrame & 3];
         this.renderer.setColor(color);
@@ -1433,8 +1581,9 @@ export class TowerSystem {
       x: this.buildX, y: this.buildY, type, level: 1,
       damage: 0, range: 0, fireRate: 0, cooldown: 0, target: -1, angle: 0,
       heroId: -1, effectType: 0, hp: 0, maxHp: 0, debuffTimer: 0,
-      frame: 0, orientation: 0, attackAnim: 0,
+      frame: 0, orientation: this.resolvePathFacing(this.buildX, this.buildY, type), attackAnim: 0,
       strikeX: this.buildX * TILE_SIZE, strikeY: this.buildY * TILE_SIZE,
+      gateLoaded: false, gateState: 0, gateTimer: 0,
     };
     vctx.save();
     vctx.globalAlpha = 0.55;
@@ -1472,6 +1621,10 @@ export class TowerSystem {
    */
   getSelectedTower(): Tower | null {
     return this.selectedTower;
+  }
+
+  get hasSelectedTower(): boolean {
+    return this.selectedTower !== null;
   }
 
   /**
@@ -1582,8 +1735,9 @@ export class TowerSystem {
   getTowersInRange(cx: number, cy: number, range: number): Tower[] {
     const result: Tower[] = [];
     for (const tower of this.towers) {
-      const tx = tower.x * TILE_SIZE + TILE_SIZE / 2;
-      const ty = tower.y * TILE_SIZE + TILE_SIZE / 2;
+      const fp = TOWER_FOOTPRINT_O1098[this.spriteType(tower.type)] ?? 1;
+      const tx = tower.x * TILE_SIZE + (fp << 3);
+      const ty = tower.y * TILE_SIZE + (fp << 3);
       const dist = Math.sqrt((tx - cx) ** 2 + (ty - cy) ** 2);
       if (dist <= range) {
         result.push(tower);
@@ -1625,10 +1779,15 @@ export class TowerSystem {
         debuffTimer: 0,
         // 动画状态 (不存档, 按初始值)
         frame: 0,
-        orientation: 0,
+        orientation: Number.isInteger(td.orientation)
+          ? (td.orientation & 3)
+          : this.resolvePathFacing(td.x ?? 0, td.y ?? 0, td.type ?? 0),
         attackAnim: 0,
         strikeX: (td.x ?? 0) * TILE_SIZE,
         strikeY: (td.y ?? 0) * TILE_SIZE,
+        gateLoaded: td.gateLoaded === true,
+        gateState: Math.max(0, Math.min(3, td.gateState ?? 0)),
+        gateTimer: 0,
       };
       this.towers.push(tower);
       const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(tower.type)] ?? 1;
@@ -1636,6 +1795,39 @@ export class TowerSystem {
         for (let dy = 0; dy < footprint; dy++) {
           this.mapData.occupyBuildTile(tower.x + dx, tower.y + dy);
         }
+      }
+    }
+  }
+
+  /** 断龙闸原版状态1持续5帧、状态2持续10帧，落闸时写入 D1162 并结算一次伤害。 */
+  private updateGate(tower: Tower, enemies: Enemy[]): void {
+    if (tower.gateState === 1) {
+      tower.gateTimer++;
+      if (tower.gateTimer <= 4) return;
+
+      tower.gateState = 2;
+      tower.gateTimer = 0;
+      tower.attackAnim = 10;
+      const cells = this.projectedDeviceCells(tower.x, tower.y, tower.orientation)
+        .filter(cell => this.mapData.getTerrain(cell.tx, cell.ty) < 8);
+      const cellKeys = new Set(cells.map(cell => `${cell.tx},${cell.ty}`));
+      for (const cell of cells) this.mapData.setPathDefense(cell.tx, cell.ty, 16);
+
+      let damage = tower.damage;
+      if (this.techTree) damage = this.techTree.applyEffectsToTowerDamage(tower, damage);
+      if (tower.heroId >= 0) damage *= 1.5;
+      for (const enemy of enemies) {
+        if (enemy.state === EnemyState.DYING || enemy.state === EnemyState.SETTLE) continue;
+        if (!cellKeys.has(`${enemy.x >> 4},${enemy.y >> 4}`)) continue;
+        enemy.hp -= Math.floor(damage);
+        this.techTree?.applyAoeEffectsToEnemy(enemy, tower.type, tower.level);
+      }
+    } else if (tower.gateState === 2) {
+      tower.gateTimer++;
+      if (tower.gateTimer > 9) {
+        tower.gateState = 3;
+        tower.gateTimer = 0;
+        tower.attackAnim = 0;
       }
     }
   }
