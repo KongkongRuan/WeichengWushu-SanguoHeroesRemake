@@ -831,9 +831,9 @@ export class EnemySystem {
         // 水平镜像 (原版 f() var7=1)
         vctx.translate(Math.floor(dx) + srcW, Math.floor(dy));
         vctx.scale(-1, 1);
-        vctx.drawImage(img, srcX, 0, srcW, srcH, 0, 0, srcW, srcH);
+        this.renderer.drawImageRegion(img, srcX, 0, srcW, srcH, 0, 0, srcW, srcH);
       } else {
-        vctx.drawImage(img, srcX, 0, srcW, srcH, Math.floor(dx), Math.floor(dy), srcW, srcH);
+        this.renderer.drawImageRegion(img, srcX, 0, srcW, srcH, Math.floor(dx), Math.floor(dy), srcW, srcH);
       }
       vctx.restore();
 
@@ -875,7 +875,7 @@ export class EnemySystem {
       vctx.ellipse(Math.floor(px), Math.floor(py - 1), 8, 3, 0, 0, Math.PI * 2);
       vctx.fill();
       vctx.restore();
-      vctx.drawImage(img, srcX, 0, 21, 19, Math.floor(dx), Math.floor(dy), 21, 19);
+      this.renderer.drawImageRegion(img, srcX, 0, 21, 19, Math.floor(dx), Math.floor(dy), 21, 19);
       return;
     }
     // 回退
@@ -895,8 +895,7 @@ export class EnemySystem {
     const img = this.spriteLoader?.getByPrefix('h', spriteIndex) ?? null;
     if (img) {
       const frame = Math.min(Math.max(timer, 0), frameCount - 1);
-      const vctx = this.renderer.virtualContext;
-      vctx.drawImage(img, frame * frameW, 0, frameW, frameH,
+      this.renderer.drawImageRegion(img, frame * frameW, 0, frameW, frameH,
         Math.floor(px - 8), Math.floor(py - 24), frameW, frameH);
       return;
     }
@@ -910,7 +909,7 @@ export class EnemySystem {
     const img = this.spriteLoader?.getByPrefix('h', 9) ?? null;
     if (img) {
       const frame = this.visualFrame & 3;
-      this.renderer.virtualContext.drawImage(img, frame * 22, 0, 22, 34,
+      this.renderer.drawImageRegion(img, frame * 22, 0, 22, 34,
         Math.floor(px - 11), Math.floor(py - 23), 22, 34);
       return;
     }

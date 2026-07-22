@@ -62,6 +62,7 @@ export class UISystem {
   private pausePage: PausePage = 'main';
   private audioEnabled: boolean = true;
   private audioVolume: number = 0.5;
+  private graphicsQuality: 1 | 2 = 2;
 
   // ====== 新增: 科技树面板翻页状态 ======
   // 当前科技树页码 (0-based)
@@ -217,9 +218,10 @@ export class UISystem {
     this.updateButtons();
   }
 
-  setAudioSettings(enabled: boolean, volume: number): void {
+  setAudioSettings(enabled: boolean, volume: number, graphicsQuality: 1 | 2 = this.graphicsQuality): void {
     this.audioEnabled = enabled;
     this.audioVolume = Math.max(0, Math.min(1, volume));
+    this.graphicsQuality = graphicsQuality;
     if (this.pausePage === 'settings') this.updateButtons();
   }
 
@@ -379,7 +381,9 @@ export class UISystem {
           ] : (this.pausePage === 'settings' ? [
             [`声音：${this.audioEnabled ? '开' : '关'}`, 'toggle_sound'],
             [`音量：${Math.round(this.audioVolume * 100)}%`, 'volume_up'],
-            ['降低音量', 'volume_down'], ['返回上级', 'cheat_back'],
+            ['降低音量', 'volume_down'],
+            [`画面：${this.graphicsQuality === 2 ? '高清重制' : '原版像素'}`, 'toggle_graphics'],
+            ['返回上级', 'cheat_back'],
           ] : [['返回上级', 'cheat_back']]));
       const menuH = labels.length * itemH + 20;
       const menuX = (LOGICAL_WIDTH - menuW) / 2;
@@ -480,7 +484,7 @@ export class UISystem {
 
     // 消息提示
     if (this.messageTimer > 0) {
-      const tw = this.renderer.virtualContext.measureText(this.messageText).width + 10;
+      const tw = this.renderer.measureText(this.messageText, 10).width + 10;
       const mx = (LOGICAL_WIDTH - tw) / 2;
       const my = 100;
       this.renderer.setColor(0x000000);
@@ -496,7 +500,7 @@ export class UISystem {
       this.renderer.setColor(0x000000);
       this.renderer.fillRect(0, y, LOGICAL_WIDTH, 30);
       this.renderer.setColor(0xFFD700);
-      const tw = this.renderer.virtualContext.measureText(this.heroAwakenText).width;
+      const tw = this.renderer.measureText(this.heroAwakenText, 14).width;
       this.renderer.drawText(this.heroAwakenText, (LOGICAL_WIDTH - tw) / 2, y + 8, 0xFFD700, 14);
     }
 
@@ -646,7 +650,7 @@ export class UISystem {
 
     const menuW = 164;
     const itemH = 24;
-    const count = this.pausePage === 'settings' ? 4 : (this.pausePage === 'help' || this.pausePage === 'about' ? 1 : 6);
+    const count = this.pausePage === 'settings' ? 5 : (this.pausePage === 'help' || this.pausePage === 'about' ? 1 : 6);
     const menuH = count * itemH + 20;
     const menuX = (LOGICAL_WIDTH - menuW) / 2;
     const menuY = (LOGICAL_HEIGHT - menuH) / 2;
@@ -672,14 +676,12 @@ export class UISystem {
 
   /** 在暂停说明页中绘制换行文本。 */
   private drawWrapped(text: string, x: number, y: number, maxW: number, color: number, size: number, lineH: number): void {
-    const ctx = this.renderer.virtualContext;
-    ctx.font = `${size}px monospace`;
     const lines: string[] = [];
     for (const paragraph of text.split('\n')) {
       let line = '';
       for (const ch of paragraph) {
         const next = line + ch;
-        if (ctx.measureText(next).width > maxW && line) {
+        if (this.renderer.measureText(next, size).width > maxW && line) {
           lines.push(line);
           line = ch;
         } else {

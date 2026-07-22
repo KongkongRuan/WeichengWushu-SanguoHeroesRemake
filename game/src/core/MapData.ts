@@ -33,6 +33,7 @@
  */
 import { Renderer } from './Renderer';
 import { SpriteLoader } from './SpriteLoader';
+import embeddedLevelMaps from 'virtual:level-maps';
 import {
   TILE_SIZE,
   MAP_TOP_BAR_H,
@@ -149,20 +150,25 @@ export class MapData {
     const mapLevel = this.resolveMapLevel(level);
     this.currentMapLevel = mapLevel;
 
-    // 加载地图数据 JSON
-    try {
-      const mapResponse = await fetch(`./maps/level${mapLevel}.json`);
-      if (!mapResponse.ok) throw new Error(`HTTP ${mapResponse.status}`);
-      this.mapData = await mapResponse.json() as LevelMapData;
-      this.mapData.level = level;
-    } catch (e) {
-      console.warn(`Failed to load map level${mapLevel}, using default:`, e);
-      this.mapData = this.createDefaultMap(level);
-    }
+    // 地图数据由 Vite 在构建时从 public/maps 内嵌，避免运行时 fetch 因部署路径、
+    // 离线壳或 file 环境失败后退化成全灰地图。数组复制后再交给运行时系统使用。
+    const sourceMap = embeddedLevelMaps[mapLevel];
+    if (!sourceMap) throw new Error(`Bundled map level${mapLevel} is missing`);
+    const loadedMap: LevelMapData = {
+      ...sourceMap,
+      level,
+      tileLayer: sourceMap.tileLayer.slice(),
+      flipLayer: sourceMap.flipLayer.slice(),
+      pathLayer: sourceMap.pathLayer.slice(),
+      pathFlipLayer: sourceMap.pathFlipLayer?.slice(),
+      terrainLayer: sourceMap.terrainLayer?.slice(),
+      spawnPoints: sourceMap.spawnPoints?.map(point => ({ ...point })),
+    };
+    this.mapData = loadedMap;
 
     // 初始化运行时属性层 (E1163 副本; 敌人占用标记 +1/-1 直接作用于副本)
-    const src = this.mapData.terrainLayer;
-    const total = this.mapData.width * this.mapData.height;
+    const src = loadedMap.terrainLayer;
+    const total = loadedMap.width * loadedMap.height;
     if (src && src.length === total) {
       this.terrain = src.slice();
     } else {
@@ -207,20 +213,6 @@ export class MapData {
   private resolveMapLevel(level: number): number {
     if (level <= 8) return level;
     return level % 9;
-  }
-
-  /**
-   * 创建默认地图 (当JSON文件不存在时)
-   */
-  private createDefaultMap(level: number): LevelMapData {
-    const w = 15;
-    const h = 20;
-    const tiles = w * h;
-    const tileLayer = new Array(tiles).fill(9);
-    const flipLayer = new Array(tiles).fill(0);
-    const pathLayer = new Array(tiles).fill(0);
-    const terrainLayer = new Array(tiles).fill(TERRAIN_OBSTACLE);
-    return { level, width: w, height: h, tileLayer, flipLayer, pathLayer, terrainLayer };
   }
 
   // ============================================================
@@ -789,47 +781,47 @@ export class MapData {
 
     switch (flipMode) {
       case 0:
-        vctx.drawImage(img, sx, sy, TILE_SIZE, TILE_SIZE, dx, dy, TILE_SIZE, TILE_SIZE);
+        this.renderer.drawImageRegion(img, sx, sy, TILE_SIZE, TILE_SIZE, dx, dy, TILE_SIZE, TILE_SIZE);
         break;
       case 1:
         vctx.translate(dx + TILE_SIZE, dy);
         vctx.scale(-1, 1);
-        vctx.drawImage(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
+        this.renderer.drawImageRegion(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
         break;
       case 2:
         vctx.translate(dx, dy + TILE_SIZE);
         vctx.scale(1, -1);
-        vctx.drawImage(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
+        this.renderer.drawImageRegion(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
         break;
       case 3:
         vctx.translate(dx + TILE_SIZE, dy + TILE_SIZE);
         vctx.scale(-1, -1);
-        vctx.drawImage(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
+        this.renderer.drawImageRegion(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
         break;
       case 4:
         vctx.translate(dx + TILE_SIZE, dy);
         vctx.scale(-1, 1);
         vctx.rotate(Math.PI / 2);
-        vctx.drawImage(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
+        this.renderer.drawImageRegion(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
         break;
       case 5:
         vctx.translate(dx, dy);
         vctx.rotate(Math.PI / 2);
         vctx.scale(-1, 1);
-        vctx.drawImage(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
+        this.renderer.drawImageRegion(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
         break;
       case 6:
         vctx.translate(dx, dy + TILE_SIZE);
         vctx.rotate(-Math.PI / 2);
-        vctx.drawImage(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
+        this.renderer.drawImageRegion(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
         break;
       case 7:
         vctx.translate(dx + TILE_SIZE, dy + TILE_SIZE);
         vctx.rotate(Math.PI);
-        vctx.drawImage(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
+        this.renderer.drawImageRegion(img, sx, sy, TILE_SIZE, TILE_SIZE, 0, 0, TILE_SIZE, TILE_SIZE);
         break;
       default:
-        vctx.drawImage(img, sx, sy, TILE_SIZE, TILE_SIZE, dx, dy, TILE_SIZE, TILE_SIZE);
+        this.renderer.drawImageRegion(img, sx, sy, TILE_SIZE, TILE_SIZE, dx, dy, TILE_SIZE, TILE_SIZE);
         break;
     }
 

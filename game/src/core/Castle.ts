@@ -120,7 +120,7 @@ export class CastleRenderer {
       const dy = parts[i * 3 + 2] + anchorY + MAP_TOP_BAR_H - camY;
 
       if (atlas) {
-        vctx.drawImage(
+        this.renderer.drawImageRegion(
           atlas,
           rect[0], rect[1], rect[2], rect[3],
           Math.floor(dx), Math.floor(dy), rect[2], rect[3],

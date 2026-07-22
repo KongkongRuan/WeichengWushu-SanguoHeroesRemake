@@ -171,6 +171,7 @@ export class Game {
   private k1029: boolean = false;      // k1029: 自由模式标记 (战役名旁显示◀▶)
   private soundEnabled: boolean = true; // 原版 l1031/q (声音开关)
   private volume: number = 0.5;
+  private displayQuality: 1 | 2 = 2; // 1=原版像素，2=高清重制
 
   // ====== 标题动画字段 (原版 m()/l()) ======
   private titleM: number = 0;          // M: 入场阶段 0..5
@@ -569,7 +570,8 @@ export class Game {
       case GameState.SETTINGS:
         if (k === 'ArrowLeft') this.settingsAction('volume_down');
         else if (k === 'ArrowRight') this.settingsAction('volume_up');
-        else if (k === 'ArrowUp' || k === 'ArrowDown') this.settingsAction('toggle');
+        else if (k === 'ArrowUp') this.settingsAction('toggle');
+        else if (k === 'ArrowDown' || k.toLowerCase() === 'g') this.settingsAction('toggle_graphics');
         else if (k === 'Enter' || k === ' ') this.settingsAction('ok');
         else if (k === 'Escape') this.settingsAction('cancel');
         else handled = false;
@@ -1116,8 +1118,9 @@ export class Game {
     const settings = this.saveSystem.loadSettings();
     settings.musicEnabled = this.soundEnabled;
     settings.volume = this.volume;
+    settings.scale = this.displayQuality;
     this.saveSystem.saveSettings(settings);
-    this.uiSystem.setAudioSettings(this.soundEnabled, this.volume);
+    this.uiSystem.setAudioSettings(this.soundEnabled, this.volume, this.displayQuality);
   }
 
   private changeVolume(delta: number): void {
@@ -1125,6 +1128,13 @@ export class Game {
     this.audioSystem.setVolume(this.volume);
     this.persistSoundSetting();
     this.uiSystem.showMessage(`音量: ${Math.round(this.volume * 100)}%`, 45);
+  }
+
+  private toggleGraphicsQuality(): void {
+    this.displayQuality = this.displayQuality === 2 ? 1 : 2;
+    this.renderer.setDisplayMode(this.displayQuality === 2 ? 'hd' : 'original');
+    this.persistSoundSetting();
+    this.uiSystem.showMessage(this.displayQuality === 2 ? '画面：高清重制' : '画面：原版像素', 60);
   }
 
   // ============================================================
@@ -1465,15 +1475,20 @@ export class Game {
       this.settingsAction('toggle');
     } else if (y >= 142 && y <= 174) {
       this.settingsAction(x < LOGICAL_WIDTH / 2 ? 'volume_down' : 'volume_up');
+    } else if (y >= 176 && y <= 208) {
+      this.settingsAction('toggle_graphics');
     }
   }
 
-  private settingsAction(act: 'toggle' | 'volume_down' | 'volume_up' | 'ok' | 'cancel'): void {
+  private settingsAction(act: 'toggle' | 'toggle_graphics' | 'volume_down' | 'volume_up' | 'ok' | 'cancel'): void {
     switch (act) {
       case 'toggle':
         this.soundEnabled = !this.soundEnabled;
         if (!this.soundEnabled) this.audioSystem.stop();
         else this.playMusic('./mid/7.mid');
+        break;
+      case 'toggle_graphics':
+        this.toggleGraphicsQuality();
         break;
       case 'volume_down':
         this.changeVolume(-0.1);
@@ -1698,6 +1713,9 @@ export class Game {
         break;
       case 'volume_up':
         this.changeVolume(0.1);
+        break;
+      case 'toggle_graphics':
+        this.toggleGraphicsQuality();
         break;
       case 'cheat_clear_enemies':
         this.enemySystem.clearAllEnemies();
@@ -2699,16 +2717,19 @@ export class Game {
     r.drawText('设置', 108, 32, 0x53678A, 14);
     // 面板
     r.setColor(0xFCFFCD);
-    r.fillRect(20, 96, 200, 92);
+    r.fillRect(20, 92, 200, 140);
     r.setColor(0x53678A);
-    r.drawRect(20, 96, 200, 92);
+    r.drawRect(20, 92, 200, 140);
     // 声音开关 (b1015[101] 声音 / [102]开 / [103]关)
     r.drawText('声音', 48, 112, 0x53678A, 12);
     r.drawText(this.soundEnabled ? '开' : '关', 156, 112, this.soundEnabled ? 0xD5317A : 0x506E91, 12);
     r.drawText('音量', 48, 148, 0x53678A, 12);
     r.drawText(`${Math.round(this.volume * 100)}%`, 148, 148, 0xD5317A, 12);
     this.renderArrows(126, 194, 150);
-    r.drawText('上下切声音，左右调音量', 58, 174, 0x506E91, 9);
+    r.drawText('画面', 48, 184, 0x53678A, 12);
+    r.drawText(this.displayQuality === 2 ? '高清重制' : '原版像素', 126, 184, 0xD5317A, 11);
+    this.renderArrows(116, 204, 186);
+    r.drawText('↑声音  ↓画面  ←→音量', 52, 214, 0x506E91, 9);
     // 软键: 确定(左)+返回(右)
     this.uiSystem.renderSoftkeyBar(SOFTKEY_OK, SOFTKEY_BACK);
   }
@@ -2747,12 +2768,10 @@ export class Game {
   /** 文本换行 (中文按字符) */
   private wrapText(text: string, maxW: number, size: number): string[] {
     const lines: string[] = [];
-    const ctx = this.renderer.virtualContext;
-    ctx.font = `${size}px monospace`;
     for (const para of text.split('\n')) {
       let line = '';
       for (const ch of para) {
-        if (line.length > 0 && ctx.measureText(line + ch).width > maxW) {
+        if (line.length > 0 && this.renderer.measureText(line + ch, size).width > maxW) {
           lines.push(line);
           line = ch;
         } else {
@@ -3084,7 +3103,7 @@ export class Game {
 
     // 标题文字 (居中大号)
     const titleY = LOGICAL_HEIGHT / 2 - 30;
-    const titleW = this.renderer.virtualContext.measureText(title).width;
+    const titleW = this.renderer.measureText(title, 18).width;
     this.renderer.drawText(title, (LOGICAL_WIDTH - titleW) / 2, titleY, 0xFFD700, 18);
 
     // 正文文字 (居中换行)
@@ -3123,7 +3142,7 @@ export class Game {
     for (let i = 0; i < text.length; i++) {
       const ch = text[i];
       const testLine = line + ch;
-      const w = this.renderer.virtualContext.measureText(testLine).width;
+      const w = this.renderer.measureText(testLine, size).width;
       if (w > maxW && line.length > 0) {
         this.renderer.drawText(line, x, curY, color, size);
         line = ch;
@@ -3163,8 +3182,10 @@ export class Game {
     const settings = this.saveSystem.loadSettings();
     this.soundEnabled = settings.musicEnabled;
     this.volume = settings.volume;
+    this.displayQuality = settings.scale === 1 ? 1 : 2;
+    this.renderer.setDisplayMode(this.displayQuality === 2 ? 'hd' : 'original');
     this.audioSystem.setVolume(this.volume);
-    this.uiSystem.setAudioSettings(this.soundEnabled, this.volume);
+    this.uiSystem.setAudioSettings(this.soundEnabled, this.volume, this.displayQuality);
 
     // 地图图集推迟到 LOADING_SCREEN 阶段加载 (对应原版 k() 的 e() 进度)
     // 启动后先播放 LOGO 动画 (原版 l=0)

@@ -689,7 +689,7 @@ export class BuildBarSystem {
     let curY = y;
     for (const ch of text) {
       const test = line + ch;
-      if (r.virtualContext.measureText(test).width > maxW && line.length > 0) {
+      if (r.measureText(test, size).width > maxW && line.length > 0) {
         r.drawText(line, x, curY, color, size);
         line = ch;
         curY += lineH;
