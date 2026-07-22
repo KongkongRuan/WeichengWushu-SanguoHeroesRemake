@@ -15,6 +15,15 @@ import { BAR_CAT_TOWER, BuildBarSystem, type BuildBarHost } from '../src/core/Bu
 import { AudioSystem } from '../src/core/AudioSystem';
 import { scale2x } from '../src/core/Scale2x';
 import {
+  availableCommandPoints,
+  CHEAT_COSTS,
+  COMMAND_POINT_MAX,
+  createDefaultCheatProfile,
+  recordFailure,
+  recordVictory,
+  spendCommandPoints,
+} from '../src/core/CheatProgress';
+import {
   TOWER_AMBIENT_LAYER_TYPES,
   TOWER_AUX_LAYER_BY_TYPE,
   TOWER_GATE_LOAD_DIR_S1117,
@@ -119,6 +128,77 @@ test('60/120/144Hz 在相同时长产生相同的 10Hz 逻辑帧', () => {
   assert.equal(countLogicSteps(60, 10), 100);
   assert.equal(countLogicSteps(120, 10), 100);
   assert.equal(countLogicSteps(144, 10), 100);
+});
+
+test('军令金手指消耗符合配置且常驻军令不会超过5枚', () => {
+  assert.deepEqual(CHEAT_COSTS, {
+    cheat_gold: 1,
+    cheat_defense: 2,
+    cheat_clear_enemies: 2,
+    cheat_gold_double: 3,
+    cheat_all_tech: 5,
+  });
+  const profile = createDefaultCheatProfile();
+  const reward = recordVictory(profile, {
+    level: 0,
+    battleKey: '0:0',
+    usedCheat: false,
+    flawless: true,
+    quickDeploy: true,
+  });
+  assert.equal(reward.pointsAdded, 3);
+  assert.equal(profile.commandPoints, 3);
+  recordVictory(profile, {
+    level: 1,
+    battleKey: '0:1',
+    usedCheat: false,
+    flawless: true,
+    quickDeploy: true,
+  });
+  assert.equal(profile.commandPoints, COMMAND_POINT_MAX);
+});
+
+test('首次挑战奖励不可重复，使用金手指后只发首次通关军令', () => {
+  const profile = createDefaultCheatProfile();
+  const assisted = recordVictory(profile, {
+    level: 2,
+    battleKey: '0:2',
+    usedCheat: true,
+    flawless: true,
+    quickDeploy: true,
+  });
+  assert.deepEqual(assisted.labels, ['新关卡首次通关']);
+  assert.equal(profile.commandPoints, 1);
+  const cleanReplay = recordVictory(profile, {
+    level: 2,
+    battleKey: '0:2',
+    usedCheat: false,
+    flawless: true,
+    quickDeploy: true,
+  });
+  assert.deepEqual(cleanReplay.labels, ['首次无人入城', '全波次及时出兵']);
+  assert.equal(profile.commandPoints, 3);
+  assert.deepEqual(recordVictory(profile, {
+    level: 2,
+    battleKey: '0:2',
+    usedCheat: false,
+    flawless: true,
+    quickDeploy: true,
+  }).labels, []);
+});
+
+test('同关连续失败两次发救援军令，消耗时优先使用救援额度', () => {
+  const profile = createDefaultCheatProfile();
+  profile.commandPoints = 2;
+  assert.equal(recordFailure(profile, '1:3'), false);
+  assert.equal(recordFailure(profile, '1:3'), true);
+  assert.equal(availableCommandPoints(profile, '1:3'), 3);
+  const spent = spendCommandPoints(profile, '1:3', CHEAT_COSTS.cheat_gold_double);
+  assert.deepEqual(spent, { ok: true, spentRescue: 1, spentCommandPoints: 2 });
+  assert.equal(profile.commandPoints, 0);
+  assert.equal(availableCommandPoints(profile, '1:3'), 0);
+  assert.equal(recordFailure(profile, '1:3'), false);
+  assert.equal(recordFailure(profile, '1:3'), true);
 });
 
 test('倍速只缩放游戏逻辑，不依赖显示刷新率', () => {

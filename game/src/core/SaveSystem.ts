@@ -14,9 +14,11 @@ import { STORY_LEVEL_SEQUENCE } from '../data/gameData';
 import { HEROES, Faction } from '../data/heroes';
 import type { TechTreeSystem, TechEffectInstance, HeroState } from './TechTree';
 import type { Tower } from './Tower';
+import { CheatProfile, createDefaultCheatProfile, normalizeCheatProfile } from './CheatProgress';
 
 const SAVE_KEY = 'weicheng_save_v1';
 const SETTINGS_KEY = 'weicheng_settings_v1';
+const CHEAT_PROFILE_KEY = 'weicheng_cheat_profile_v1';
 
 // ============================================================
 // 存档数据结构
@@ -66,6 +68,11 @@ export interface SaveData {
   techBuildings?: boolean[];   // a1056[5]: 5种科技建筑已建
   castleParts?: boolean[];     // b1059[10]: 我城部件可见 (城堡外观)
   unlockedTowers?: boolean[];  // e1105[11]: 塔解锁表
+
+  // ====== 当前战斗的金手指记录（旧存档缺省） ======
+  battleCheatsUsed?: string[];
+  battleLeaks?: number;
+  quickDeployEligible?: boolean;
 }
 
 // ============================================================
@@ -193,6 +200,28 @@ export class SaveSystem {
       return settings;
     } catch (e) {
       return defaultSettings;
+    }
+  }
+
+  /** 军令、一次性奖励和沙盒解锁独立于普通战斗存档持久化。 */
+  loadCheatProfile(): CheatProfile {
+    try {
+      const json = localStorage.getItem(CHEAT_PROFILE_KEY);
+      if (!json) return createDefaultCheatProfile();
+      return normalizeCheatProfile(JSON.parse(json));
+    } catch (e) {
+      console.error('Failed to load cheat profile:', e);
+      return createDefaultCheatProfile();
+    }
+  }
+
+  saveCheatProfile(profile: CheatProfile): boolean {
+    try {
+      localStorage.setItem(CHEAT_PROFILE_KEY, JSON.stringify(normalizeCheatProfile(profile)));
+      return true;
+    } catch (e) {
+      console.error('Failed to save cheat profile:', e);
+      return false;
     }
   }
 

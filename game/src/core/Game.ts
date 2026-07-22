@@ -15,6 +15,18 @@ import { UISystem, Button } from './UI';
 import { SpriteLoader } from './SpriteLoader';
 import { TechTreeSystem } from './TechTree';
 import { SaveSystem } from './SaveSystem';
+import {
+  availableCommandPoints,
+  battleRecordKey,
+  CHEAT_COSTS,
+  COMMAND_POINT_MAX,
+  createDefaultCheatProfile,
+  hasRescueCommand,
+  recordFailure,
+  recordVictory,
+  spendCommandPoints,
+} from './CheatProgress';
+import type { CheatAction, CheatProfile } from './CheatProgress';
 import { BuildBarSystem, BAR_CAT_BUILD, BAR_CAT_TECH, BAR_CAT_TOWER } from './BuildBar';
 import {
   FixedStepClock,
@@ -126,6 +138,7 @@ export class Game {
   private techTree: TechTreeSystem;
   private saveSystem: SaveSystem;
   private buildBar: BuildBarSystem; // 原版底部建造栏/科技面板 (任务A/B)
+  private cheatProfile: CheatProfile = createDefaultCheatProfile();
 
   private state: GameState = GameState.LOGO_ANIM;
   private currentLevel: number = 0;
@@ -153,6 +166,19 @@ export class Game {
   private totalKills: number = 0;
   private totalGoldEarned: number = 0;
   private playTime: number = 0;
+
+  // 军令金手指：常驻档案与本场挑战状态分开，读档后仍能保持单项限用和胜利标记。
+  private battleCheatsUsed: Set<CheatAction> = new Set();
+  private battleLeaks: number = 0;
+  private quickDeployEligible: boolean = true;
+  private waveReadyElapsedMs: number = 0;
+  private waveWasReady: boolean = false;
+  private battleFailureRecorded: boolean = false;
+  private failureGrantedRescue: boolean = false;
+  private lastVictoryKind: '正攻取胜' | '奇谋取胜' | '沙盒胜利' = '正攻取胜';
+  private lastVictoryRewardLabels: string[] = [];
+  private lastVictoryPointsAdded: number = 0;
+  private sandboxUnlockedOnLastVictory: boolean = false;
 
   // 地图偏移 (居中显示)
   private mapOffsetX: number = 0;
@@ -258,6 +284,17 @@ export class Game {
     this.spriteLoader = new SpriteLoader();
     this.techTree = new TechTreeSystem();
     this.saveSystem = SaveSystem.getInstance();
+    this.cheatProfile = this.saveSystem.loadCheatProfile();
+    // 兼容升级前已经通关的旧存档，避免老玩家必须重新打一遍才能进入沙盒。
+    if (!this.cheatProfile.storyCompleted) {
+      const oldSave = this.saveSystem.load();
+      const savedFaction = Math.max(0, Math.min(2, (oldSave?.factionX ?? 0) | 0));
+      const storyLength = CAMPAIGN_ORDER_H1074[savedFaction]?.length ?? Number.MAX_SAFE_INTEGER;
+      if (oldSave?.gameModeT === 0 && (oldSave.campaignAO ?? 0) >= storyLength) {
+        this.cheatProfile.storyCompleted = true;
+        this.saveSystem.saveCheatProfile(this.cheatProfile);
+      }
+    }
     this.buildBar = new BuildBarSystem(this.renderer);
 
     this.setupCallbacks();
@@ -282,7 +319,14 @@ export class Game {
         this.totalGoldEarned += actualGold;
         this.syncGold(); // 击杀金同步到塔/科技树池 (修复旧版三池脱节)
       },
-      () => { this.lives--; if (this.lives <= 0) this.state = GameState.GAME_OVER; },
+      () => {
+        this.lives--;
+        this.battleLeaks++;
+        if (this.lives <= 0) {
+          this.recordCurrentBattleFailure();
+          this.state = GameState.GAME_OVER;
+        }
+      },
       // 名将波首个敌人登场：恢复专属横幅、头像和 /8.mid 音乐。
       (_bossType, bossId) => {
         this.uiSystem.showBossBanner(HEROES[bossId]?.name ?? `名将 ${bossId}`, bossId);
@@ -384,6 +428,96 @@ export class Game {
   private syncGold(): void {
     this.towerSystem.setGold(this.gold);
     this.techTree.setGold(this.gold);
+  }
+
+  private isSandboxMode(): boolean {
+    return this.gameModeT === 1 && this.cheatProfile.storyCompleted;
+  }
+
+  private currentBattleRecordKey(): string {
+    return battleRecordKey(this.factionX, this.currentLevel);
+  }
+
+  private syncCheatMenu(): void {
+    const battleKey = this.currentBattleRecordKey();
+    this.uiSystem.setCheatStatus({
+      commandPoints: this.cheatProfile.commandPoints,
+      maxCommandPoints: COMMAND_POINT_MAX,
+      rescuePoints: hasRescueCommand(this.cheatProfile, battleKey) ? 1 : 0,
+      sandboxMode: this.isSandboxMode(),
+      usedActions: [...this.battleCheatsUsed],
+    });
+  }
+
+  private resetBattleChallengeState(): void {
+    this.battleCheatsUsed.clear();
+    this.battleLeaks = 0;
+    this.quickDeployEligible = true;
+    this.waveReadyElapsedMs = 0;
+    this.waveWasReady = false;
+    this.battleFailureRecorded = false;
+    this.failureGrantedRescue = false;
+    this.lastVictoryRewardLabels = [];
+    this.lastVictoryPointsAdded = 0;
+    this.sandboxUnlockedOnLastVictory = false;
+  }
+
+  private recordCurrentBattleFailure(): void {
+    if (this.battleFailureRecorded || this.isSandboxMode()) return;
+    this.battleFailureRecorded = true;
+    this.failureGrantedRescue = recordFailure(this.cheatProfile, this.currentBattleRecordKey());
+    this.saveSystem.saveCheatProfile(this.cheatProfile);
+    this.syncCheatMenu();
+  }
+
+  /** 真实时间计时，不受1/2/3倍速影响；暂停时不会累计。首波建造准备不计入挑战。 */
+  private updateQuickDeployTimer(elapsedMs: number): void {
+    const ready = this.state === GameState.PLAYING
+      && !this.uiSystem.isPaused()
+      && this.enemySystem.canStartNextWave;
+    if (!ready) {
+      this.waveWasReady = false;
+      this.waveReadyElapsedMs = 0;
+      return;
+    }
+    if (!this.waveWasReady) {
+      this.waveWasReady = true;
+      this.waveReadyElapsedMs = 0;
+      return;
+    }
+    this.waveReadyElapsedMs += Math.max(0, elapsedMs);
+  }
+
+  private settleBattleProgress(): void {
+    const sandbox = this.isSandboxMode();
+    this.sandboxUnlockedOnLastVictory = false;
+    if (sandbox) {
+      this.lastVictoryKind = '沙盒胜利';
+      this.lastVictoryRewardLabels = [];
+      this.lastVictoryPointsAdded = 0;
+      return;
+    }
+
+    const usedCheat = this.battleCheatsUsed.size > 0;
+    this.lastVictoryKind = usedCheat ? '奇谋取胜' : '正攻取胜';
+    const reward = recordVictory(this.cheatProfile, {
+      level: this.currentLevel,
+      battleKey: this.currentBattleRecordKey(),
+      usedCheat,
+      flawless: this.battleLeaks === 0,
+      quickDeploy: this.quickDeployEligible,
+    });
+    this.lastVictoryRewardLabels = reward.labels;
+    this.lastVictoryPointsAdded = reward.pointsAdded;
+
+    const campaignFinished = this.gameModeT === 0
+      && this.campaignAO >= CAMPAIGN_ORDER_H1074[this.factionX].length;
+    if (campaignFinished && !this.cheatProfile.storyCompleted) {
+      this.cheatProfile.storyCompleted = true;
+      this.sandboxUnlockedOnLastVictory = true;
+    }
+    this.saveSystem.saveCheatProfile(this.cheatProfile);
+    this.syncCheatMenu();
   }
 
   /**
@@ -886,6 +1020,8 @@ export class Game {
         this.state = GameState.COUNTRY_SELECT;
         break;
       case 1: // 自由模式 → l=15 (原版: T=1, af=0, k1029=true)
+        // 新版将原自由模式作为通关奖励的沙盒：全战役开放、金手指无限。
+        if (!this.cheatProfile.storyCompleted) return;
         this.gameModeT = 1;
         this.factionX = 0;
         this.campaignAO = 0;
@@ -1349,6 +1485,7 @@ export class Game {
   /** 战役是否可选 (已解锁 d1073 的+下一个; 王者之路当前战役恒可选) */
   private isBattleSelectable(aN: number): boolean {
     if (this.gameModeT === 0) return aN === CAMPAIGN_ORDER_H1074[this.factionX][this.campaignAO];
+    if (this.isSandboxMode()) return true;
     if (this.unlockedD1073[aN]) return true;
     // "下一个": 之前的战役全部解锁
     for (let i = 0; i < aN; i++) {
@@ -1538,12 +1675,12 @@ export class Game {
   private loadFromSaveData(data: any): void {
     if (!data) return;
     this.levelIndex = data.levelIndex ?? 0;
-    this.currentLevel = data.level ?? 0;
+    this.currentLevel = data.currentLevel ?? data.level ?? 0;
     this.gold = data.gold ?? INITIAL_GOLD_BY_MODE[data.gameModeT === 1 ? 1 : 0];
     this.lives = data.lives ?? 10;
-    this.totalKills = data.stats?.totalKills ?? 0;
-    this.totalGoldEarned = data.stats?.totalGoldEarned ?? 0;
-    this.playTime = data.stats?.playTime ?? 0;
+    this.totalKills = data.totalKills ?? data.stats?.totalKills ?? 0;
+    this.totalGoldEarned = data.totalGoldEarned ?? data.stats?.totalGoldEarned ?? 0;
+    this.playTime = data.playTime ?? data.stats?.playTime ?? 0;
     // 恢复战役进度 (新增字段, 旧存档缺省)
     this.factionX = data.factionX ?? 0;
     this.upgradeAc = data.upgradeAc ?? 0;
@@ -1554,6 +1691,17 @@ export class Game {
       : new Array(9).fill(false);
     this.battleAN = this.currentLevel >= 0 && this.currentLevel <= 8 ? this.currentLevel : 0;
     this.k1029 = this.gameModeT === 1;
+    const validCheatActions = new Set<string>(Object.keys(CHEAT_COSTS));
+    this.battleCheatsUsed = new Set(
+      (Array.isArray(data.battleCheatsUsed) ? data.battleCheatsUsed : [])
+        .filter((action: unknown): action is CheatAction => typeof action === 'string' && validCheatActions.has(action)),
+    );
+    this.battleLeaks = Math.max(0, Number(data.battleLeaks) || 0);
+    this.quickDeployEligible = data.quickDeployEligible !== false;
+    this.waveReadyElapsedMs = 0;
+    this.waveWasReady = false;
+    this.battleFailureRecorded = false;
+    this.failureGrantedRescue = false;
     this.techTree.setFaction(this.factionX as Faction);
     this.towerSystem.setFaction(this.factionX);
     this.enemySystem.setFaction(this.factionX);
@@ -1647,6 +1795,62 @@ export class Game {
     }
   }
 
+  private useCheat(action: CheatAction): void {
+    const sandbox = this.isSandboxMode();
+    const battleKey = this.currentBattleRecordKey();
+    if (!sandbox) {
+      if (this.battleCheatsUsed.has(action)) {
+        this.uiSystem.showMessage('本关该锦囊已经使用过', 75);
+        return;
+      }
+      const cost = CHEAT_COSTS[action];
+      if (availableCommandPoints(this.cheatProfile, battleKey) < cost) {
+        this.uiSystem.showMessage(`军令不足，需要${cost}枚`, 75);
+        return;
+      }
+      const spent = spendCommandPoints(this.cheatProfile, battleKey, cost);
+      if (!spent.ok) return;
+      this.battleCheatsUsed.add(action);
+      this.saveSystem.saveCheatProfile(this.cheatProfile);
+    }
+
+    let message = '';
+    switch (action) {
+      case 'cheat_clear_enemies':
+        this.enemySystem.clearAllEnemies();
+        message = GAME_HELP_TEXT.clearEnemies;
+        break;
+      case 'cheat_all_tech':
+        this.techTree.cheatGetAllTech();
+        this.buildBar.cheatUnlockAll();
+        this.castleRenderer.setOurPartFilter(this.buildBar.castlePartFilter());
+        this.syncGold();
+        message = GAME_HELP_TEXT.getAllTech;
+        break;
+      case 'cheat_gold':
+        this.gold += 500;
+        this.totalGoldEarned += 500;
+        this.syncGold();
+        message = GAME_HELP_TEXT.getGold;
+        break;
+      case 'cheat_defense':
+        this.lives += 10;
+        message = GAME_HELP_TEXT.defenseUp;
+        break;
+      case 'cheat_gold_double':
+        this.techTree.setGoldDouble(true);
+        message = GAME_HELP_TEXT.goldDouble;
+        break;
+    }
+
+    this.syncCheatMenu();
+    const suffix = sandbox
+      ? '（沙盒无限）'
+      : `（军令剩余${availableCommandPoints(this.cheatProfile, battleKey)}）`;
+    this.uiSystem.showMessage(`${message}${suffix}`, 90);
+    this.autoSave();
+  }
+
   /**
    * 处理按钮点击
    * 任务A: 旧快捷建造/面板按钮已移除, 建造/升级走 BuildBarSystem (原版底部栏)
@@ -1687,7 +1891,11 @@ export class Game {
         this.uiSystem.setPaused(true);
         break;
       case 'open_cheats':
+        this.syncCheatMenu();
         this.uiSystem.openPausePage('cheats');
+        break;
+      case 'open_cheat_rules':
+        this.uiSystem.openPausePage('cheat_rules');
         break;
       case 'pause_settings':
         this.uiSystem.openPausePage('settings');
@@ -1718,29 +1926,19 @@ export class Game {
         this.toggleGraphicsQuality();
         break;
       case 'cheat_clear_enemies':
-        this.enemySystem.clearAllEnemies();
-        this.uiSystem.showMessage(GAME_HELP_TEXT.clearEnemies, 90);
+        this.useCheat('cheat_clear_enemies');
         break;
       case 'cheat_all_tech':
-        this.techTree.cheatGetAllTech();
-        this.buildBar.cheatUnlockAll();
-        this.castleRenderer.setOurPartFilter(this.buildBar.castlePartFilter());
-        this.syncGold();
-        this.uiSystem.showMessage(GAME_HELP_TEXT.getAllTech, 90);
+        this.useCheat('cheat_all_tech');
         break;
       case 'cheat_gold':
-        this.gold += 500;
-        this.totalGoldEarned += 500;
-        this.syncGold();
-        this.uiSystem.showMessage(GAME_HELP_TEXT.getGold, 90);
+        this.useCheat('cheat_gold');
         break;
       case 'cheat_defense':
-        this.lives += 10;
-        this.uiSystem.showMessage(GAME_HELP_TEXT.defenseUp, 90);
+        this.useCheat('cheat_defense');
         break;
       case 'cheat_gold_double':
-        this.techTree.setGoldDouble(true);
-        this.uiSystem.showMessage(GAME_HELP_TEXT.goldDouble, 90);
+        this.useCheat('cheat_gold_double');
         break;
       case 'resume':
         this.uiSystem.setPaused(false);
@@ -1780,8 +1978,12 @@ export class Game {
 
   /** 原版 # 键行为：仅在场上无敌且本波已经刷完时请求下一波。 */
   private requestNextWave(): void {
+    const nextWave = this.enemySystem.currentWave + 1;
     if (this.enemySystem.requestNextWave()) {
-      const nextWave = this.enemySystem.currentWave + 1;
+      // 第一波允许玩家安心布防；从第二波开始，准备就绪后5秒内出兵才算“及时”。
+      if (nextWave > 1 && this.waveReadyElapsedMs > 5000) this.quickDeployEligible = false;
+      this.waveWasReady = false;
+      this.waveReadyElapsedMs = 0;
       this.uiSystem.setWaveReady(false);
       this.uiSystem.showMessage(`第 ${nextWave} 波开始`, 45);
     } else if (!this.enemySystem.isLevelComplete) {
@@ -1818,6 +2020,7 @@ export class Game {
   async loadLevel(level: number, resetTech: boolean = true): Promise<void> {
     this.currentLevel = level;
     if (resetTech) {
+      this.resetBattleChallengeState();
       // 原版 aj() 在每场战斗重新建立战场：金币、塔、科技建筑和科技效果
       // 都不从上一关继承。读档传 false 才保留存档中的这些状态。
       this.gold = INITIAL_GOLD_BY_MODE[this.gameModeT === 1 ? 1 : 0];
@@ -1841,8 +2044,8 @@ export class Game {
     // 我城部件过滤接 b1059 (原版 m() 行23514)
     this.castleRenderer.setOurPartFilter(this.buildBar.castlePartFilter());
 
-    // 城防 (对应原版 by, aj() 初始化为10)
-    this.lives = 10;
+    // 城防 (对应原版 by, aj() 初始化为10)；读档时保留已保存的城防。
+    if (resetTech) this.lives = 10;
 
     // 播放对应关卡的MIDI音乐 (k1068[mapLevel], 每关音乐索引 — 推断)
     const mapLevel = level <= 8 ? level : level % 9;
@@ -1853,6 +2056,7 @@ export class Game {
     this.state = GameState.LEVEL_INTRO;
     this.introTimer = 0;
     this.introPhase = 0;
+    this.syncCheatMenu();
   }
 
   // ====== 触发结局动画 (对应原版 state 46/47/48) ======
@@ -1945,6 +2149,8 @@ export class Game {
       this.animationClock.reset();
     }
 
+    this.updateQuickDeployTimer(elapsedMs);
+
     this.render();
 
     requestAnimationFrame(this.gameLoop);
@@ -2015,6 +2221,7 @@ export class Game {
       if (this.gameModeT === 0) {
         this.campaignAO++;
       }
+      this.settleBattleProgress();
       // 原版通关不会凭空增加 1000 金；金币只来自击杀/金手指。
       // 先存档再切状态 (autoSave 仅在 PLAYING 生效)
       this.autoSave();
@@ -2094,6 +2301,9 @@ export class Game {
     saveData.techBuildings = barState.techBuilt;
     saveData.castleParts = barState.castleParts;
     saveData.unlockedTowers = barState.towerUnlocked;
+    saveData.battleCheatsUsed = [...this.battleCheatsUsed];
+    saveData.battleLeaks = this.battleLeaks;
+    saveData.quickDeployEligible = this.quickDeployEligible;
     this.saveSystem.save(saveData);
   }
 
@@ -2464,6 +2674,17 @@ export class Game {
       if (back25) {
         r.drawImageRegion(back25, 0, this.menuR * 11, 47, 11, this.posK, this.posL + 1, 47, 11);
       }
+      if (this.menuR === 1) {
+        const sandboxHint = this.cheatProfile.storyCompleted
+          ? '沙盒已解锁 · 无限金手指'
+          : '通关王者之路后解锁沙盒';
+        const hintW = r.measureText(sandboxHint, 8).width;
+        const hintX = (LOGICAL_WIDTH - hintW) / 2;
+        r.setColor(0xFCFFCD);
+        r.fillRect(hintX - 3, this.posL - 15, hintW + 6, 12);
+        r.drawText(sandboxHint, hintX, this.posL - 13,
+          this.cheatProfile.storyCompleted ? 0x2F7A5A : 0xB23A48, 8);
+      }
       // 左右 ui[24] ◀▶ 闪烁
       const ui24 = this.spr('ui', 24);
       if (ui24) {
@@ -2648,6 +2869,9 @@ export class Game {
     const nameW = name.length * 11;
     const nameX = (240 - nameW - 2) >> 1;
     r.drawText(name, nameX, lay.nameY - 11, 0x53678A, 11);
+    if (this.cheatProfile.cleanVictoryKeys.includes(battleRecordKey(this.factionX, this.battleAN))) {
+      r.drawText('★', Math.min(228, nameX + nameW + 4), lay.nameY - 11, 0xFFD700, 10);
+    }
     // 自由模式 (k1029): 战役名旁 ◀▶
     if (this.gameModeT === 1) {
       this.renderArrows(nameX - 4 - 6, nameX + nameW + 2 + 4, lay.nameY - 10);
@@ -3029,8 +3253,13 @@ export class Game {
 
   private renderGameOver(): void {
     this.renderer.setColor(COLORS.TEXT);
-    this.renderer.drawText('游戏结束', LOGICAL_WIDTH / 2 - 30, 140, 0xFF0000, 14);
-    this.renderer.drawText('点击返回标题', LOGICAL_WIDTH / 2 - 40, 180, 0xFCFFCD, 10);
+    this.renderer.drawText('游戏结束', LOGICAL_WIDTH / 2 - 30, 130, 0xFF0000, 14);
+    if (this.failureGrantedRescue) {
+      this.renderer.drawText('连续失败：获得本关救援军令×1', 28, 158, 0xFFD700, 9);
+    } else if (!this.isSandboxMode()) {
+      this.renderer.drawText('同一关连续失败两次可获救援军令', 24, 158, 0xAAAAFF, 8);
+    }
+    this.renderer.drawText('点击返回标题', LOGICAL_WIDTH / 2 - 40, 190, 0xFCFFCD, 10);
   }
 
   private renderVictory(): void {
@@ -3041,8 +3270,27 @@ export class Game {
 
   private renderLevelComplete(): void {
     this.renderer.setColor(COLORS.TEXT);
-    this.renderer.drawText('关卡完成!', LOGICAL_WIDTH / 2 - 30, 140, 0xFCFFCD, 14);
-    this.renderer.drawText('点击继续', LOGICAL_WIDTH / 2 - 20, 180, 0xFCFFCD, 10);
+    this.renderer.drawText('关卡完成!', LOGICAL_WIDTH / 2 - 30, 116, 0xFCFFCD, 14);
+    const kindColor = this.lastVictoryKind === '正攻取胜' ? 0xFFD700
+      : this.lastVictoryKind === '奇谋取胜' ? 0xAAAAFF : 0x2F7A5A;
+    const kindW = this.renderer.measureText(this.lastVictoryKind, 12).width;
+    this.renderer.drawText(this.lastVictoryKind, (LOGICAL_WIDTH - kindW) / 2, 142, kindColor, 12);
+    if (this.lastVictoryRewardLabels.length > 0) {
+      const rewardText = `奖励：${this.lastVictoryRewardLabels.join('、')}`;
+      const rewardW = this.renderer.measureText(rewardText, 8).width;
+      this.renderer.drawText(rewardText, Math.max(4, (LOGICAL_WIDTH - rewardW) / 2), 164, 0xFCFFCD, 8);
+      const pointText = this.lastVictoryPointsAdded > 0
+        ? `军令 +${this.lastVictoryPointsAdded}（${this.cheatProfile.commandPoints}/${COMMAND_POINT_MAX}）`
+        : `军令已满（${COMMAND_POINT_MAX}/${COMMAND_POINT_MAX}）`;
+      const pointW = this.renderer.measureText(pointText, 9).width;
+      this.renderer.drawText(pointText, (LOGICAL_WIDTH - pointW) / 2, 181, 0xFFD700, 9);
+    }
+    if (this.sandboxUnlockedOnLastVictory) {
+      const unlockText = '已解锁沙盒模式：无限金手指';
+      const unlockW = this.renderer.measureText(unlockText, 9).width;
+      this.renderer.drawText(unlockText, (LOGICAL_WIDTH - unlockW) / 2, 200, 0x2F7A5A, 9);
+    }
+    this.renderer.drawText('点击继续', LOGICAL_WIDTH / 2 - 20, 226, 0xFCFFCD, 10);
   }
 
   // ============================================================

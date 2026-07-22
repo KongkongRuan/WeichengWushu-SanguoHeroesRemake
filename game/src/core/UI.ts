@@ -24,7 +24,20 @@ export interface Button {
 }
 
 type ButtonCallback = (button: Button) => void;
-type PausePage = 'main' | 'cheats' | 'settings' | 'help' | 'about';
+type PausePage = 'main' | 'cheats' | 'cheat_rules' | 'settings' | 'help' | 'about';
+
+const CHEAT_RULES_TEXT = [
+  '常驻军令最多5枚。',
+  '获得方式：',
+  '·新关卡首次通关 +1',
+  '·正攻首次无人入城 +1',
+  '·正攻从第2波起，准备就绪后5秒内出兵 +1',
+  '·同关连续失败2次：救援军令×1',
+  '救援军令仅限本关，通关后清除。',
+  '每项锦囊每关限用一次。',
+  '使用后记为“奇谋”；未使用记为“正攻”并留下★。',
+  '通关王者之路后解锁沙盒，无限使用金手指。',
+].join('\n');
 
 export class UISystem {
   private renderer: Renderer;
@@ -63,6 +76,11 @@ export class UISystem {
   private audioEnabled: boolean = true;
   private audioVolume: number = 0.5;
   private graphicsQuality: 1 | 2 = 2;
+  private cheatCommandPoints: number = 0;
+  private cheatCommandMax: number = 5;
+  private cheatRescuePoints: number = 0;
+  private cheatSandboxMode: boolean = false;
+  private cheatUsedActions: Set<string> = new Set();
 
   // ====== 新增: 科技树面板翻页状态 ======
   // 当前科技树页码 (0-based)
@@ -225,6 +243,21 @@ export class UISystem {
     if (this.pausePage === 'settings') this.updateButtons();
   }
 
+  setCheatStatus(status: {
+    commandPoints: number;
+    maxCommandPoints: number;
+    rescuePoints: number;
+    sandboxMode: boolean;
+    usedActions: string[];
+  }): void {
+    this.cheatCommandPoints = Math.max(0, status.commandPoints | 0);
+    this.cheatCommandMax = Math.max(1, status.maxCommandPoints | 0);
+    this.cheatRescuePoints = Math.max(0, status.rescuePoints | 0);
+    this.cheatSandboxMode = status.sandboxMode;
+    this.cheatUsedActions = new Set(status.usedActions);
+    if (this.pausePage === 'cheats') this.updateButtons();
+  }
+
   /**
    * 切换暂停
    */
@@ -366,17 +399,38 @@ export class UISystem {
     if (this.pauseMenuVisible) {
       // 原版菜单文字为 b1015[107..112]：继续、金手指、设置、帮助、关于、退出。
       // 金手指页对应 b1015[175..179] 的五项作弊功能。
+      if (this.pausePage === 'cheat_rules') {
+        const menuW = 196;
+        const menuH = 230;
+        const menuX = (LOGICAL_WIDTH - menuW) / 2;
+        const menuY = (LOGICAL_HEIGHT - menuH) / 2;
+        this.buttons.push({
+          x: menuX + 8, y: menuY + menuH - 30, w: menuW - 16, h: 22,
+          label: '返回金手指', icon: '', color: 0xDAB043,
+          action: 'open_cheats', visible: true, enabled: true,
+        });
+        return;
+      }
       const menuW = 164;
       const itemH = 24;
-      const labels = this.pausePage === 'main'
+      const cheatAvailable = this.cheatCommandPoints + this.cheatRescuePoints;
+      const cheatLabel = (label: string, action: string, cost: number): [string, string, boolean] => {
+        if (this.cheatSandboxMode) return [`${label} [∞]`, action, true];
+        if (this.cheatUsedActions.has(action)) return [`${label} [已用]`, action, false];
+        return [`${label} [${cost}令]`, action, cheatAvailable >= cost];
+      };
+      const labels: [string, string, boolean?][] = this.pausePage === 'main'
         ? [
             ['继续游戏', 'resume'], ['金手指', 'open_cheats'],
             ['设置', 'pause_settings'], ['帮助', 'pause_help'],
             ['关于', 'pause_about'], ['退出', 'back_to_menu'],
           ] : (this.pausePage === 'cheats' ? [
-            ['消灭当前全部敌人', 'cheat_clear_enemies'],
-            ['获得全部科技', 'cheat_all_tech'], ['获得500金', 'cheat_gold'],
-            ['城防加10', 'cheat_defense'], ['消灭敌人金翻倍', 'cheat_gold_double'],
+            cheatLabel('获得500金', 'cheat_gold', 1),
+            cheatLabel('城防加10', 'cheat_defense', 2),
+            cheatLabel('消灭当前全部敌人', 'cheat_clear_enemies', 2),
+            cheatLabel('消灭敌人金币翻倍', 'cheat_gold_double', 3),
+            cheatLabel('获得全部科技', 'cheat_all_tech', 5),
+            ['军令规则', 'open_cheat_rules'],
             ['返回上级', 'cheat_back'],
           ] : (this.pausePage === 'settings' ? [
             [`声音：${this.audioEnabled ? '开' : '关'}`, 'toggle_sound'],
@@ -388,11 +442,11 @@ export class UISystem {
       const menuH = labels.length * itemH + 20;
       const menuX = (LOGICAL_WIDTH - menuW) / 2;
       const menuY = (LOGICAL_HEIGHT - menuH) / 2;
-      labels.forEach(([label, action], index) => {
+      labels.forEach(([label, action, enabled = true], index) => {
         this.buttons.push({
           x: menuX + 4, y: menuY + 10 + index * itemH, w: menuW - 8, h: itemH - 2,
           label, icon: '', color: index === labels.length - 1 ? 0xDAB043 : 0x5B7FA3,
-          action, visible: true, enabled: true,
+          action, visible: true, enabled,
         });
       });
       return;
@@ -648,10 +702,13 @@ export class UISystem {
     this.renderer.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
     this.renderer.virtualContext.globalAlpha = 1;
 
-    const menuW = 164;
+    const rulesPage = this.pausePage === 'cheat_rules';
+    const menuW = rulesPage ? 196 : 164;
     const itemH = 24;
-    const count = this.pausePage === 'settings' ? 5 : (this.pausePage === 'help' || this.pausePage === 'about' ? 1 : 6);
-    const menuH = count * itemH + 20;
+    const count = this.pausePage === 'cheats' ? 7
+      : this.pausePage === 'settings' ? 5
+      : (this.pausePage === 'help' || this.pausePage === 'about' ? 1 : 6);
+    const menuH = rulesPage ? 230 : count * itemH + 20;
     const menuX = (LOGICAL_WIDTH - menuW) / 2;
     const menuY = (LOGICAL_HEIGHT - menuH) / 2;
 
@@ -661,12 +718,20 @@ export class UISystem {
     this.renderer.drawRect(menuX, menuY, menuW, menuH);
 
     // 标题和页说明
+    const cheatTitle = this.cheatSandboxMode
+      ? '金手指 · 沙盒无限'
+      : `金手指 · 军令${this.cheatCommandPoints}/${this.cheatCommandMax}${this.cheatRescuePoints ? '+救援1' : ''}`;
     const title = this.pausePage === 'main' ? '已暂停'
-      : this.pausePage === 'cheats' ? '金手指'
+      : this.pausePage === 'cheats' ? cheatTitle
+      : this.pausePage === 'cheat_rules' ? '军令规则'
       : this.pausePage === 'settings' ? '设置'
       : this.pausePage === 'help' ? '游戏帮助' : '关于';
     this.renderer.drawText(title, (LOGICAL_WIDTH - title.length * 6) / 2, menuY - 14, 0xFFD700, 12);
-    if (this.pausePage === 'help' || this.pausePage === 'about') {
+    if (rulesPage) {
+      this.renderer.setColor(0x11111D);
+      this.renderer.fillRect(menuX + 6, menuY + 8, menuW - 12, menuH - 44);
+      this.drawWrapped(CHEAT_RULES_TEXT, menuX + 10, menuY + 13, menuW - 20, 0xFCFFCD, 8, 11);
+    } else if (this.pausePage === 'help' || this.pausePage === 'about') {
       this.renderer.setColor(0x11111D);
       this.renderer.fillRect(menuX + 6, menuY + 8, menuW - 12, menuH - 16);
       const text = this.pausePage === 'help' ? GAME_DESCRIPTION_TEXT : COPYRIGHT_TEXT;
