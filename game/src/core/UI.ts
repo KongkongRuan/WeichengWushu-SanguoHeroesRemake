@@ -205,14 +205,17 @@ export class UISystem {
    * 设置游戏速度
    */
   setGameSpeed(speed: number): void {
-    this.gameSpeed = Math.max(1, Math.min(3, speed));
+    const nextSpeed = Math.max(1, Math.min(3, speed));
+    if (this.gameSpeed === nextSpeed) return;
+    this.gameSpeed = nextSpeed;
+    this.updateButtons();
   }
 
   /**
    * 切换游戏速度 (1 -> 2 -> 3 -> 1)
    */
   cycleGameSpeed(): void {
-    this.gameSpeed = (this.gameSpeed % 3) + 1;
+    this.setGameSpeed((this.gameSpeed % 3) + 1);
   }
 
   /**

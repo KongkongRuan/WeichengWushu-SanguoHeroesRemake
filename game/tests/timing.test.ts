@@ -19,6 +19,7 @@ import {
 } from '../src/core/BuildBar';
 import { AudioSystem } from '../src/core/AudioSystem';
 import { scale2x } from '../src/core/Scale2x';
+import { UISystem } from '../src/core/UI';
 import {
   availableCommandPoints,
   CHEAT_COSTS,
@@ -456,6 +457,25 @@ test('原版敌人池为 80×28，达到 30 个活动敌人后仍继续刷怪', 
 
 test('投石与道路机关在攻击和升级期间保持建造时解析出的道路朝向', () => {
   assert.deepEqual([...TOWER_PATH_FACING_TYPES], [2, 6, 7, 8, 9, 10]);
+});
+
+test('游戏速度变化后同步刷新速度按钮文字', () => {
+  const ui = new UISystem({} as never);
+  let speedLabel = '';
+  ui.setButtonCallback((button) => {
+    if (button.action === 'speed_up') speedLabel = button.label;
+  });
+
+  assert.equal(ui.handleTap(171, 3), true);
+  assert.equal(speedLabel, '1x');
+
+  ui.cycleGameSpeed();
+  ui.handleTap(171, 3);
+  assert.equal(speedLabel, '2x');
+
+  ui.setGameSpeed(3);
+  ui.handleTap(171, 3);
+  assert.equal(speedLabel, '3x');
 });
 
 test('建造预览按原版区分四向建筑与单向道路机关', () => {
