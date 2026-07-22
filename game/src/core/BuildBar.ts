@@ -12,7 +12,7 @@
  *   打开入口 战斗确认键处理 行14538-14607 (塔→j(2..7), 可建格→j(0), 我城格→j(1))
  *
  * H5触屏适配 (注释标注的简化点):
- *   - 点击图标=选中, 再点同一图标=确认; 点明细区=确认; 点地图=关栏
+ *   - 触屏升级/科技/塔操作第一次点选、第二次确认；建造卡片单击进入选位；点地图关栏
  *   - 未解锁塔图标置灰 (原版不置灰, 仅选中时提示 b1015[115]; 按任务要求置灰)
  *   - 科技面板保留原版的建筑解锁和城堡部件状态
  *   - 明细区通过 TowerSystem 合成完整塔模型，与原版 a(type,level,...) 一致
@@ -118,6 +118,8 @@ export class BuildBarSystem {
   private ay: Tower | null = null; // 选中的已建塔 (类别2)
   private o = -1;   // 提示消息id (-1=无, 原版 o 字段)
   private touchOptimized = false;
+  /** 触屏端必须由用户明确点过一次，不能把打开栏时的默认高亮当成确认。 */
+  private touchArmedIndex: number | null = null;
 
   // ===== 科技层状态 (原版 a1056/b1059/e1105) =====
   private techBuilt: boolean[] = new Array(5).fill(false);   // a1056: 装置已建
@@ -139,6 +141,7 @@ export class BuildBarSystem {
   setTouchOptimized(enabled: boolean): void {
     if (this.touchOptimized === enabled) return;
     this.touchOptimized = enabled;
+    this.touchArmedIndex = null;
     if (this.aw !== 0) this.configureVisibleItems();
   }
 
@@ -242,6 +245,7 @@ export class BuildBarSystem {
     this.aD = 0;
     this.aE = 0;
     this.o = -1;
+    this.touchArmedIndex = null;
     this.configureVisibleItems();
     this.aw = 1;
   }
@@ -259,6 +263,7 @@ export class BuildBarSystem {
 
   /** 请求关闭 (原版 aw=2 滑出) */
   close(): void {
+    this.touchArmedIndex = null;
     if (this.aw !== 0) this.aw = 2;
   }
 
@@ -319,6 +324,7 @@ export class BuildBarSystem {
   /** 左移选择 (原版 M() 右键 aD+1, 方向相反无碍) */
   navigate(dir: number): void {
     if (this.aw === 0) return;
+    this.touchArmedIndex = null;
     this.o = -1; // 换项清除提示
     if (dir > 0) {
       this.aD++;
@@ -427,7 +433,7 @@ export class BuildBarSystem {
 
   /**
    * 触屏点击 (H5适配; 返回是否消费了该点击)
-   * 点图标=选中(再次点击=确认); 点明细区=确认; 点栏外地图=关栏
+   * 升级/科技/塔操作点图标=选中(再次点击=确认); 点栏外地图=关栏
    */
   handleTap(x: number, y: number): boolean {
     if (this.aw === 0) return false;
@@ -456,10 +462,24 @@ export class BuildBarSystem {
             const idx = this.aE + i;
             if (idx > this.aB) return true;
             if (this.touchOptimized) {
+              const item = this.items()[idx];
+              const alreadyArmed = this.touchArmedIndex === idx;
               this.aD = idx;
               this.o = -1;
-              // 建造卡片采用快速流程：点卡片后立即进入放置预览。
-              if (this.aC === BAR_CAT_BUILD) this.confirm();
+
+              if (item === ACTION_CANCEL) {
+                // 取消没有付费或破坏性，单击立即关闭。
+                this.close();
+              } else if (this.aC === BAR_CAT_BUILD) {
+                // 建造卡片采用快速流程：点卡片后立即进入放置预览。
+                this.touchArmedIndex = null;
+                this.confirm();
+              } else if (alreadyArmed) {
+                // 升级、科技与塔操作：第一次点选，第二次点击同一项才执行。
+                this.confirm();
+              } else {
+                this.touchArmedIndex = idx;
+              }
             } else if (idx === this.aD) {
               this.confirm(); // 再点同一图标=确认
             } else {
@@ -488,6 +508,7 @@ export class BuildBarSystem {
     if (next === this.aE) return;
     this.aE = next;
     this.aD = next;
+    this.touchArmedIndex = null;
     this.o = -1;
   }
 
@@ -577,7 +598,10 @@ export class BuildBarSystem {
 
       // 选中双框高亮 (原版行10589-10607: 色16580557 双drawRect)
       if (idx === this.aD) {
-        r.setColor(COLOR_BAR_BG);
+        const armed = this.touchOptimized && this.touchArmedIndex === idx;
+        r.setColor(armed
+          ? item === ACTION_DEMOLISH ? 0xB23A48 : 0x2F7A5A
+          : COLOR_BAR_BG);
         if (this.touchOptimized) {
           r.drawRect(cellX + 3, iconY - 4, TOUCH_ITEM_SPACING - 6, iconSize + 8);
           r.drawRect(cellX + 4, iconY - 3, TOUCH_ITEM_SPACING - 8, iconSize + 6);
@@ -709,6 +733,10 @@ export class BuildBarSystem {
       desc = hero ? `${hero.name}：${effect}` : effect;
     } else if (this.aC === BAR_CAT_TOWER && item >= 16) {
       desc = ORIG_ACTION_DESC[item - 16] ?? '';
+    }
+    if (this.touchOptimized && this.touchArmedIndex === this.aD && this.o < 0) {
+      const confirmation = item === ACTION_DEMOLISH ? '再次点击拆除' : '再次点击确认';
+      desc = desc ? `${confirmation} · ${desc}` : confirmation;
     }
     this.drawWrapped(desc, 67, descY, 163, COLOR_TEXT, 8, 10);
   }

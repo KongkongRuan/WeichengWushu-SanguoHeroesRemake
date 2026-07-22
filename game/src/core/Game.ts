@@ -1,7 +1,7 @@
 /**
  * 游戏主循环 - 协调所有系统
  * 游戏流程/菜单系统按原版 a.java 状态机 (字段 l) 重写:
- *   l=0 LOGO动画 → ld加载屏 → l=18 声音询问 → l=1 标题主菜单
+ *   ld加载屏 → l=18 声音询问 → l=1 标题主菜单
  *   → l=15 选择国家 → l=17 升级模式 → l=16 选择战役 → l=2 战斗 → 结算 → 回 l=16
  */
 import { Renderer } from './Renderer';
@@ -73,7 +73,6 @@ import {
 } from '../data/heroes';
 
 export enum GameState {
-  LOGO_ANIM = 0,        // 原版 l=0: sflogo 开场动画
   TITLE_MENU = 1,       // 原版 l=1: 标题主菜单
   PLAYING = 2,
   PAUSED = 3,
@@ -148,7 +147,7 @@ export class Game {
   private mobileControls: MobileControls;
   private cheatProfile: CheatProfile = createDefaultCheatProfile();
 
-  private state: GameState = GameState.LOGO_ANIM;
+  private state: GameState = GameState.LOADING_SCREEN;
   private currentLevel: number = 0;
   private levelIndex: number = 0;
   private gold: number = INITIAL_GOLD_BY_MODE[0];
@@ -256,9 +255,7 @@ export class Game {
   private cardAa: number = 0;          // aa: 文系卡X
   private cardAb: number = 0;          // ab: 文系卡Y
 
-  // ====== 开场/加载字段 ======
-  private logoFrame: number = 0;       // ak: 原版 LOGO 逻辑帧（1..35，每帧100ms）
-  private logoFrameAccumulator: number = 0; // 60Hz 显示帧换算到原版 10Hz
+  // ====== 加载字段 ======
   private loadingProgress: number = 0; // am→progress: 加载进度 0..1
   private atlasesReady: boolean = false;
   private atlasesPromise: Promise<void> | null = null;
@@ -749,9 +746,6 @@ export class Game {
     const k = e.key;
     let handled = true;
     switch (this.state) {
-      case GameState.LOGO_ANIM:
-        if (k === 'Enter' || k === ' ') this.startLoadingScreen();
-        break;
       case GameState.TITLE_MENU:
         if (k === 'ArrowLeft') this.titleAction('left');
         else if (k === 'ArrowRight') this.titleAction('right');
@@ -846,10 +840,6 @@ export class Game {
 
     // 根据当前状态分发点击处理
     switch (this.state) {
-      case GameState.LOGO_ANIM:
-        // 点击跳过LOGO动画
-        this.startLoadingScreen();
-        return;
       case GameState.LOADING_SCREEN:
         return;
       case GameState.SOUND_PROMPT:
@@ -2257,7 +2247,6 @@ export class Game {
   private isAnimatedState(): boolean {
     return this.state === GameState.LEVEL_INTRO ||
       this.state === GameState.ENDING_ANIM ||
-      this.state === GameState.LOGO_ANIM ||
       this.state === GameState.LOADING_SCREEN ||
       this.state === GameState.TITLE_MENU ||
       this.state === GameState.COUNTRY_SELECT ||
@@ -2279,8 +2268,6 @@ export class Game {
       this.updateLevelIntro(dt);
     } else if (this.state === GameState.ENDING_ANIM) {
       this.updateEndingAnim(dt);
-    } else if (this.state === GameState.LOGO_ANIM) {
-      this.updateLogoAnim(dt);
     } else if (this.state === GameState.LOADING_SCREEN) {
       this.updateLoadingScreen(dt);
     } else if (this.state === GameState.TITLE_MENU) {
@@ -2405,25 +2392,8 @@ export class Game {
     this.saveSystem.save(saveData);
   }
 
-  // ============================================================
-  // 开场 LOGO 动画 (原版 l=0: G() 行7324、f(0,ak) 行19715、y() 行26190)
-  // 原版主循环每100ms推进一次，共35帧；sflogo_2/3/4 各自是4帧图集，不是整行文字。
-  // ============================================================
-  private updateLogoAnim(dt: number): void {
-    this.logoFrameAccumulator += dt;
-    const originalTicks = Math.floor(this.logoFrameAccumulator / 6);
-    if (originalTicks > 0) {
-      this.logoFrameAccumulator -= originalTicks * 6;
-      this.logoFrame += originalTicks;
-    }
-    if (this.logoFrame > 35) {
-      this.startLoadingScreen();
-    }
-  }
-
   /** 进入加载进度屏 (原版 k(): 资源加载 + e() 进度 → l=18) */
   private startLoadingScreen(): void {
-    if (this.state === GameState.LOADING_SCREEN) return;
     this.state = GameState.LOADING_SCREEN;
     this.loadingProgress = 0;
     // 地图图集在此阶段加载 (对应原版 c(int) 加载图集包)
@@ -2449,9 +2419,6 @@ export class Game {
     this.renderer.clear(COLORS.BACKGROUND);
 
     switch (this.state) {
-      case GameState.LOGO_ANIM:
-        this.renderLogoAnim();
-        break;
       case GameState.LOADING_SCREEN:
         this.renderLoadingScreen();
         break;
@@ -2529,60 +2496,6 @@ export class Game {
         ? 'bar'
         : this.towerSystem.isBuildMode ? 'placement' : 'normal',
     });
-  }
-
-  // ============================================================
-  // 开场 LOGO 渲染 (原版 f(0,ak) + y() 的关键素材与时序)
-  // ============================================================
-  private renderLogoAnim(): void {
-    const r = this.renderer;
-    r.setColor(0xFFFFFF);
-    r.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
-
-    const tick = Math.max(0, Math.min(35, this.logoFrame));
-    const logoX = (LOGICAL_WIDTH - 57) >> 1;
-    const logoY = 92;
-
-    // 前5帧的水滴落下对应原版 frame 1 的 sflogo_1 实体。
-    if (tick > 0 && tick < 6) {
-      const drop = this.spr('sflogo', 1);
-      if (drop) r.drawImage(drop, (LOGICAL_WIDTH - drop.width) >> 1, 28 + tick * 11);
-    }
-
-    // sflogo_5 是原版 frame 8 加入的光环；放在主标后方，避免白色区域盖住火焰。
-    if (tick >= 8 && tick <= 18) {
-      const halo = this.spr('sflogo', 5);
-      if (halo) {
-        const ctx = r.virtualContext;
-        ctx.save();
-        ctx.globalAlpha = Math.max(0, 1 - Math.abs(13 - tick) / 6);
-        r.drawImage(halo, (LOGICAL_WIDTH - halo.width) >> 1, logoY - 18);
-        ctx.restore();
-      }
-    }
-
-    // 主标 sflogo_0：228x51 = 4帧57x51，只能裁切单帧。
-    const logo = this.spr('sflogo', 0);
-    if (logo && tick >= 5) {
-      const frame = Math.min(3, Math.max(0, (tick - 5) >> 1));
-      r.drawImageRegion(logo, frame * 57, 0, 57, 51, logoX, logoY, 57, 51);
-    }
-
-    // sflogo_2/3/4 每张68x18由4个17x18帧组成；原版把三个标志横向放置。
-    if (tick >= 8) {
-      const glyphFrame = Math.min(3, (tick - 8) >> 1);
-      for (let i = 0; i < 3; i++) {
-        const img = this.spr('sflogo', 2 + i);
-        if (!img) continue;
-        r.drawImageRegion(img, glyphFrame * 17, 0, 17, 18, 82 + i * 30, 166, 17, 18);
-      }
-    }
-
-    // 原版后段显示 sflogo_7 厂商字标；点击/回车跳过仍保留，但不额外绘制非原版提示。
-    if (tick >= 14) {
-      const wordmark = this.spr('sflogo', 7);
-      if (wordmark) r.drawImage(wordmark, (LOGICAL_WIDTH - wordmark.width) >> 1, 212);
-    }
   }
 
   // ============================================================
@@ -3554,9 +3467,8 @@ export class Game {
     this.audioSystem.setVolume(this.volume);
     this.uiSystem.setAudioSettings(this.soundEnabled, this.volume, this.displayQuality);
 
-    // 地图图集推迟到 LOADING_SCREEN 阶段加载 (对应原版 k() 的 e() 进度)
-    // 启动后先播放 LOGO 动画 (原版 l=0)
-    this.state = GameState.LOGO_ANIM;
+    // 不再播放原版厂商 LOGO 动画，直接加载地图图集。
+    this.startLoadingScreen();
     this.lastTime = performance.now();
     requestAnimationFrame(this.gameLoop);
 

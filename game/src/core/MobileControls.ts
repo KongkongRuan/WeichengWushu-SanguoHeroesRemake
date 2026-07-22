@@ -83,10 +83,11 @@ export class MobileControls {
       this.waveButton.textContent = state.waveReady ? '出兵 ▶' : '波次进行中';
     }
 
-    const contextual = state.context !== 'normal' && !state.paused;
+    // 操作栏直接在画面内二次点击确认；大按钮只保留给需要移动塔影的建造选位。
+    const contextual = state.context === 'placement' && !state.paused;
     if (this.confirmButton) {
       this.confirmButton.hidden = !contextual;
-      this.confirmButton.textContent = state.context === 'placement' ? '建造' : '确认';
+      this.confirmButton.textContent = '建造';
     }
     if (this.cancelButton) this.cancelButton.hidden = !contextual;
 
@@ -96,7 +97,7 @@ export class MobileControls {
         : state.context === 'placement'
           ? '拖动塔影，松手建造 · 也可轻点选位'
           : state.context === 'bar'
-            ? '选择项目后点“确认”，点“取消”返回'
+            ? '点项目选择，再点同一项目确认 · 点栏外取消'
             : '单指拖动地图 · 轻点地块或防御塔';
     }
   }

@@ -11,7 +11,12 @@ import {
 import { TowerSystem, type Tower } from '../src/core/Tower';
 import { EnemyState, EnemySystem, type Enemy } from '../src/core/Enemy';
 import { MapData } from '../src/core/MapData';
-import { BAR_CAT_TOWER, BuildBarSystem, type BuildBarHost } from '../src/core/BuildBar';
+import {
+  BAR_CAT_TECH,
+  BAR_CAT_TOWER,
+  BuildBarSystem,
+  type BuildBarHost,
+} from '../src/core/BuildBar';
 import { AudioSystem } from '../src/core/AudioSystem';
 import { scale2x } from '../src/core/Scale2x';
 import {
@@ -743,6 +748,107 @@ test('升级栏进入关闭动画后忽略第二次确认', () => {
   bar.confirm();
   assert.equal(upgrades, 1);
   assert.equal(tower.level, 2);
+});
+
+test('触屏升级必须主动点同一项目两次，默认高亮不算第一次点击', () => {
+  const tower = createTower(1);
+  let upgrades = 0;
+  const bar = new BuildBarSystem({} as never);
+  bar.setHost({
+    getGold: () => 999,
+    trySpendGold: () => true,
+    getTowerCount: () => 1,
+    enterPlacement() {},
+    upgradeTower: target => { upgrades++; target.level++; return true; },
+    demolishTower() {},
+    loadGate: () => false,
+    releaseGate: () => false,
+    getGateLoadCost: () => null,
+    getUpgradeCost: () => 20,
+    getDemolishRefund: () => 10,
+    renderTowerPreview() {},
+    deselectTower() {},
+    onTechBuilt() {},
+  });
+  bar.setTouchOptimized(true);
+  bar.open(BAR_CAT_TOWER, tower);
+  bar.update(1000);
+
+  assert.equal(bar.handleTap(80, 220), true);
+  assert.equal(upgrades, 0);
+  assert.equal(bar.handleTap(80, 220), true);
+  assert.equal(upgrades, 1);
+  assert.equal(tower.level, 2);
+
+  // 成功后已进入关闭动画，继续点击不会重复扣费升级。
+  bar.handleTap(80, 220);
+  assert.equal(upgrades, 1);
+});
+
+test('触屏塔操作切换项目后重新计次，拆除也必须再次点击', () => {
+  const tower = createTower(1);
+  let upgrades = 0;
+  let demolishes = 0;
+  const bar = new BuildBarSystem({} as never);
+  bar.setHost({
+    getGold: () => 999,
+    trySpendGold: () => true,
+    getTowerCount: () => 1,
+    enterPlacement() {},
+    upgradeTower: () => { upgrades++; return true; },
+    demolishTower: () => { demolishes++; },
+    loadGate: () => false,
+    releaseGate: () => false,
+    getGateLoadCost: () => null,
+    getUpgradeCost: () => 20,
+    getDemolishRefund: () => 10,
+    renderTowerPreview() {},
+    deselectTower() {},
+    onTechBuilt() {},
+  });
+  bar.setTouchOptimized(true);
+  bar.open(BAR_CAT_TOWER, tower);
+  bar.update(1000);
+
+  bar.handleTap(80, 220);  // 第一次点升级
+  bar.handleTap(120, 220); // 切换到拆除，只选中
+  assert.equal(upgrades, 0);
+  assert.equal(demolishes, 0);
+  bar.handleTap(120, 220); // 再点拆除才执行
+  assert.equal(upgrades, 0);
+  assert.equal(demolishes, 1);
+});
+
+test('触屏科技购买第一次只显示详情，第二次点击才扣费建造', () => {
+  let spendCount = 0;
+  let builtIndex = -1;
+  const bar = new BuildBarSystem({} as never);
+  bar.setHost({
+    getGold: () => 999,
+    trySpendGold: () => { spendCount++; return true; },
+    getTowerCount: () => 1,
+    enterPlacement() {},
+    upgradeTower: () => false,
+    demolishTower() {},
+    loadGate: () => false,
+    releaseGate: () => false,
+    getGateLoadCost: () => null,
+    getUpgradeCost: () => null,
+    getDemolishRefund: () => 0,
+    renderTowerPreview() {},
+    deselectTower() {},
+    onTechBuilt: index => { builtIndex = index; },
+  });
+  bar.setTouchOptimized(true);
+  bar.open(BAR_CAT_TECH);
+  bar.update(1000);
+
+  bar.handleTap(40, 220);
+  assert.equal(spendCount, 0);
+  assert.equal(builtIndex, -1);
+  bar.handleTap(40, 220);
+  assert.equal(spendCount, 1);
+  assert.equal(builtIndex, 0);
 });
 
 test('对应开局路线可升到七级并按 y1130 绑定武将', () => {

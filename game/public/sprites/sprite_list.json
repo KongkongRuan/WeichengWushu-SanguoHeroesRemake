@@ -1204,62 +1204,6 @@
     "height": 50
   },
   {
-    "name": "sflogo_0_228x51.png",
-    "prefix": "sflogo",
-    "index": 0,
-    "width": 228,
-    "height": 51
-  },
-  {
-    "name": "sflogo_1_13x20.png",
-    "prefix": "sflogo",
-    "index": 1,
-    "width": 13,
-    "height": 20
-  },
-  {
-    "name": "sflogo_2_68x18.png",
-    "prefix": "sflogo",
-    "index": 2,
-    "width": 68,
-    "height": 18
-  },
-  {
-    "name": "sflogo_3_68x18.png",
-    "prefix": "sflogo",
-    "index": 3,
-    "width": 68,
-    "height": 18
-  },
-  {
-    "name": "sflogo_4_68x18.png",
-    "prefix": "sflogo",
-    "index": 4,
-    "width": 68,
-    "height": 18
-  },
-  {
-    "name": "sflogo_5_89x87.png",
-    "prefix": "sflogo",
-    "index": 5,
-    "width": 89,
-    "height": 87
-  },
-  {
-    "name": "sflogo_6_24x38.png",
-    "prefix": "sflogo",
-    "index": 6,
-    "width": 24,
-    "height": 38
-  },
-  {
-    "name": "sflogo_7_81x9.png",
-    "prefix": "sflogo",
-    "index": 7,
-    "width": 81,
-    "height": 9
-  },
-  {
     "name": "ld_0_48x48.png",
     "prefix": "ld",
     "index": 0,
