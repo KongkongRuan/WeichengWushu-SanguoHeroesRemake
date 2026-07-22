@@ -23,6 +23,7 @@ export class InputSystem {
   private tapCallback: InputCallback | null = null;
   private longPressCallback: InputCallback | null = null;
   private moveCallback: InputCallback | null = null;
+  private dragEndCallback: InputCallback | null = null;
   private releaseCallback: InputCallback | null = null;
   private inputModeCallback: InputModeCallback | null = null;
 
@@ -184,10 +185,12 @@ export class InputSystem {
     );
     const duration = performance.now() - this.pressStartTime;
 
-    if (!this.isDragging && cssDistance < this.tapThresholdCss && duration < this.longPressThreshold) {
+    const wasDragging = this.isDragging;
+    if (!wasDragging && cssDistance < this.tapThresholdCss && duration < this.longPressThreshold) {
       this.tapCallback?.(pos.x, pos.y);
     }
 
+    if (wasDragging) this.dragEndCallback?.(pos.x, pos.y);
     this.releaseCallback?.(pos.x, pos.y);
     this.isDragging = false;
   }
@@ -219,6 +222,11 @@ export class InputSystem {
 
   onMove(callback: InputCallback): void {
     this.moveCallback = callback;
+  }
+
+  /** 仅在真实 pointerup 且发生过拖动时触发；pointercancel 不会触发。 */
+  onDragEnd(callback: InputCallback): void {
+    this.dragEndCallback = callback;
   }
 
   onRelease(callback: InputCallback): void {

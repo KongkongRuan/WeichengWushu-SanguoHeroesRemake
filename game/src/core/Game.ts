@@ -38,6 +38,7 @@ import {
 import {
   LOGICAL_WIDTH,
   LOGICAL_HEIGHT,
+  TILE_SIZE,
   MAP_TOP_BAR_H,
   MAP_VIEW_H,
   LEVEL_MUSIC_K1068,
@@ -53,6 +54,7 @@ import {
   INITIAL_GOLD_BY_MODE,
   BAR_MESSAGES,
   ORIG_TECH_DESC,
+  TOWER_FOOTPRINT_O1098,
 } from '../data/gameData';
 import type { FactionEnding } from '../data/gameData';
 import { FACTION_ENDINGS } from '../data/gameData';
@@ -122,6 +124,9 @@ const SOFTKEY_BACK = 1;
 const SOFTKEY_OK = 2;
 const SOFTKEY_CANCEL = 3;
 const SOFTKEY_MENU = 0;
+/** 拖塔时让塔影位于拇指上方，避免手指遮住可建/不可建提示。 */
+const TOUCH_BUILD_DRAG_LIFT = 24;
+const TOUCH_MAP_TOP = 20;
 
 // 标题菜单项 (back[25] 帧号): 0王者之路/1自由模式/2继续游戏/3设置/4帮助/5关于/6退出
 const MENU_ITEM_COUNT = 7;
@@ -545,7 +550,14 @@ export class Game {
         this.dragLastY = y;
       }
 
-      // 战斗中允许鼠标/单指拖动地图；建造选位时拖动只移动镜头，轻触才移动幻影。
+      // 触屏建造模式优先拖动塔影；桌面端和普通触屏状态继续拖动地图。
+      if (this.moveTouchBuildPreview(x, y)) {
+        this.mapDragLastX = -1;
+        this.mapDragLastY = -1;
+        return;
+      }
+
+      // 战斗中允许鼠标/单指拖动地图。
       // 建造栏打开时也可从未被栏遮挡的上半战场拖图。
       const panBottom = this.buildBar.isOpen ? this.buildBar.topY : MAP_TOP_BAR_H + MAP_VIEW_H;
       const canPanMap = this.state === GameState.PLAYING
@@ -563,6 +575,11 @@ export class Game {
         this.mapDragLastY = -1;
       }
     });
+    this.inputSystem.onDragEnd((x, y) => {
+      if (!this.canDragTouchBuildPreview(x, y)) return;
+      this.moveTouchBuildPreview(x, y);
+      this.tryPlacePendingTower();
+    });
     this.inputSystem.onRelease(() => {
       this.dragLastY = -1;
       this.mapDragLastX = -1;
@@ -573,6 +590,32 @@ export class Game {
     window.addEventListener('keydown', (e) => this.handleKeyDown(e));
 
     this.mobileControls.onAction((action) => this.handleMobileControl(action));
+  }
+
+  private canDragTouchBuildPreview(x: number, y: number): boolean {
+    return this.inputSystem.isTouchOptimized
+      && this.state === GameState.PLAYING
+      && !this.uiSystem.isPaused()
+      && this.towerSystem.isBuildMode
+      && x >= 0
+      && x < LOGICAL_WIDTH
+      && y >= TOUCH_MAP_TOP
+      && y < MAP_TOP_BAR_H + MAP_VIEW_H;
+  }
+
+  /** 把待建塔的中心抬到手指上方并吸附到地图格。 */
+  private moveTouchBuildPreview(x: number, y: number): boolean {
+    if (!this.canDragTouchBuildPreview(x, y)) return false;
+    const footprint = TOWER_FOOTPRINT_O1098[this.towerSystem.buildType] ?? 1;
+    const halfFootprint = footprint * TILE_SIZE / 2;
+    const tile = this.mapData.screenToTile(
+      x - halfFootprint,
+      y - TOUCH_BUILD_DRAG_LIFT - halfFootprint,
+    );
+    this.mapData.setBuildingBox(tile.tx, tile.ty, false);
+    const clamped = this.mapData.getBuildingBoxTile();
+    this.towerSystem.setBuildPosition(clamped.tx, clamped.ty);
+    return true;
   }
 
   private handleMobileControl(action: MobileControlAction): void {

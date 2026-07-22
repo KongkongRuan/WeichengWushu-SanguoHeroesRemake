@@ -94,7 +94,7 @@ export class MobileControls {
       this.hint.textContent = state.paused
         ? '战斗已暂停'
         : state.context === 'placement'
-          ? '轻点地图移动预览，再点“建造”'
+          ? '拖动塔影，松手建造 · 也可轻点选位'
           : state.context === 'bar'
             ? '选择项目后点“确认”，点“取消”返回'
             : '单指拖动地图 · 轻点地块或防御塔';

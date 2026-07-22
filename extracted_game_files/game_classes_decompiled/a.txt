@@ -604,17 +604,7 @@ Access: public final
 导航键上下左右/数字键2、4、6、8：选择菜单/游戏中控制建造单位地点、方向"
     aput-object                    v1, v0, v7
     const-string                   v1, "版权所有：
-上海雪鲤鱼计算机科技有限公司
-网址：
-www.kgame.com.cn
-手机上网：
-wap.kgame.com.cn
-版本：V1.0
-制作人：诸一楠
-美术设计：黄劼
-程序设计：秦竫
-程序协助：程雪平
-测试：王毅，陈思源"
+重制：\nBy阮空空\n网址：\nhttps://kongkongruan.github.io/WeichengWushu-SanguoHeroesRemake/\n版本：V1.0\n
     aput-object                    v1, v0, v8
     const-string                   v1, "基础远程攻击单位"
     aput-object                    v1, v0, v5
