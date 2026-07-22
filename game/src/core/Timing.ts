@@ -27,7 +27,7 @@ export class FixedStepClock {
 
 /** 原版数组统一采用 base + increment * level(0-based)。 */
 export function linearLevelValue(pair: readonly [number, number], level1: number): number {
-  const level0 = Math.max(0, Math.min(5, level1 - 1));
+  const level0 = Math.max(0, level1 - 1);
   return pair[0] + pair[1] * level0;
 }
 

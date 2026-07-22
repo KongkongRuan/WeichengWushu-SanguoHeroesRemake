@@ -272,6 +272,7 @@ export class Game {
     // 科技树初始化 (默认蜀, 国家确认时更新)
     this.techTree.setFaction(Faction.SHU);
     this.towerSystem.setFaction(Faction.SHU);
+    this.enemySystem.setFaction(Faction.SHU);
 
     this.enemySystem.setCallbacks(
       (gold) => {
@@ -1189,6 +1190,7 @@ export class Game {
         // 国家落到实处: 传入 TechTree (蜀0/魏1/吴2 与 Faction 枚举一致)
         this.techTree.setFaction(this.factionX as Faction);
         this.towerSystem.setFaction(this.factionX);
+        this.enemySystem.setFaction(this.factionX);
         this.state = GameState.UPGRADE_SELECT;
         break;
       case 'cancel':
@@ -1539,6 +1541,7 @@ export class Game {
     this.k1029 = this.gameModeT === 1;
     this.techTree.setFaction(this.factionX as Faction);
     this.towerSystem.setFaction(this.factionX);
+    this.enemySystem.setFaction(this.factionX);
     this.towerSystem.setUpgradeMode(this.upgradeAc);
     // 恢复科技树。新存档把字段放在根对象，旧版则可能嵌在 data.tech；
     // 两种格式都兼容，避免读档后升级效果和武将觉醒状态丢失。
@@ -1979,6 +1982,8 @@ export class Game {
     this.playTime += dt * 16.67 / 1000;
     this.totalKills = this.enemySystem.killed;
 
+    // 原版火焰 DOT 每次跳伤时动态读取七级烟火是否仍在场，而不是在点燃时固化倍率。
+    this.enemySystem.setFireDamage(this.towerSystem.getFireDamageOverTime());
     this.enemySystem.update();
     this.towerSystem.update(this.enemySystem.getActiveEnemies(), 0, MAP_TOP_BAR_H);
     this.castleRenderer.update();

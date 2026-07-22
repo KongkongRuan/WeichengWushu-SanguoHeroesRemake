@@ -315,6 +315,7 @@ export class SaveSystem {
       attackFrame: 0,
       volleyFrames: [],
       liquidPattern: 0,
+      liquidIgnited: false,
       buildEffect: 0,
       buildEffectFrame: 0,
       strikeX: t.x * 16,

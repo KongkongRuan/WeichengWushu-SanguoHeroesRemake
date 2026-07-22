@@ -70,6 +70,7 @@ export interface Tower {
   attackFrame: number; // 原版 entity[13]：当前子阶段动作帧
   volleyFrames: number[]; // 原版 C1134：弓手塔/麻痹矢五枚投射物帧
   liquidPattern: number; // 原版 entity[11]：沸水/滚油每次启动时随机的三格液体纹理偏移
+  liquidIgnited: boolean; // 原版 entity[16]：本轮滚油是否已被燃烧敌人引燃
   buildEffect: number;  // 0=无，1=建造成功，2=升级成功（对应原版 entity[4] 的 3/4 状态）
   buildEffectFrame: number; // ui_20 白烟帧（0..8）
   strikeX: number;      // 原版 entity[11]：最近一次攻击的地图像素 X
@@ -385,6 +386,7 @@ export class TowerSystem {
       attackFrame: 0,
       volleyFrames: [],
       liquidPattern: 0,
+      liquidIgnited: false,
       buildEffect: 1,
       buildEffectFrame: 0,
       strikeX: tileX * TILE_SIZE,
@@ -578,13 +580,18 @@ export class TowerSystem {
       }
 
       if (tower.attackState === 1) {
+        // 原版 state=1 每帧先递减 [6] 冷却，再推进攻击动作；两者始终重叠。
+        tower.cooldown--;
         this.advanceAttack(tower, enemies, offsetX, offsetY);
         continue;
       }
 
-      if (tower.cooldown > 0) {
+      if (tower.attackState === 2) {
         tower.cooldown--;
-        tower.attackState = 2;
+        if (tower.cooldown < 0) {
+          tower.cooldown = 0;
+          tower.attackState = 0;
+        }
         continue;
       }
 
@@ -597,22 +604,22 @@ export class TowerSystem {
       }
 
       this.updateStrikeTarget(tower, targetIdx, enemies[targetIdx], offsetX, offsetY);
-      // 原版攻击动画与冷却分开计时；冷却只在 state=2 下降，不能在攻击动画
-      // 播放期间提前消耗，否则投石等长动作会获得近乎双倍的攻击频率。
-      tower.cooldown = Math.max(5, Math.floor(this.effectiveFireRate(tower)));
+      tower.cooldown = Math.max(0, Math.floor(this.effectiveFireRate(tower)));
       this.startAttack(tower);
-    }
-
-    if (this.techTree) {
-      for (const enemy of enemies) {
-        if (this.isActiveEnemy(enemy)) this.techTree.applyDamageOverTime(enemy, 1);
-      }
     }
   }
 
   private isActiveEnemy(enemy: Enemy | undefined): enemy is Enemy {
     return !!enemy
       && enemy.hp > 0
+      && enemy.state !== EnemyState.DYING
+      && enemy.state !== EnemyState.SETTLE
+      && enemy.state !== EnemyState.SIEGE
+      && enemy.state !== EnemyState.CHARGE;
+  }
+
+  private isLivingEnemy(enemy: Enemy | undefined): enemy is Enemy {
+    return !!enemy && enemy.hp > 0
       && enemy.state !== EnemyState.DYING
       && enemy.state !== EnemyState.SETTLE;
   }
@@ -623,32 +630,34 @@ export class TowerSystem {
     const tx = offsetX + tower.x * TILE_SIZE + half;
     const ty = offsetY + tower.y * TILE_SIZE + half;
     const directional = type === 2 || type === 6 || type === 8 || type === 9;
-    const fullLiquidSpread = (type === 8 || type === 9)
-      && this.faction === 0
-      && tower.level - 1 === 6;
+    if ((type === 8 || type === 9) && this.faction === 2 && tower.level === 7) {
+      for (const enemy of enemies) {
+        if (!this.isActiveEnemy(enemy)) continue;
+        if (Math.hypot(offsetX + enemy.x - tx, offsetY + enemy.y - ty) < tower.range) {
+          // 原版 p(type,level) 只刷新 [15]，不会把正在播放的 [22] 减速帧重置为 0。
+          this.setSlow(enemy, 48, false);
+        }
+      }
+    }
     const cells = directional
       ? new Set(this.projectedDeviceCells(
         tower.x,
         tower.y,
         tower.orientation,
-        (type === 8 || type === 9) && !fullLiquidSpread,
+        type === 8 || type === 9,
       ).map(cell => `${cell.tx},${cell.ty}`))
       : null;
-    let bestDistance = directional
-      ? Number.POSITIVE_INFINITY
-      : (tower.range > 0 ? tower.range : half + TILE_SIZE);
-    let best = -1;
     for (let i = 0; i < enemies.length; i++) {
       const enemy = enemies[i];
       if (!this.isActiveEnemy(enemy)) continue;
-      if (cells && !cells.has(`${enemy.x >> 4},${enemy.y >> 4}`)) continue;
-      const distance = Math.hypot(offsetX + enemy.x - tx, offsetY + enemy.y - ty);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        best = i;
+      if (cells) {
+        if (cells.has(`${enemy.x >> 4},${enemy.y >> 4}`)) return i;
+        continue;
       }
+      const distance = Math.hypot(offsetX + enemy.x - tx, offsetY + enemy.y - ty);
+      if (distance < tower.range) return i;
     }
-    return best;
+    return -1;
   }
 
   private updateStrikeTarget(
@@ -677,7 +686,10 @@ export class TowerSystem {
     tower.attackPhase = type === 0 || type === 1 || type === 4 || type === 6 ? 1 : 0;
     tower.attackFrame = 0;
     tower.volleyFrames = type === 0 || type === 4 ? [0, 1, 2, 3, 4] : [];
-    if (type === 8 || type === 9) tower.liquidPattern = (Math.random() * 3) | 0;
+    if (type === 8 || type === 9) {
+      tower.liquidPattern = (Math.random() * 3) | 0;
+      tower.liquidIgnited = false;
+    }
     const extendedLiquid = (type === 8 || type === 9)
       && this.faction === 1
       && tower.level - 1 === 6;
@@ -690,7 +702,7 @@ export class TowerSystem {
     tower.attackFrame = 0;
     tower.volleyFrames = [];
     tower.target = -1;
-    tower.attackState = tower.cooldown > 0 ? 2 : 0;
+    tower.attackState = 2;
   }
 
   private advanceAttack(tower: Tower, enemies: Enemy[], offsetX: number, offsetY: number): void {
@@ -735,6 +747,8 @@ export class TowerSystem {
               break;
             }
             this.updateStrikeTarget(tower, targetIdx, enemies[targetIdx], offsetX, offsetY);
+            // 原版在蓄力结束重新调用 e(int)，会重新写入完整冷却值。
+            tower.cooldown = Math.max(0, Math.floor(this.effectiveFireRate(tower)));
             tower.attackPhase = 1;
             tower.attackFrame = 0;
             const target = enemies[tower.target];
@@ -747,28 +761,31 @@ export class TowerSystem {
         tower.attackFrame++;
         if (type === 7 && tower.attackFrame === 3) {
           const primary = enemies[tower.target];
-          if (this.isActiveEnemy(primary)) {
-            this.damageEnemy(tower, primary);
+          if (this.isLivingEnemy(primary)) {
             for (const enemy of enemies) {
-              if (enemy === primary || !this.isActiveEnemy(enemy)) continue;
-              if (Math.abs(enemy.x - tower.strikeX) < 24
-                && Math.abs(enemy.y - tower.strikeY) < 24) {
-                this.damageEnemy(tower, enemy, 0.25, false);
+              if (enemy === primary || !this.isLivingEnemy(enemy)) continue;
+              if (Math.abs(enemy.x - tower.strikeX) <= 24
+                && Math.abs(enemy.y - tower.strikeY) <= 24) {
+                this.damageEnemy(tower, enemy, 1, true, this.splashTowerDamage(tower));
               }
             }
+            this.damageEnemy(tower, primary);
           }
         }
         if (tower.attackFrame > (type === 7 ? 16 : 6)) this.finishAttack(tower);
         break;
       case 6:
         tower.attackFrame++;
-        // 原版即使在第 6 帧结束动作后仍会再调用一次 h(...) 结算当前道路格。
-        this.damageEnemiesInCells(
-          tower,
-          enemies,
-          this.projectedDeviceCells(tower.x, tower.y, tower.orientation),
-        );
-        if (tower.attackFrame > 5) this.finishAttack(tower);
+        if (tower.attackFrame > 5) {
+          // 第6帧先把 D1162 清回0再调用 h(...)，因此不会产生第6次有效命中。
+          this.finishAttack(tower);
+        } else {
+          this.damageEnemiesInCells(
+            tower,
+            enemies,
+            this.projectedDeviceCells(tower.x, tower.y, tower.orientation),
+          );
+        }
         break;
       case 8:
       case 9: {
@@ -785,6 +802,8 @@ export class TowerSystem {
             tower.attackFrame = 0;
           }
         } else if (tower.attackPhase === 2 && tower.attackFrame > 1) {
+          // 关闭帧先把道路机关层写为1，随后 h(...) 不再结算液体伤害。
+          liquidActive = false;
           this.finishAttack(tower);
         }
         // 开启的前三帧只移动阀门；原版在切到阶段 1、液体真正出现后才调用 h(...) 命中。
@@ -804,36 +823,89 @@ export class TowerSystem {
   }
 
   private towerDamage(tower: Tower): number {
-    let damage = tower.damage;
+    const baseDamage = tower.damage;
+    let damage = baseDamage;
+    // 魏国终阶的“加强攻击伤害”是基础伤害的 1/4，先于君主 +5 结算。
+    if ([13, 14, 17, 18, 19].includes(tower.heroId)) damage += baseDamage >> 2;
     // y1130 的每国0号武将（君主）使所有塔攻击+5，对应原版 a(type,s1102,level)。
     if (this.towers.some(t => t.heroId === 0 || t.heroId === 11 || t.heroId === 22)) damage += 5;
-    if ([8, 13, 14, 17, 18, 19].includes(tower.heroId)) damage *= 1.25;
-    // 吴国投石终阶在50px内给其他塔 +10 攻击（原版 tower[17] 与 n(x,y)）。
+    // 吴国投石终阶以自身七级伤害 90 为半径，给其他塔 +10 攻击。
     if (this.towers.some(t => t !== tower && t.heroId === 25
-      && Math.hypot((t.x - tower.x) * TILE_SIZE, (t.y - tower.y) * TILE_SIZE) <= 50)) damage += 10;
+      && Math.hypot((t.x - tower.x) * TILE_SIZE, (t.y - tower.y) * TILE_SIZE) < 90)) damage += 10;
     return Math.max(0, Math.floor(damage));
+  }
+
+  /** 石灰瓶/投石范围目标使用 level0 >> 2 后重新套 s1102，而不是主伤害乘 1/4。 */
+  private splashTowerDamage(tower: Tower): number {
+    const type = this.spriteType(tower.type);
+    const [base, step] = TOWER_DAMAGE_S1102[type] ?? [0, 0];
+    let damage = base + step * ((Math.max(1, tower.level) - 1) >> 2);
+    if (this.towers.some(t => t.heroId === 0 || t.heroId === 11 || t.heroId === 22)) damage += 5;
+    if (this.towers.some(t => t !== tower && t.heroId === 25
+      && Math.hypot((t.x - tower.x) * TILE_SIZE, (t.y - tower.y) * TILE_SIZE) < 90)) damage += 10;
+    return Math.max(0, damage);
   }
 
   private effectiveFireRate(tower: Tower): number {
     return [24, 29].includes(tower.heroId) ? tower.fireRate - 10 : tower.fireRate;
   }
 
-  private damageEnemy(tower: Tower, enemy: Enemy, scale: number = 1, applyEffect: boolean = true): boolean {
-    const rawDamage = Math.max(1, Math.floor(this.towerDamage(tower) * scale));
+  private ensureEnemyCombatFields(enemy: Enemy): void {
+    enemy.fireTimer ??= 0;
+    enemy.paralyzeTimer ??= 0;
+    enemy.freezeTimer ??= 0;
+    enemy.poisonTimer ??= 0;
+    enemy.slowTimer ??= 0;
+    enemy.fireFrame ??= 0;
+    enemy.paralyzeFrame ??= 0;
+    enemy.freezeFrame ??= 0;
+    enemy.poisonFrame ??= 0;
+    enemy.slowFrame ??= 0;
+    enemy.poisonPower ??= 0;
+    enemy.firePower ??= 8;
+    enemy.hitTimer ??= -1;
+    enemy.lastDamage ??= 0;
+    enemy.impactDir ??= enemy.dir ?? 0;
+  }
+
+  private recordDamage(enemy: Enemy, damage: number): void {
+    const amount = Math.max(0, Math.floor(damage));
+    enemy.hp -= amount;
+    enemy.lastDamage = amount;
+    if (enemy.hitTimer < 0) enemy.hitTimer = 4;
+  }
+
+  private damageEnemy(
+    tower: Tower,
+    enemy: Enemy,
+    scale: number = 1,
+    applyEffect: boolean = true,
+    rawOverride?: number,
+  ): boolean {
+    this.ensureEnemyCombatFields(enemy);
+    let effectApplied = false;
+    if (applyEffect && tower.effectType > 0) {
+      effectApplied = this.applyTowerEffect(enemy, tower);
+    } else if (applyEffect) {
+      effectApplied = this.applyHeroSlow(enemy, tower);
+    }
+    const rawDamage = Math.max(1, Math.floor(rawOverride ?? (this.towerDamage(tower) * scale)));
     // 原版 b1066[3]=aY 是敌人防御力；每次受击至少扣1点。
     const ignoresDefense = [1, 2, 7].includes(tower.heroId);
-    enemy.hp -= Math.max(1, rawDamage - (ignoresDefense ? 0 : Math.max(0, enemy.defense ?? 0)));
-    if (applyEffect && tower.effectType > 0) {
-      return this.applyTowerEffect(enemy, tower);
-    } else if (applyEffect) {
-      return this.applyHeroSlow(enemy, tower);
+    this.recordDamage(enemy,
+      Math.max(1, rawDamage - (ignoresDefense ? 0 : Math.max(0, enemy.defense ?? 0))));
+    // 原版兵种4在未被麻痹/寒冰控制时会立即熄灭火焰并重置架炮周期。
+    if (enemy.unitType === 4 && enemy.paralyzeTimer === 0 && enemy.freezeTimer === 0) {
+      enemy.fireTimer = 0;
+      enemy.fireFrame = 0;
+      enemy.siegeTimer = 0;
     }
-    return false;
+    return effectApplied;
   }
 
   private damageTarget(tower: Tower, enemies: Enemy[]): void {
     const target = enemies[tower.target];
-    if (!this.isActiveEnemy(target)) return;
+    if (!this.isLivingEnemy(target)) return;
     const effectApplied = this.damageEnemy(tower, target);
     if (effectApplied) this.applyHeroAreaEffect(tower, target, enemies);
   }
@@ -842,23 +914,23 @@ export class TowerSystem {
     const effect = tower.heroId === 20 ? 1 : (tower.heroId === 21 ? 2 : 0);
     if (effect === 0) return;
     for (const enemy of enemies) {
-      if (enemy === target || !this.isActiveEnemy(enemy)) continue;
-      if (Math.abs(enemy.x - target.x) >= 24 || Math.abs(enemy.y - target.y) >= 24) continue;
-      enemy.effect = effect;
-      enemy.timer = Math.max(enemy.timer, 48);
+      if (enemy === target || !this.isLivingEnemy(enemy)) continue;
+      if (Math.abs(enemy.x - target.x) > 24 || Math.abs(enemy.y - target.y) > 24) continue;
+      // 魏国范围效果只刷新附近敌人的计时；动画归零和冰火互斥只作用于主目标。
+      if (effect === 1) this.setParalyze(enemy, 48, false);
+      else this.setFreeze(enemy, 48, false, false);
     }
   }
 
   private damageLimeImpact(tower: Tower, enemies: Enemy[]): void {
     const primary = enemies[tower.target];
-    if (this.isActiveEnemy(primary) && primary.bossType !== 8) {
+    if (this.isLivingEnemy(primary) && primary.bossType !== 8) {
       this.damageEnemy(tower, primary);
     }
     for (const enemy of enemies) {
-      if (enemy === primary || !this.isActiveEnemy(enemy) || enemy.bossType === 8) continue;
-      if (Math.abs(enemy.x - tower.strikeX) < 24 && Math.abs(enemy.y - tower.strikeY) < 24) {
-        // 原版 case 1 会对范围内每个敌人调用完整 v(...)：伤害降为 1/4，但中毒照常生效。
-        this.damageEnemy(tower, enemy, 0.25);
+      if (enemy === primary || !this.isLivingEnemy(enemy) || enemy.bossType === 8) continue;
+      if (Math.abs(enemy.x - tower.strikeX) <= 24 && Math.abs(enemy.y - tower.strikeY) <= 24) {
+        this.damageEnemy(tower, enemy, 1, true, this.splashTowerDamage(tower));
       }
     }
   }
@@ -870,8 +942,38 @@ export class TowerSystem {
   ): void {
     const keys = new Set(cells.map(cell => `${cell.tx},${cell.ty}`));
     for (const enemy of enemies) {
-      if (!this.isActiveEnemy(enemy)) continue;
-      if (keys.has(`${enemy.x >> 4},${enemy.y >> 4}`)) this.damageEnemy(tower, enemy);
+      if (!this.isLivingEnemy(enemy) || !keys.has(`${enemy.x >> 4},${enemy.y >> 4}`)) continue;
+      this.ensureEnemyCombatFields(enemy);
+      switch (this.spriteType(tower.type)) {
+        case 2: // 突刺：受击动画结束前不会重复结算同一个敌人
+          if (enemy.hitTimer < 0) this.damageEnemy(tower, enemy);
+          break;
+        case 6: // 擂木：只命中正常行走态，并进入原版 1→2→3 推出/回弹状态
+          if (enemy.state === EnemyState.WALK) {
+            enemy.state = EnemyState.HIT_PUSH;
+            enemy.impactDir = tower.orientation & 3;
+            this.damageEnemy(tower, enemy);
+          }
+          break;
+        case 8: // 沸水先熄灭火焰；4号 Boss 完全免疫沸水伤害
+          enemy.fireTimer = 0;
+          enemy.fireFrame = 0;
+          if (enemy.hitTimer < 0 && enemy.bossType !== 4) this.damageEnemy(tower, enemy, 1, false);
+          break;
+        case 9: // 滚油遇到正在燃烧的敌人后，本轮液体会继续点燃后续目标
+          if (enemy.hitTimer < 0) {
+            if (enemy.fireTimer > 0) {
+              if (tower.attackPhase === 1) tower.attackFrame = Math.max(0, tower.attackFrame - 2);
+              tower.liquidIgnited = true;
+            }
+            // 滚油直接写 [11]=48：不重置火焰帧，也不解除同时存在的寒冰。
+            if (tower.liquidIgnited) this.setFire(enemy, 48, false, false);
+            this.damageEnemy(tower, enemy, 1, false);
+          }
+          break;
+        default:
+          this.damageEnemy(tower, enemy);
+      }
     }
   }
 
@@ -879,13 +981,18 @@ export class TowerSystem {
     const orientation = tower.orientation & 3;
     const spread = TOWER_DIR_SPREAD_M1084[orientation];
     const cells: { tx: number; ty: number }[] = [];
+    // 原版攻击帧先把对应带写为 D1162=5，并在 9/12 帧以 n4>=4
+    // 把完整 3×3 写回 1。这个命中时序与 g(...) 的视觉伸缩时序并不相同。
+    let activeLines: readonly number[];
+    if (phase >= 1 && phase <= 3) activeLines = [0];
+    else if (phase >= 4 && phase <= 7) activeLines = [0, 1];
+    else if (phase === 8) activeLines = [0, 1, 2];
+    else if (phase >= 10 && phase <= 11) activeLines = [2];
+    else activeLines = [];
     for (let i = 0; i < 3; i++) {
       for (let j = 0; j < 3; j++) {
         const line = orientation === 0 || orientation === 2 ? j : i;
-        const active = (line === 0 && phase >= 0 && phase < 7)
-          || (line === 1 && phase > 3 && phase < 10)
-          || (line === 2 && phase > 6 && phase < 12);
-        if (!active) continue;
+        if (!activeLines.includes(line)) continue;
         const px = tower.x * TILE_SIZE + (i << 4) * spread[0] + spread[2];
         const py = tower.y * TILE_SIZE + (j << 4) * spread[1] + spread[3];
         cells.push({ tx: px >> 4, ty: py >> 4 });
@@ -921,60 +1028,119 @@ export class TowerSystem {
    * 应用塔特殊效果到敌人
    */
   private applyTowerEffect(enemy: Enemy, tower: Tower): boolean {
+    this.ensureEnemyCombatFields(enemy);
     switch (tower.effectType) {
       case 1: // 麻痹
-        if (!this.rollStatusEffect(tower)) return false;
-        enemy.effect = 1;
-        enemy.dotScale = 1;
-        enemy.timer = Math.max(enemy.timer, tower.heroId === 9 ? 96 : 48);
+        if (!this.rollStatusEffect(tower, false)) return false;
+        this.setParalyze(enemy, tower.level === 7 && this.faction === 0 ? 96 : 48);
         break;
       case 2: // 冰冻
-        if (!this.rollStatusEffect(tower)) return false;
-        enemy.effect = 2;
-        enemy.dotScale = 1;
-        enemy.timer = Math.max(enemy.timer, tower.heroId === 10 ? 96 : 48);
+        if (!this.rollStatusEffect(tower, true)) return false;
+        this.setFreeze(enemy, tower.level === 7 && this.faction === 0 ? 96 : 48);
         break;
       case 3: // 中毒
+        if (tower.level >= enemy.poisonPower) {
+          enemy.poisonPower = tower.level;
+          enemy.poisonTimer = Math.max(
+            enemy.poisonTimer,
+            tower.level === 7 && this.faction === 2 ? 96 : 48,
+          );
+        }
+        enemy.poisonFrame = 0;
+        this.applyHeroSlow(enemy, tower);
         enemy.effect = 3;
-        enemy.dotScale = 1;
-        enemy.poisonTimer = Math.max(enemy.poisonTimer ?? 0, tower.heroId === 28 ? 96 : 48);
-        enemy.poisonFrame ??= 0;
-        enemy.timer = Math.max(enemy.timer, enemy.poisonTimer);
-        enemy.hp -= tower.level * 2;
+        enemy.timer = Math.max(enemy.timer ?? 0, enemy.poisonTimer);
         break;
       case 4: // 火焰
-        enemy.effect = 4;
-        enemy.dotScale = tower.heroId === 8 ? 2 : 1;
-        enemy.timer = Math.max(enemy.timer, tower.heroId === 30 ? 96 : 48);
-        enemy.hp -= tower.level * 3;
+        // 类型9滚油由道路交互决定是否点燃，普通命中本身不直接附火。
+        if (this.spriteType(tower.type) === 9) return false;
+        this.setFire(enemy, tower.level === 7 && this.faction === 2 ? 96 : 48);
         break;
       case 5: // 减速
-        enemy.effect = 5;
-        enemy.dotScale = 1;
-        enemy.slowScale = Math.min(enemy.slowScale, 0.7);
-        enemy.timer = Math.max(enemy.timer, 48);
+        this.setSlow(enemy, 48);
         break;
       default:
         return this.applyHeroSlow(enemy, tower);
     }
-    this.applyHeroSlow(enemy, tower);
     return true;
   }
 
-  private rollStatusEffect(tower: Tower): boolean {
-    // 原版 A1151={6,6,5,5,4,4,4}，随机值为0..7；吴国终阶将阈值降为0。
-    const threshold = tower.heroId === 31 || tower.heroId === 32
+  private rollStatusEffect(tower: Tower, freeze: boolean): boolean {
+    // 麻痹使用 A1151 等级阈值；寒冰在非吴国固定阈值3。吴国两者均降为0（7/8概率）。
+    const threshold = this.faction === 2
       ? 0
-      : ([6, 6, 5, 5, 4, 4, 4][Math.max(0, Math.min(6, tower.level - 1))] ?? 4);
+      : freeze
+        ? 3
+        : ([6, 6, 5, 5, 4, 4, 4][Math.max(0, Math.min(6, tower.level - 1))] ?? 4);
     return ((Math.random() * 8) | 0) > threshold;
   }
 
   private applyHeroSlow(enemy: Enemy, tower: Tower): boolean {
-    if (![3, 6, 26, 27].includes(tower.heroId)) return false;
-    enemy.slowScale = Math.min(enemy.slowScale, 0.5);
-    enemy.timer = Math.max(enemy.timer, 48);
-    if (enemy.effect === 0) enemy.effect = 5;
+    if (![3, 6].includes(tower.heroId) || enemy.bossType === 7) return false;
+    this.setSlow(enemy, 48);
     return true;
+  }
+
+  private setParalyze(enemy: Enemy, duration: number, resetFrame: boolean = true): void {
+    this.ensureEnemyCombatFields(enemy);
+    enemy.paralyzeTimer = Math.max(enemy.paralyzeTimer, duration);
+    if (resetFrame) enemy.paralyzeFrame = 0;
+    enemy.effect = 1;
+    enemy.timer = Math.max(enemy.timer ?? 0, enemy.paralyzeTimer);
+  }
+
+  private setFreeze(
+    enemy: Enemy,
+    duration: number,
+    resetFrame: boolean = true,
+    extinguishFire: boolean = true,
+  ): void {
+    this.ensureEnemyCombatFields(enemy);
+    enemy.freezeTimer = Math.max(enemy.freezeTimer, duration);
+    if (resetFrame) enemy.freezeFrame = 0;
+    // 原版只有寒冰塔的主目标会立即熄灭火焰；魏国范围冰冻只写计时。
+    if (extinguishFire) {
+      enemy.fireTimer = 0;
+      enemy.fireFrame = 0;
+    }
+    enemy.effect = 2;
+    enemy.timer = Math.max(enemy.timer ?? 0, enemy.freezeTimer);
+  }
+
+  private currentFirePower(): number {
+    return this.getFireDamageOverTime();
+  }
+
+  /** 原版 z(int) 每次火焰跳伤都读取 f1106[3]，出售七级烟火后立即恢复为 8。 */
+  getFireDamageOverTime(): number {
+    return this.towers.some(tower => tower.heroId === 8) ? 16 : 8;
+  }
+
+  private setFire(
+    enemy: Enemy,
+    duration: number,
+    resetFrame: boolean = true,
+    clearFreeze: boolean = true,
+  ): void {
+    this.ensureEnemyCombatFields(enemy);
+    enemy.fireTimer = Math.max(enemy.fireTimer, duration);
+    if (resetFrame) enemy.fireFrame = 0;
+    enemy.firePower = this.currentFirePower();
+    // 原版只有烟火主命中会解除寒冰；滚油直接刷新火焰计时，可与寒冰共存。
+    if (clearFreeze) {
+      enemy.freezeTimer = 0;
+      enemy.freezeFrame = 0;
+    }
+    enemy.effect = 4;
+    enemy.timer = Math.max(enemy.timer ?? 0, enemy.fireTimer);
+  }
+
+  private setSlow(enemy: Enemy, duration: number, resetFrame: boolean = true): void {
+    this.ensureEnemyCombatFields(enemy);
+    enemy.slowTimer = Math.max(enemy.slowTimer, duration);
+    if (resetFrame) enemy.slowFrame = 0;
+    if ((enemy.effect ?? 0) === 0) enemy.effect = 5;
+    enemy.timer = Math.max(enemy.timer ?? 0, enemy.slowTimer);
   }
 
   /**
@@ -1310,6 +1476,7 @@ export class TowerSystem {
       hp: 1, maxHp: 1, debuffTimer: 0,
       frame: 0, orientation: 0, attackAnim: 0,
       attackState: 0, attackPhase: 0, attackFrame: 0, volleyFrames: [], liquidPattern: 0,
+      liquidIgnited: false,
       buildEffect: 0, buildEffectFrame: 0,
       strikeX: 0, strikeY: 0,
       gateLoaded: false, gateState: 0, gateTimer: 0,
@@ -1374,9 +1541,8 @@ export class TowerSystem {
         // 原版 ai() 还会在道路格上绘制 bu_31/bu_35；此前完全漏掉了这层，
         // 导致沸水和滚油只有阀门动作、看不到真正流出的液体。
         liquidDrawn = this.renderLiquidAttackSpread(tower, px, py) || liquidDrawn;
-        // bu_39 是滚油命中后与路径状态联动的附加油渍，不属于待机层；
-        // 当前路径效果模型尚未保存 entity[16]，仅在主要喷洒阶段叠加，避免关闭帧常驻。
-        if (type === 9 && tower.attackPhase === 1) {
+        // 原版只有本轮滚油遇到燃烧敌人、entity[16] 置 1 后才绘制 bu_39 引燃层。
+        if (type === 9 && tower.attackPhase !== 0 && tower.liquidIgnited) {
           liquidDrawn = this.renderOilSpread(tower, px, py) || liquidDrawn;
         }
         return liquidDrawn;
@@ -2087,6 +2253,7 @@ export class TowerSystem {
       heroId: -1, effectType: 0, hp: 0, maxHp: 0, debuffTimer: 0,
       frame: 0, orientation: this.resolvePathFacing(this.buildX, this.buildY, type), attackAnim: 0,
       attackState: 0, attackPhase: 0, attackFrame: 0, volleyFrames: [], liquidPattern: 0,
+      liquidIgnited: false,
       buildEffect: 0, buildEffectFrame: 0,
       strikeX: this.buildX * TILE_SIZE, strikeY: this.buildY * TILE_SIZE,
       gateLoaded: false, gateState: 0, gateTimer: 0,
@@ -2361,6 +2528,7 @@ export class TowerSystem {
         attackFrame: 0,
         volleyFrames: [],
         liquidPattern: 0,
+        liquidIgnited: false,
         buildEffect: 0,
         buildEffectFrame: 0,
         strikeX: (td.x ?? 0) * TILE_SIZE,
@@ -2399,11 +2567,10 @@ export class TowerSystem {
       const defenseStrength = this.faction === 1 && tower.level - 1 === 6 ? 46 : 16;
       for (const cell of cells) this.mapData.setPathDefense(cell.tx, cell.ty, defenseStrength);
 
-      const damage = Math.max(0, Math.floor(tower.damage));
       for (const enemy of enemies) {
-        if (enemy.state === EnemyState.DYING || enemy.state === EnemyState.SETTLE) continue;
+        if (!this.isLivingEnemy(enemy) || enemy.state === EnemyState.SIEGE) continue;
         if (!cellKeys.has(`${enemy.x >> 4},${enemy.y >> 4}`)) continue;
-        enemy.hp -= Math.max(1, damage - Math.max(0, enemy.defense ?? 0));
+        this.damageEnemy(tower, enemy);
       }
     } else if (tower.gateState === 2) {
       tower.gateTimer++;

@@ -48,7 +48,9 @@ import {
 // 敌人状态 (对应原版 b1066[n][8], var45[var3=8])
 export enum EnemyState {
   WALK = 0,     // 行走
-  // 1/2/3: 原版绕行中间态由 BLOCKED+退回格中心的等价流程承接
+  HIT_PUSH = 1, // 擂木命中后的推出阶段
+  HIT_BACK = 2, // 擂木命中后的回弹阶段
+  HIT_RECOVER = 3, // 擂木命中后的恢复阶段
   SIEGE = 4,    // 架炮 (仅兵种4, variant 8/9; 移动照常, 渲染换攻击动画)
   DYING = 5,    // 死亡动画 (9逻辑帧)
   SETTLE = 6,   // 死亡结算 (发金币并移除)
@@ -84,8 +86,21 @@ export interface Enemy {
   effect: number;      // 塔特殊效果 (H5 Tower/TechTree 兼容: 0无 1麻痹 2冰冻 3中毒 4火焰 5减速)
   timer: number;       // 塔效果计时 (H5兼容)
   dotScale: number;    // 持续伤害倍率（终阶火焰英雄为2，其余为1）
-  poisonTimer: number; // [14] 石灰瓶中毒计时；原版与其他状态计时彼此独立
-  poisonFrame: number; // [21] 中毒标记动画帧 (0-2)
+  fireTimer: number;     // [11] 火焰计时
+  paralyzeTimer: number; // [12] 麻痹计时
+  freezeTimer: number;   // [13] 寒冰计时
+  poisonTimer: number;   // [14] 中毒计时
+  slowTimer: number;     // [15] 减速计时
+  fireFrame: number;     // [18] 火焰动画帧 (0-5)
+  paralyzeFrame: number; // [19] 麻痹动画帧 (0-2)
+  freezeFrame: number;   // [20] 寒冰动画帧 (0-3)
+  poisonFrame: number;   // [21] 中毒动画帧 (0-2)
+  slowFrame: number;     // [22] 减速动画帧 (0-2)
+  poisonPower: number;   // [23] 中毒每次伤害，等于命中过它的最高石灰瓶等级
+  firePower: number;     // 火焰每 8 帧伤害（普通 8、蜀国终阶烟火 16）
+  hitTimer: number;      // [10] 受击动画计时，-1 表示空闲
+  lastDamage: number;    // [16] 最近一次显示的伤害
+  impactDir: number;     // [9] 擂木推出方向
 }
 
 export class EnemySystem {
@@ -111,7 +126,8 @@ export class EnemySystem {
   private bb: number = 0;      // 名将头像/名单索引 (z1131查得)
   private o1077: boolean = false; // 名将波标志
   private p1078: boolean = false; // 开下一波标志 (原版按'#')
-  private faction: number = 0; // X 国家 (0蜀1魏2吴, 暂固定0)
+  private faction: number = 0; // X 国家 (0蜀1魏2吴)
+  private fireDamage: number = 8; // 原版 z(int)：由蜀国七级烟火是否仍在场动态决定
   private detourClockwise: boolean = false; // 对应原版 q1082，绕行方向交替
   private visualFrame: number = 0;
 
@@ -146,6 +162,15 @@ export class EnemySystem {
     this.aN = level <= 8 ? level : level % 9;
     this.goldReward = 5;
     this.levelStarted = false;
+  }
+
+  /** 原版 X：阵营会影响敌将波次偏移，必须与塔和科技树使用同一选择。 */
+  setFaction(faction: number): void {
+    this.faction = Math.max(0, Math.min(2, faction | 0));
+  }
+
+  setFireDamage(damage: number): void {
+    this.fireDamage = Math.max(0, Math.floor(damage));
   }
 
   /**
@@ -304,8 +329,21 @@ export class EnemySystem {
       effect: 0,
       timer: 0,
       dotScale: 1,
+      fireTimer: 0,
+      paralyzeTimer: 0,
+      freezeTimer: 0,
       poisonTimer: 0,
+      slowTimer: 0,
+      fireFrame: 0,
+      paralyzeFrame: 0,
+      freezeFrame: 0,
       poisonFrame: 0,
+      slowFrame: 0,
+      poisonPower: 0,
+      firePower: 8,
+      hitTimer: -1,
+      lastDamage: 0,
+      impactDir: 0,
     };
     // 出生方向合法性兜底 (路径格 v<8 才有方向0-3)
     if (enemy.dir < 0 || enemy.dir > 3) enemy.dir = 2;
@@ -414,18 +452,150 @@ export class EnemySystem {
     }
   }
 
+  /** 旧存档和测试对象缺少新增字段时，按原版出生值补齐。 */
+  private ensureCombatFields(enemy: Enemy): void {
+    enemy.fireTimer ??= 0;
+    enemy.paralyzeTimer ??= 0;
+    enemy.freezeTimer ??= 0;
+    enemy.poisonTimer ??= 0;
+    enemy.slowTimer ??= 0;
+    enemy.fireFrame ??= 0;
+    enemy.paralyzeFrame ??= 0;
+    enemy.freezeFrame ??= 0;
+    enemy.poisonFrame ??= 0;
+    enemy.slowFrame ??= 0;
+    enemy.poisonPower ??= 0;
+    enemy.firePower ??= 8;
+    enemy.hitTimer ??= -1;
+    enemy.lastDamage ??= 0;
+    enemy.impactDir ??= enemy.dir;
+    enemy.speed ??= enemy.baseSpeed ?? 1;
+    enemy.baseSpeed ??= enemy.speed;
+  }
+
+  private recordStatusDamage(enemy: Enemy, amount: number): void {
+    const damage = Math.max(0, Math.floor(amount));
+    if (damage <= 0) return;
+    enemy.hp -= damage;
+    enemy.lastDamage = damage;
+    if (enemy.hitTimer < 0) enemy.hitTimer = 4;
+  }
+
+  /**
+   * 原版 z(int)：五种异常拥有彼此独立的计时、动画和伤害节拍。
+   * 返回值表示本帧是否因麻痹/寒冰而完全停止移动。
+   */
+  private updateStatusEffects(enemy: Enemy): boolean {
+    let immobilized = false;
+    const aligned = (enemy.x & 7) === 0 && (enemy.y & 7) === 0;
+
+    if (enemy.paralyzeTimer > 0) {
+      enemy.paralyzeFrame = (enemy.paralyzeFrame + 1) % 3;
+      immobilized = true;
+      enemy.paralyzeTimer--;
+    }
+
+    if (enemy.slowTimer > 0) {
+      enemy.slowFrame = (enemy.slowFrame + 1) % 3;
+      if (enemy.speed > 1 && aligned) enemy.speed = enemy.baseSpeed >> 1;
+      enemy.slowTimer--;
+    } else if (enemy.freezeTimer === 0 && aligned) {
+      enemy.speed = enemy.baseSpeed;
+    }
+
+    if (enemy.poisonTimer > 0) {
+      enemy.poisonFrame = (enemy.poisonFrame + 1) % 3;
+      if ((enemy.poisonTimer & 7) === 0) {
+        this.recordStatusDamage(enemy, enemy.poisonPower);
+      }
+      enemy.poisonTimer--;
+    } else {
+      enemy.poisonTimer = 0;
+      enemy.poisonPower = 0;
+    }
+
+    if (enemy.fireTimer > 0) {
+      if ((enemy.fireTimer & 7) === 0) {
+        enemy.firePower = this.fireDamage;
+        this.recordStatusDamage(enemy, this.fireDamage);
+      }
+      enemy.fireFrame = (enemy.fireFrame + 1) % 6;
+      enemy.fireTimer--;
+    }
+
+    // 原版有连续两段 [13] 更新，因此寒冰每逻辑帧递减两次，并在结束前造成 10 点碎冰伤害。
+    if (enemy.freezeTimer > 0) {
+      immobilized = true;
+      if (enemy.freezeTimer >= 44) {
+        if (enemy.freezeFrame < 3) enemy.freezeFrame++;
+      } else if (enemy.freezeTimer <= 4) {
+        if (enemy.freezeTimer === 4) this.recordStatusDamage(enemy, 10);
+        if (enemy.freezeFrame > 0) enemy.freezeFrame--;
+      }
+      enemy.freezeTimer--;
+    }
+    if (enemy.freezeTimer > 0) {
+      if (enemy.freezeTimer >= 45) {
+        if (enemy.freezeFrame < 2) enemy.freezeFrame++;
+      } else if (enemy.freezeTimer <= 3 && enemy.freezeFrame > 0) {
+        enemy.freezeFrame--;
+      }
+      if (enemy.speed > 1 && aligned) enemy.speed = 1;
+      enemy.freezeTimer--;
+    } else if (enemy.slowTimer === 0 && aligned) {
+      enemy.freezeTimer = 0;
+      enemy.speed = enemy.baseSpeed;
+    }
+
+    // 兼容仍读取旧 H5 effect/timer 字段的 UI/存档，但战斗逻辑不再依赖这两个共享字段。
+    if (enemy.paralyzeTimer > 0) enemy.effect = 1;
+    else if (enemy.freezeTimer > 0) enemy.effect = 2;
+    else if (enemy.poisonTimer > 0) enemy.effect = 3;
+    else if (enemy.fireTimer > 0) enemy.effect = 4;
+    else if (enemy.slowTimer > 0) enemy.effect = 5;
+    else enemy.effect = 0;
+    enemy.timer = Math.max(
+      enemy.fireTimer,
+      enemy.paralyzeTimer,
+      enemy.freezeTimer,
+      enemy.poisonTimer,
+      enemy.slowTimer,
+    );
+    enemy.slowScale = enemy.baseSpeed > 0 ? enemy.speed / enemy.baseSpeed : 1;
+    enemy.dotScale = enemy.firePower >= 16 ? 2 : 1;
+    return immobilized;
+  }
+
+  private tickHitTimer(enemy: Enemy): void {
+    if (enemy.hitTimer < 0) return;
+    enemy.hitTimer--;
+    if (enemy.hitTimer < 0) enemy.hitTimer = -1;
+  }
+
+  private startDeathIfEligible(enemy: Enemy): void {
+    if (enemy.hp > 0
+        || enemy.state === EnemyState.DYING
+        || enemy.state === EnemyState.SETTLE
+        || enemy.state === EnemyState.HIT_BACK
+        || enemy.state === EnemyState.HIT_RECOVER) return;
+    enemy.state = EnemyState.DYING;
+    enemy.dieTimer = 0;
+  }
+
   /**
    * 逐敌人状态机 (对应原版 X() 的 switch(var45[8]) + label122 + label117)
    */
   private updateEnemy(enemy: Enemy, index: number): void {
-    // 死亡检测 (对应原版 i(int,int) 行22068: hp<=0 且状态非5/3/2 → 置死动画)
-    // H5无1/2/3绕行态, 故对 WALK/SIEGE/BLOCKED 生效; CHARGE 与原版一致不检测
-    if (enemy.hp <= 0 &&
-        enemy.state !== EnemyState.DYING &&
-        enemy.state !== EnemyState.SETTLE &&
-        enemy.state !== EnemyState.CHARGE) {
-      enemy.state = EnemyState.DYING;
-      enemy.dieTimer = 0;
+    this.ensureCombatFields(enemy);
+    const immobilized = this.updateStatusEffects(enemy);
+    this.tickHitTimer(enemy);
+
+    // 死亡检测 (对应原版 i(int,int)：状态2/3在完成受击位移前不切死亡动画)
+    if (immobilized && enemy.state !== EnemyState.DYING && enemy.state !== EnemyState.SETTLE) {
+      this.updateDirection(enemy);
+      enemy.state = EnemyState.WALK;
+      this.startDeathIfEligible(enemy);
+      return;
     }
 
     switch (enemy.state) {
@@ -446,11 +616,48 @@ export class EnemySystem {
         return;
       }
 
+      case EnemyState.HIT_PUSH: { // case 1: 擂木推出
+        const impactDir = enemy.impactDir & 3;
+        const sameAxis = (impactDir & 1) === (enemy.dir & 1);
+        const distance = sameAxis ? 8 : 16;
+        const tx = enemy.x + DIRECTIONS_K1081[impactDir][0] * distance;
+        const ty = enemy.y + DIRECTIONS_K1081[impactDir][1] * distance;
+        if (this.mapData.isPathFreeAtPixel(tx, ty)
+            && this.mapData.getPathDirAtPixel(tx, ty) === enemy.dir) {
+          this.mapData.occupyTileAtPixel(tx, ty);
+          this.mapData.releaseTileAtPixel(enemy.x, enemy.y);
+          enemy.x = tx;
+          enemy.y = ty;
+          enemy.state = EnemyState.BLOCKED;
+        } else {
+          enemy.x += DIRECTIONS_K1081[impactDir][0] * 4;
+          enemy.y += DIRECTIONS_K1081[impactDir][1] * 4;
+          enemy.state = EnemyState.HIT_BACK;
+        }
+        this.startDeathIfEligible(enemy);
+        return;
+      }
+
+      case EnemyState.HIT_BACK: { // case 2: 回弹 4px
+        const reverse = (enemy.impactDir + 2) & 3;
+        enemy.x += DIRECTIONS_K1081[reverse][0] * 4;
+        enemy.y += DIRECTIONS_K1081[reverse][1] * 4;
+        enemy.state = EnemyState.HIT_RECOVER;
+        this.startDeathIfEligible(enemy);
+        return;
+      }
+
+      case EnemyState.HIT_RECOVER: // case 3: 恢复行走
+        enemy.state = EnemyState.WALK;
+        this.startDeathIfEligible(enemy);
+        return;
+
       case EnemyState.BLOCKED: // case 7: 被堵
         this.updateDirection(enemy);
         // 原版 state 7 只暂停一个逻辑帧；位置不会被强行拉回格中心。
         // 拉回中心会把已经贴近墙边的单位推回上一格，随后反复撞墙。
         enemy.state = EnemyState.WALK;
+        this.startDeathIfEligible(enemy);
         return;
 
       case EnemyState.CHARGE: // case 8: 冲城
@@ -478,25 +685,6 @@ export class EnemySystem {
         break;
     }
 
-    // 原版 z(int)：中毒使用独立的 [14] 计时和 [21] 三帧动画，不能被麻痹/冰冻等状态覆盖。
-    if (enemy.poisonTimer > 0) {
-      enemy.poisonFrame = (enemy.poisonFrame + 1) % 3;
-      enemy.poisonTimer--;
-    } else {
-      enemy.poisonTimer = 0;
-      enemy.poisonFrame = 0;
-    }
-
-    // 状态效果跟随原版 100ms 逻辑帧计时。麻痹停止移动，冰冻/减速仅改变本帧速度。
-    const effectActive = enemy.timer > 0;
-    if (effectActive) enemy.timer--;
-    else {
-      enemy.effect = 0;
-      enemy.slowScale = 1;
-      enemy.dotScale = 1;
-    }
-    if (effectActive && enemy.effect === 1) return;
-
     // label122: 兵种4 (variant 8/9) 架炮周期: 行走时 siegeTimer--, 到0进入架炮
     if (enemy.variant === 8 || enemy.variant === 9) {
       if (enemy.state === EnemyState.WALK) {
@@ -510,9 +698,7 @@ export class EnemySystem {
 
     // label117: 移动
     this.updateDirection(enemy); // o()
-    const speedScale = effectActive && enemy.effect === 2 ? 0.5
-      : (effectActive && enemy.slowScale < 1 ? enemy.slowScale : 1);
-    const moveSpeed = enemy.baseSpeed * speedScale;
+    const moveSpeed = enemy.speed;
     const nx = enemy.x + DIRECTIONS_K1081[enemy.dir][0] * moveSpeed;
     const ny = enemy.y + DIRECTIONS_K1081[enemy.dir][1] * moveSpeed;
     this.advanceAnim(enemy); // n()
@@ -528,6 +714,7 @@ export class EnemySystem {
         } else {
           enemy.state = EnemyState.BLOCKED;
         }
+        this.startDeathIfEligible(enemy);
         return; // 位置不更新 (原版 break label117)
       }
       // 占用新格 / 释放旧格 (a(int,int,boolean) 行11058)
@@ -537,6 +724,8 @@ export class EnemySystem {
 
     enemy.x = nx;
     enemy.y = ny;
+    // 原版 i(int,int) 位于各移动状态处理末尾，致命一击仍会完成本帧方向/位移。
+    this.startDeathIfEligible(enemy);
   }
 
   /**
@@ -587,15 +776,19 @@ export class EnemySystem {
           continue; // state 6 不绘制 (原版行9668)
         case EnemyState.DYING:
           this.renderEffectFrame(enemy, px, py, enemy.dieTimer);
+          // 原版 Y() 的第二遍仍会为死亡态绘制 q(int)，致命一击不能吞掉受击粒子/数字。
+          this.renderHitEffect(enemy, px, py);
           continue;
         case EnemyState.CHARGE:
           this.renderEffectFrame(enemy, px, py, enemy.chargeTimer);
+          this.renderHitEffect(enemy, px, py);
           continue;
         case EnemyState.SIEGE:
           this.renderSiege(enemy, px, py);
           this.renderEliteMarker(enemy, px, py);
           this.renderHealthBar(enemy, px, py);
           this.renderStatusEffect(enemy, px, py);
+          this.renderHitEffect(enemy, px, py);
           continue;
         default:
           break;
@@ -604,6 +797,7 @@ export class EnemySystem {
       this.renderWalking(enemy, px, py);
       this.renderHealthBar(enemy, px, py);
       this.renderStatusEffect(enemy, px, py);
+      this.renderHitEffect(enemy, px, py);
     }
 
     vctx.restore();
@@ -738,18 +932,89 @@ export class EnemySystem {
     this.renderer.fillRect(px - 8, py - 18, barW * hpRatio, barH);
   }
 
-  /** 原版 r(int)：[14] 中毒期间用 /h_4 的三帧 14x11 标记覆盖在敌兵上方。 */
+  /** 原版 r(int)：冻结、减速、中毒、火焰、麻痹按固定顺序叠加绘制。 */
   private renderStatusEffect(enemy: Enemy, px: number, py: number): void {
-    if (enemy.poisonTimer <= 0) return;
-    const img = this.spriteLoader?.getByPrefix('h', 4) ?? null;
-    if (img) {
-      const frame = enemy.poisonFrame % 3;
-      this.renderer.drawImageRegion(img, frame * 14, 0, 14, 11,
-        Math.floor(px - 8), Math.floor(py - 16), 14, 11);
+    this.ensureCombatFields(enemy);
+    const drawStrip = (
+      active: boolean,
+      sprite: number,
+      frame: number,
+      frameW: number,
+      frameH: number,
+      dx: number,
+      dy: number,
+      fallback: number,
+    ) => {
+      if (!active) return;
+      const img = this.spriteLoader?.getByPrefix('h', sprite) ?? null;
+      if (img) {
+        this.renderer.drawImageRegion(img, frame * frameW, 0, frameW, frameH,
+          Math.floor(px + dx), Math.floor(py + dy), frameW, frameH);
+      } else {
+        this.renderer.setColor(fallback);
+        this.renderer.fillRect(px + dx, py + dy, frameW, frameH);
+      }
+    };
+
+    drawStrip(enemy.freezeTimer > 0, 5, Math.max(0, enemy.freezeFrame - 1) % 3,
+      21, 26, -8, -16, 0x80E8FF);
+    drawStrip(enemy.slowTimer > 0, 7, enemy.slowFrame % 3,
+      14, 11, -8, -16, 0x70A0FF);
+    drawStrip(enemy.poisonTimer > 0, 4, enemy.poisonFrame % 3,
+      14, 11, -8, -16, 0x20E090);
+
+    if (enemy.fireTimer > 0) {
+      const fireRects = [
+        [0, 0, 17, 6, 0, 17],
+        [0, 6, 17, 7, 0, 16],
+        [0, 13, 17, 10, 0, 12],
+        [0, 23, 17, 12, 0, 5],
+        [0, 34, 17, 9, 0, 0],
+        [0, 43, 17, 7, 0, 0],
+      ] as const;
+      const [sx, sy, sw, sh, ox, oy] = fireRects[enemy.fireFrame % fireRects.length];
+      const img = this.spriteLoader?.getByPrefix('h', 6) ?? null;
+      if (img) {
+        this.renderer.drawImageRegion(img, sx, sy, sw, sh,
+          Math.floor(px - 8 + ox), Math.floor(py - 16 + oy), sw, sh);
+      } else {
+        this.renderer.setColor(0xFF7020);
+        this.renderer.fillRect(px - 8 + ox, py - 16 + oy, sw, sh);
+      }
+    }
+
+    drawStrip(enemy.paralyzeTimer > 0, 3, enemy.paralyzeFrame % 3,
+      28, 23, -16, -16, 0xFFE040);
+  }
+
+  /** 原版 q(int)：五帧受击粒子与最近一次伤害数字。 */
+  private renderHitEffect(enemy: Enemy, px: number, py: number): void {
+    if (enemy.hitTimer < 0) return;
+    if (enemy.hitTimer === 4) {
+      const burst = this.spriteLoader?.getByPrefix('bu', 22) ?? null;
+      if (burst) {
+        this.renderer.drawImageRegion(burst, 16, 0, 16, 16,
+          Math.floor(px - 8), Math.floor(py - 8), 16, 16);
+      }
       return;
     }
-    this.renderer.setColor(0x20E090);
-    this.renderer.fillRect(px - 8, py - 16, 14, 11);
+
+    const particles = [
+      [[1, 2], [9, 4], [17, 1], [1, 14], [12, 13], [19, 13], [8, 19]],
+      [[0, 1], [8, 3], [18, -1], [0, 14], [13, 15], [20, 13], [8, 20]],
+      [[-1, 0], [8, 2], [18, -1], [-1, 15], [13, 15], [21, 14], [8, 21]],
+      [[-1, 0], [8, 2], [18, -1], [-1, 15], [13, 15], [21, 14], [8, 21]],
+    ] as const;
+    const phase = Math.max(0, Math.min(3, 3 - enemy.hitTimer));
+    const img = this.spriteLoader?.getByPrefix('h', 0) ?? null;
+    if (img) {
+      for (const [ox, oy] of particles[phase]) {
+        this.renderer.drawImageRegion(img, phase * 5, 0, 5, 5,
+          Math.floor(px + ox - 16), Math.floor(py + oy - 16), 5, 5);
+      }
+    }
+    this.renderer.drawText(String(enemy.lastDamage), Math.floor(px - 4),
+      Math.floor(py - 16 + enemy.hitTimer * 2), 0xFCFFCD, 8);
   }
 
   // ============================================================
