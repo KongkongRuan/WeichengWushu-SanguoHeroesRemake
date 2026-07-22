@@ -28,6 +28,8 @@ import {
 } from './CheatProgress';
 import type { CheatAction, CheatProfile } from './CheatProgress';
 import { BuildBarSystem, BAR_CAT_BUILD, BAR_CAT_TECH, BAR_CAT_TOWER } from './BuildBar';
+import { MobileControls } from './MobileControls';
+import type { MobileControlAction } from './MobileControls';
 import {
   FixedStepClock,
   LOGIC_STEP_NORMALIZED,
@@ -138,6 +140,7 @@ export class Game {
   private techTree: TechTreeSystem;
   private saveSystem: SaveSystem;
   private buildBar: BuildBarSystem; // 原版底部建造栏/科技面板 (任务A/B)
+  private mobileControls: MobileControls;
   private cheatProfile: CheatProfile = createDefaultCheatProfile();
 
   private state: GameState = GameState.LOGO_ANIM;
@@ -296,11 +299,14 @@ export class Game {
       }
     }
     this.buildBar = new BuildBarSystem(this.renderer);
+    this.mobileControls = new MobileControls();
 
     this.setupCallbacks();
     this.setupInput();
     this.resize();
     window.addEventListener('resize', () => this.resize());
+    window.visualViewport?.addEventListener('resize', () => this.resize());
+    screen.orientation?.addEventListener('change', () => this.resize());
   }
 
   /**
@@ -524,6 +530,11 @@ export class Game {
    * 设置输入
    */
   private setupInput(): void {
+    this.inputSystem.onInputModeChange((touchOptimized) => {
+      this.uiSystem.setTouchOptimized(touchOptimized);
+      this.buildBar.setTouchOptimized(touchOptimized);
+      this.resize();
+    });
     this.inputSystem.onTap((x, y) => this.handleTap(x, y));
     this.inputSystem.onMove((x, y) => {
       // 文本页 (帮助/关于/设置) 拖动滚动
@@ -536,7 +547,7 @@ export class Game {
 
       // 战斗中允许鼠标/单指拖动地图；建造选位时拖动只移动镜头，轻触才移动幻影。
       // 建造栏打开时也可从未被栏遮挡的上半战场拖图。
-      const panBottom = this.buildBar.isOpen ? 245 : MAP_TOP_BAR_H + MAP_VIEW_H;
+      const panBottom = this.buildBar.isOpen ? this.buildBar.topY : MAP_TOP_BAR_H + MAP_VIEW_H;
       const canPanMap = this.state === GameState.PLAYING
         && !this.uiSystem.isPaused()
         && y >= MAP_TOP_BAR_H
@@ -560,6 +571,37 @@ export class Game {
 
     // 键盘输入: 方向键移动建筑方框 / 菜单导航
     window.addEventListener('keydown', (e) => this.handleKeyDown(e));
+
+    this.mobileControls.onAction((action) => this.handleMobileControl(action));
+  }
+
+  private handleMobileControl(action: MobileControlAction): void {
+    if (this.state !== GameState.PLAYING) return;
+
+    switch (action) {
+      case 'speed':
+        if (!this.uiSystem.isPaused()) this.uiSystem.cycleGameSpeed();
+        break;
+      case 'pause':
+        this.uiSystem.togglePause();
+        break;
+      case 'menu':
+        this.uiSystem.setPaused(true);
+        break;
+      case 'wave':
+        if (!this.uiSystem.isPaused()) this.requestNextWave();
+        break;
+      case 'confirm':
+        if (this.uiSystem.isPaused()) break;
+        if (this.buildBar.isOpen) this.buildBar.confirm();
+        else if (this.towerSystem.isBuildMode) this.tryPlacePendingTower();
+        else this.openBarForBoxTile();
+        break;
+      case 'cancel':
+        if (this.buildBar.isOpen) this.buildBar.close();
+        else if (this.towerSystem.isBuildMode) this.towerSystem.exitBuildMode();
+        break;
+    }
   }
 
   /**
@@ -836,6 +878,9 @@ export class Game {
     // ====== 暂停菜单可见时, 不处理地图点击 ======
     if (this.uiSystem.isPauseMenuVisible()) return;
 
+    // 触屏模式的顶部状态由画布外 HUD 承担；保留顶部安全带，避免误选地图。
+    if (this.inputSystem.isTouchOptimized && y < 20) return;
+
     // ====== 原版底部建造栏打开时: 点击全部由栏处理 (任务A) ======
     // (点图标=选中/确认, 点明细=确认, 点栏外地图=关栏; 原版 M() 行8273)
     if (this.buildBar.isOpen) {
@@ -870,7 +915,7 @@ export class Game {
       if (tapTile.tx === cur.tx && tapTile.ty === cur.ty) {
         this.tryPlacePendingTower();
       } else {
-        this.mapData.setBuildingBox(tapTile.tx, tapTile.ty);
+        this.mapData.setBuildingBox(tapTile.tx, tapTile.ty, !this.inputSystem.isTouchOptimized);
         const clamped = this.mapData.getBuildingBoxTile();
         this.towerSystem.setBuildPosition(clamped.tx, clamped.ty);
       }
@@ -893,8 +938,16 @@ export class Game {
     // 检查地图点击 (使用相机系统转换坐标)
     const tile = this.mapData.screenToTile(x, y);
 
-    // 触屏采用“首次点击定位、再次点击确认”：首次点击只让红框悬停并按建筑占地放大，
-    // 不立即弹栏；再次点击同一格才等价于键盘 Enter。这样既避免误操作，也保留软键确认入口。
+    if (this.inputSystem.isTouchOptimized) {
+      // 现代触屏流程：一次点击直接选中并打开对应操作栏。点选位置本来就在
+      // 当前视口内，因此不触发镜头跟随，避免面板出现前目标从手指下滑走。
+      this.mapData.setBuildingBox(tile.tx, tile.ty, false);
+      this.towerSystem.deselectTower();
+      this.openBarForBoxTile();
+      return;
+    }
+
+    // 桌面指针保留“首次点击定位、再次点击确认”，兼容原有鼠标操作习惯。
     const previous = this.mapData.getBuildingBoxTile();
     if (tile.tx === previous.tx && tile.ty === previous.ty) {
       this.openBarForBoxTile();
@@ -936,8 +989,10 @@ export class Game {
     if (this.towerSystem.placeTower(cur.tx, cur.ty, type)) {
       this.syncGold();
       this.towerSystem.exitBuildMode();
+      if (this.inputSystem.isTouchOptimized) navigator.vibrate?.(18);
     } else {
       this.uiSystem.showMessage('此处不可建造', 60);
+      if (this.inputSystem.isTouchOptimized) navigator.vibrate?.([24, 36, 24]);
     }
   }
 
@@ -2411,7 +2466,26 @@ export class Game {
         break;
     }
 
+    this.syncMobileControls();
     this.renderer.present();
+  }
+
+  private syncMobileControls(): void {
+    const playing = this.state === GameState.PLAYING;
+    this.mobileControls.update({
+      visible: playing && this.inputSystem.isTouchOptimized,
+      gold: this.gold,
+      lives: this.lives,
+      level: this.currentLevel,
+      wave: this.enemySystem.currentWave,
+      totalWaves: this.enemySystem.totalWaves,
+      speed: this.uiSystem.getGameSpeed(),
+      paused: this.uiSystem.isPaused(),
+      waveReady: this.enemySystem.canStartNextWave,
+      context: this.buildBar.isOpen
+        ? 'bar'
+        : this.towerSystem.isBuildMode ? 'placement' : 'normal',
+    });
   }
 
   // ============================================================
@@ -3020,7 +3094,7 @@ export class Game {
     this.mapData.renderBuildingBox();
 
     // 顶部信息栏 + 原版底条 (J() 常驻米色条)
-    this.renderTopBar();
+    if (!this.inputSystem.isTouchOptimized) this.renderTopBar();
     this.buildBar.render();
 
     const vctx = this.renderer.virtualContext;
@@ -3161,10 +3235,12 @@ export class Game {
     this.buildBar.render();
     // 原版 J()→h(2,y)：栏关闭时常驻显示光标下建筑的攻击/等级，或敌人的血量/防御。
     if (!this.buildBar.isOpen) this.renderHoveredEntityInfo();
-    if (this.buildBar.isOpen || this.towerSystem.isBuildMode) {
-      this.uiSystem.renderSoftkeyBar(SOFTKEY_OK, SOFTKEY_CANCEL);
-    } else {
-      this.uiSystem.renderSoftkeyBar(SOFTKEY_OK, SOFTKEY_MENU);
+    if (!this.inputSystem.isTouchOptimized) {
+      if (this.buildBar.isOpen || this.towerSystem.isBuildMode) {
+        this.uiSystem.renderSoftkeyBar(SOFTKEY_OK, SOFTKEY_CANCEL);
+      } else {
+        this.uiSystem.renderSoftkeyBar(SOFTKEY_OK, SOFTKEY_MENU);
+      }
     }
     this.uiSystem.render(this.gold, this.lives, this.currentLevel,
       this.enemySystem.currentWave, this.enemySystem.totalWaves);

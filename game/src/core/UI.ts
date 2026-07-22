@@ -81,6 +81,7 @@ export class UISystem {
   private cheatRescuePoints: number = 0;
   private cheatSandboxMode: boolean = false;
   private cheatUsedActions: Set<string> = new Set();
+  private touchOptimized: boolean = false;
 
   // ====== 新增: 科技树面板翻页状态 ======
   // 当前科技树页码 (0-based)
@@ -114,6 +115,12 @@ export class UISystem {
    */
   setSpriteLoader(loader: SpriteLoader): void {
     this.spriteLoader = loader;
+  }
+
+  setTouchOptimized(enabled: boolean): void {
+    if (this.touchOptimized === enabled) return;
+    this.touchOptimized = enabled;
+    this.updateButtons();
   }
 
   // ============================================================
@@ -352,7 +359,7 @@ export class UISystem {
 
     // ====== 顶部右侧控制按钮 (暂停/加速/菜单) ======
     // 对应原版 isPausedInGame 切换和音量键处理
-    {
+    if (!this.touchOptimized) {
       // 三个控制按钮在顶部信息栏右侧
       const ctrlY = 2;
       const ctrlH = 16;
@@ -388,7 +395,7 @@ export class UISystem {
     }
 
     // 浮在战场右上角的大触控按钮，恢复原版手动出兵节奏。
-    if (this.waveReady && !this.paused) {
+    if (!this.touchOptimized && this.waveReady && !this.paused) {
       this.buttons.push({
         x: LOGICAL_WIDTH - 66, y: 23, w: 62, h: 24,
         label: '出兵 ▶', icon: '▶', color: 0x2F7A5A,
@@ -482,22 +489,20 @@ export class UISystem {
    * @param totalWaves 总波数 (l1072[aN])
    */
   render(gold: number, lives: number, level: number, wave: number, totalWaves: number = 0): void {
-    // 顶部信息栏 - 半透明黑色背景
-    this.renderer.setColor(0x000000);
-    this.renderer.fillRect(0, 0, LOGICAL_WIDTH, 20);
+    if (!this.touchOptimized) {
+      // 桌面端保留画布内紧凑信息栏；触屏端使用画布外的大号状态区。
+      this.renderer.setColor(0x000000);
+      this.renderer.fillRect(0, 0, LOGICAL_WIDTH, 20);
+      this.renderer.drawText(`金:${gold}`, 2, 4, 0xFFD700, 10);
+      this.renderer.drawText(`防:${lives}`, 50, 4, 0xFF4444, 10);
+      this.renderer.drawText(`关:${level + 1}`, 92, 4, 0xFCFFCD, 10);
+      this.renderer.drawText(totalWaves > 0 ? `波:${wave}/${totalWaves}` : `波:${wave}`, 128, 4, 0xFCFFCD, 10);
 
-    // 信息栏文字 (左侧紧凑布局, 右侧留给控制按钮)
-    this.renderer.drawText(`金:${gold}`, 2, 4, 0xFFD700, 10);
-    this.renderer.drawText(`防:${lives}`, 50, 4, 0xFF4444, 10);
-    this.renderer.drawText(`关:${level + 1}`, 92, 4, 0xFCFFCD, 10);
-    // 波次: 当前波/总波
-    this.renderer.drawText(totalWaves > 0 ? `波:${wave}/${totalWaves}` : `波:${wave}`, 128, 4, 0xFCFFCD, 10);
-
-    // 显示已觉醒武将数量
-    if (this.techTree) {
-      const heroCount = this.techTree.getAwakenedHeroes().length;
-      if (heroCount > 0) {
-        this.renderer.drawText(`将:${heroCount}`, 164, 4, 0xFFD700, 10);
+      if (this.techTree) {
+        const heroCount = this.techTree.getAwakenedHeroes().length;
+        if (heroCount > 0) {
+          this.renderer.drawText(`将:${heroCount}`, 164, 4, 0xFFD700, 10);
+        }
       }
     }
 

@@ -2,29 +2,158 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>危城无双之三国群英</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
-    body { display: flex; align-items: center; justify-content: center; touch-action: none; }
+    :root {
+      color-scheme: dark;
+      font-family: "Noto Sans SC Variable", "Microsoft YaHei", sans-serif;
+    }
+    html, body { width: 100%; height: 100%; min-height: 100dvh; overflow: hidden; background: #000; }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      touch-action: none;
+      overscroll-behavior: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    #game-shell { position: relative; }
     #game-container { position: relative; }
     #game-canvas { display: block; image-rendering: auto; }
+    #mobile-status, #mobile-controls { display: none; }
+    #mobile-status[hidden], #mobile-controls[hidden], [data-mobile-action][hidden] { display: none !important; }
     #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #FCFFCD; font-family: "Noto Sans SC Variable", "Microsoft YaHei", sans-serif; font-size: 16px; font-weight: 600; text-align: center; }
     #loading .bar { width: 200px; height: 10px; border: 1px solid #FCFFCD; margin-top: 10px; }
     #loading .fill { height: 100%; background: #FCFFCD; width: 0%; transition: width 0.3s; }
+
+    html[data-input-mode="touch"] body {
+      padding-top: env(safe-area-inset-top);
+      padding-right: env(safe-area-inset-right);
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-left: env(safe-area-inset-left);
+    }
+    html[data-input-mode="touch"] #game-shell {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      grid-template-rows: minmax(52px, 1fr) auto minmax(64px, 1fr);
+      justify-items: center;
+      align-items: center;
+    }
+    html[data-input-mode="touch"] #game-container { grid-row: 2; }
+    html[data-input-mode="touch"] #mobile-status,
+    html[data-input-mode="touch"] #mobile-controls {
+      display: flex;
+      width: min(100%, 520px);
+      color: #fcffcd;
+      background: linear-gradient(180deg, rgba(25, 37, 46, 0.96), rgba(9, 17, 22, 0.96));
+      border: 1px solid #54758d;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.38);
+    }
+    html[data-input-mode="touch"] #mobile-status {
+      grid-row: 1;
+      align-self: end;
+      min-height: 52px;
+      padding: 8px 12px;
+      gap: 14px;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 700;
+    }
+    html[data-input-mode="touch"] #mobile-hint {
+      flex: 1 0 100%;
+      color: #9fb9c8;
+      font-size: 11px;
+      font-weight: 500;
+      text-align: center;
+    }
+    html[data-input-mode="touch"] #mobile-controls {
+      grid-row: 3;
+      align-self: start;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      padding: 10px;
+    }
+    html[data-input-mode="touch"] [data-mobile-action] {
+      min-width: 48px;
+      min-height: 50px;
+      padding: 8px 6px;
+      color: #fcffcd;
+      background: #263845;
+      border: 1px solid #6f94aa;
+      border-radius: 10px;
+      font: 700 14px/1.15 inherit;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+    }
+    html[data-input-mode="touch"] [data-mobile-action]:active { transform: scale(0.97); background: #38556a; }
+    html[data-input-mode="touch"] [data-mobile-action]:disabled { opacity: 0.48; }
+    html[data-input-mode="touch"] [data-mobile-action="wave"] { color: #fff4b4; border-color: #d6a94d; background: #4a3b23; }
+    html[data-input-mode="touch"] [data-mobile-action="confirm"] { grid-column: 1 / 3; color: #eaffdc; border-color: #62ad70; background: #294d35; }
+    html[data-input-mode="touch"] [data-mobile-action="cancel"] { grid-column: 3 / 5; color: #ffe5e5; border-color: #b86a6a; background: #512d32; }
+
+    @media (orientation: landscape) and (max-height: 600px) {
+      html[data-input-mode="touch"] #game-shell {
+        grid-template-columns: minmax(132px, 1fr) auto minmax(132px, 1fr);
+        grid-template-rows: 1fr;
+      }
+      html[data-input-mode="touch"] #game-container { grid-column: 2; grid-row: 1; }
+      html[data-input-mode="touch"] #mobile-status {
+        grid-column: 1;
+        grid-row: 1;
+        align-self: center;
+        width: calc(100% - 16px);
+        max-width: 240px;
+        flex-direction: column;
+        gap: 8px;
+      }
+      html[data-input-mode="touch"] #mobile-hint { flex-basis: auto; }
+      html[data-input-mode="touch"] #mobile-controls {
+        grid-column: 3;
+        grid-row: 1;
+        align-self: center;
+        width: calc(100% - 16px);
+        max-width: 260px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      html[data-input-mode="touch"] [data-mobile-action="confirm"],
+      html[data-input-mode="touch"] [data-mobile-action="cancel"] { grid-column: auto; }
+    }
   </style>
 </head>
 <body>
-  <div id="game-container">
-    <canvas id="game-canvas"></canvas>
-    <div id="loading">
-      <div>危城无双之三国群英</div>
-      <div style="font-size: 12px; margin-top: 5px;">加载中...</div>
-      <div class="bar"><div class="fill" id="loading-fill"></div></div>
+  <div id="game-shell">
+    <section id="mobile-status" aria-label="战斗状态" hidden>
+      <span id="mobile-gold">金 0</span>
+      <span id="mobile-lives">防 0</span>
+      <span id="mobile-level">关 1</span>
+      <span id="mobile-wave">波 0/0</span>
+      <span id="mobile-hint">单指拖动地图 · 轻点地块或防御塔</span>
+    </section>
+    <div id="game-container">
+      <canvas id="game-canvas" aria-label="危城无双游戏战场"></canvas>
+      <div id="loading">
+        <div>危城无双之三国群英</div>
+        <div style="font-size: 12px; margin-top: 5px;">加载中...</div>
+        <div class="bar"><div class="fill" id="loading-fill"></div></div>
+      </div>
     </div>
+    <nav id="mobile-controls" aria-label="触屏战斗控制" hidden>
+      <button type="button" data-mobile-action="speed">速度 1×</button>
+      <button type="button" data-mobile-action="pause">暂停</button>
+      <button type="button" data-mobile-action="menu">菜单</button>
+      <button type="button" data-mobile-action="wave" disabled>波次进行中</button>
+      <button type="button" data-mobile-action="confirm" hidden>确认</button>
+      <button type="button" data-mobile-action="cancel" hidden>取消</button>
+    </nav>
   </div>
   <script type="module" src="/src/main.ts"></script>
 </body>

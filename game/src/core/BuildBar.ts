@@ -64,6 +64,10 @@ const BAR_BOTTOM = 289;
 const AU_MAX = 18;   // 顶部图标条高 (原版 au 上限 18, K() case 1 行8164-8168)
 const AV_MAX = 49;   // 主栏高 (原版 ax=(12<<1)+25, j(int) 行22356)
 const BAR_SPEED = 9; // 滑出速度 (原版每逻辑帧+20@10FPS, H5@60fps 等比)
+const TOUCH_AU_MAX = 36;
+const TOUCH_AV_MAX = 58;
+const TOUCH_VISIBLE_ITEMS = 5;
+const TOUCH_ITEM_SPACING = 40;
 
 /** Game 侧宿主接口 (避免循环依赖, 全部回调注入) */
 export interface BuildBarHost {
@@ -113,6 +117,7 @@ export class BuildBarSystem {
   private bw = 0;   // 待建原版塔id
   private ay: Tower | null = null; // 选中的已建塔 (类别2)
   private o = -1;   // 提示消息id (-1=无, 原版 o 字段)
+  private touchOptimized = false;
 
   // ===== 科技层状态 (原版 a1056/b1059/e1105) =====
   private techBuilt: boolean[] = new Array(5).fill(false);   // a1056: 装置已建
@@ -131,6 +136,12 @@ export class BuildBarSystem {
     this.host = host;
   }
 
+  setTouchOptimized(enabled: boolean): void {
+    if (this.touchOptimized === enabled) return;
+    this.touchOptimized = enabled;
+    if (this.aw !== 0) this.configureVisibleItems();
+  }
+
   // ============================================================
   // 状态查询
   // ============================================================
@@ -142,6 +153,11 @@ export class BuildBarSystem {
 
   get category(): number {
     return this.aC;
+  }
+
+  /** 当前动画帧中底栏遮住地图的上边界。 */
+  get topY(): number {
+    return BAR_BOTTOM - this.au - this.av;
   }
 
   /** 城堡部件可见过滤表 (原版 b1059, CastleRenderer 用) */
@@ -226,13 +242,19 @@ export class BuildBarSystem {
     this.aD = 0;
     this.aE = 0;
     this.o = -1;
+    this.configureVisibleItems();
+    this.aw = 1;
+  }
+
+  private configureVisibleItems(): void {
     const items = this.items();
     this.aB = items.length - 1;
-    this.aF = 8;
-    if (this.aB < this.aF) this.aF = this.aB + 1;
-    // 原版: aG = (240 - aF*18)>>1 (注意绘制间距实为20, 原版即如此, 行22365-22367)
-    this.aG = (LOGICAL_WIDTH - this.aF * 18) >> 1;
-    this.aw = 1;
+    this.aF = Math.min(this.touchOptimized ? TOUCH_VISIBLE_ITEMS : 8, items.length);
+    const spacing = this.touchOptimized ? TOUCH_ITEM_SPACING : 18;
+    this.aG = (LOGICAL_WIDTH - this.aF * spacing) >> 1;
+    const maxStart = Math.max(0, items.length - this.aF);
+    this.aE = Math.max(0, Math.min(this.aE, maxStart));
+    if (this.aD < this.aE || this.aD >= this.aE + this.aF) this.aD = this.aE;
   }
 
   /** 请求关闭 (原版 aw=2 滑出) */
@@ -267,13 +289,15 @@ export class BuildBarSystem {
    */
   update(elapsedMs: number = 100): void {
     const scale = Math.max(0, elapsedMs) / 100;
+    const maxAu = this.touchOptimized ? TOUCH_AU_MAX : AU_MAX;
+    const maxAv = this.touchOptimized ? TOUCH_AV_MAX : AV_MAX;
     if (this.aw === 1) {
       // 打开: av→ax, au→18 (原版 case 1: av+=20/au+=20)
-      this.av = Math.min(AV_MAX, this.av + BAR_SPEED * scale);
-      this.au = Math.min(AU_MAX, this.au + 4 * scale);
+      this.av = Math.min(maxAv, this.av + BAR_SPEED * scale);
+      this.au = Math.min(maxAu, this.au + (this.touchOptimized ? 7 : 4) * scale);
     } else if (this.aw === 2 || this.aw === 3) {
       // 关闭: au/av→0 (原版 case 2/3: au-=20, av-=20)
-      this.au = Math.max(0, this.au - 4 * scale);
+      this.au = Math.max(0, this.au - (this.touchOptimized ? 7 : 4) * scale);
       this.av = Math.max(0, this.av - BAR_SPEED * scale);
       if (this.au === 0 && this.av === 0) {
         const enterPlacement = this.aw === 3;
@@ -414,13 +438,29 @@ export class BuildBarSystem {
 
     if (y >= barTop && y < BAR_BOTTOM + 21) {
       // 图标条区域
-      if (y >= stripY && y <= stripY + Math.max(this.au, 16) + 2) {
+      const iconHitHeight = this.touchOptimized ? TOUCH_AU_MAX : Math.max(this.au, 16);
+      if (y >= stripY - (this.touchOptimized ? 4 : 0) && y <= stripY + iconHitHeight + 2) {
+        if (this.touchOptimized && x < this.aG) {
+          this.pageTouchItems(-1);
+          return true;
+        }
+        if (this.touchOptimized && x >= this.aG + this.aF * TOUCH_ITEM_SPACING) {
+          this.pageTouchItems(1);
+          return true;
+        }
+        const spacing = this.touchOptimized ? TOUCH_ITEM_SPACING : 20;
         for (let i = 0; i < this.aF; i++) {
-          const ix = this.aG + i * 20 - 4;
-          if (x >= ix && x <= ix + 24) {
+          const ix = this.aG + i * spacing - (this.touchOptimized ? 0 : 4);
+          const hitWidth = this.touchOptimized ? TOUCH_ITEM_SPACING : 24;
+          if (x >= ix && x <= ix + hitWidth) {
             const idx = this.aE + i;
             if (idx > this.aB) return true;
-            if (idx === this.aD) {
+            if (this.touchOptimized) {
+              this.aD = idx;
+              this.o = -1;
+              // 建造卡片采用快速流程：点卡片后立即进入放置预览。
+              if (this.aC === BAR_CAT_BUILD) this.confirm();
+            } else if (idx === this.aD) {
               this.confirm(); // 再点同一图标=确认
             } else {
               this.aD = idx;
@@ -432,13 +472,23 @@ export class BuildBarSystem {
         return true;
       }
       // 明细区=确认
-      this.confirm();
+      if (!this.touchOptimized) this.confirm();
       return true;
     }
 
     // 点栏外地图: 关栏 (消费点击, 避免误选地图)
     this.close();
     return true;
+  }
+
+  private pageTouchItems(direction: number): void {
+    if (!this.touchOptimized || this.aF <= 0) return;
+    const maxStart = Math.max(0, this.aB - this.aF + 1);
+    const next = Math.max(0, Math.min(maxStart, this.aE + direction * this.aF));
+    if (next === this.aE) return;
+    this.aE = next;
+    this.aD = next;
+    this.o = -1;
   }
 
   // ============================================================
@@ -479,7 +529,7 @@ export class BuildBarSystem {
       vctx.rect(0, stripY, LOGICAL_WIDTH, this.au);
       vctx.clip();
       r.setColor(COLOR_STRIP_BG);
-      r.fillRect(0, stripY, LOGICAL_WIDTH, 18);
+      r.fillRect(0, stripY, LOGICAL_WIDTH, this.touchOptimized ? TOUCH_AU_MAX : AU_MAX);
       const ui10 = ui(10);
       if (ui10) {
         // 原版 a(Image,int,int,int,boolean) 行11470: 左端 + 右端镜像
@@ -507,19 +557,34 @@ export class BuildBarSystem {
     const ui15 = this.spriteLoader?.getUISprite(15);
     if (!ui15) return;
     const items = this.items();
-    const iconY = stripY + 1;
+    const iconSize = this.touchOptimized ? 24 : 16;
+    const spacing = this.touchOptimized ? TOUCH_ITEM_SPACING : 20;
+    const iconY = stripY + (this.touchOptimized ? 5 : 1);
+
+    if (this.touchOptimized) {
+      const canPrev = this.aE > 0;
+      const canNext = this.aE + this.aF <= this.aB;
+      r.drawText('‹', 4, stripY + 4, canPrev ? COLOR_TEXT : 0x999999, 22);
+      r.drawText('›', LOGICAL_WIDTH - 14, stripY + 4, canNext ? COLOR_TEXT : 0x999999, 22);
+    }
 
     for (let i = 0; i < this.aF; i++) {
       const idx = this.aE + i;
       if (idx > this.aB) break;
       const item = items[idx];
-      const x = this.aG + i * 20;
+      const cellX = this.aG + i * spacing;
+      const x = cellX + (this.touchOptimized ? 8 : 0);
 
       // 选中双框高亮 (原版行10589-10607: 色16580557 双drawRect)
       if (idx === this.aD) {
         r.setColor(COLOR_BAR_BG);
-        r.drawRect(x - 3, iconY - 3, 21, 20);
-        r.drawRect(x - 2, iconY - 2, 19, 19);
+        if (this.touchOptimized) {
+          r.drawRect(cellX + 3, iconY - 4, TOUCH_ITEM_SPACING - 6, iconSize + 8);
+          r.drawRect(cellX + 4, iconY - 3, TOUCH_ITEM_SPACING - 8, iconSize + 6);
+        } else {
+          r.drawRect(x - 3, iconY - 3, 21, 20);
+          r.drawRect(x - 2, iconY - 2, 19, 19);
+        }
       }
 
       // 未解锁塔置灰 (任务要求; 原版行10618-10631 仅跳过徽标不置灰, 此处按任务增强)
@@ -530,7 +595,7 @@ export class BuildBarSystem {
         vctx.globalAlpha = 0.35;
       }
       // 条目图标: ui_15 帧 (原版 d(int×5) 行18876: 区域(id*16,0,16,16))
-      r.drawImageRegion(ui15, item * 16, 0, 16, 16, x, iconY, 16, 16);
+      r.drawImageRegion(ui15, item * 16, 0, 16, 16, x, iconY, iconSize, iconSize);
       if (locked) vctx.restore();
     }
   }

@@ -1,123 +1,173 @@
 /**
- * 触屏输入系统 - 适配触屏的现代化交互
- * 原版为按键手机，H5版改用触屏/鼠标点击
+ * 统一输入系统。
+ *
+ * Pointer Events 让鼠标、触屏和触控笔共享同一套状态机，同时通过
+ * pointer capture / pointercancel 避免手指滑出画布、来电中断或第二根
+ * 手指加入时产生幽灵点击。
  */
 import { Renderer } from './Renderer';
 import { TILE_SIZE } from '../data/gameData';
 
 export interface TouchPoint {
   id: number;
-  x: number;  // 逻辑坐标
-  y: number;  // 逻辑坐标
+  x: number;
+  y: number;
 }
 
 type InputCallback = (x: number, y: number) => void;
+type InputModeCallback = (touchOptimized: boolean) => void;
 
 export class InputSystem {
   private renderer: Renderer;
   private canvas: HTMLCanvasElement;
   private tapCallback: InputCallback | null = null;
   private longPressCallback: InputCallback | null = null;
-  private moveCallback: ((x: number, y: number) => void) | null = null;
+  private moveCallback: InputCallback | null = null;
   private releaseCallback: InputCallback | null = null;
+  private inputModeCallback: InputModeCallback | null = null;
 
-  private pressStartTime: number = 0;
-  private pressStartX: number = 0;
-  private pressStartY: number = 0;
-  private isPressed: boolean = false;
-  private isDragging: boolean = false;
-  private longPressThreshold: number = 500; // ms
-  private tapThreshold: number = 10; // pixels
+  private pressStartTime = 0;
+  private pressStartX = 0;
+  private pressStartY = 0;
+  private pressStartClientX = 0;
+  private pressStartClientY = 0;
+  private lastX = 0;
+  private lastY = 0;
+  private isPressed = false;
+  private isDragging = false;
+  private activePointerId: number | null = null;
+  private longPressTimer: number | null = null;
+
+  private readonly longPressThreshold = 500;
+  /** 使用 CSS 像素，避免画布缩放后拖动阈值忽大忽小。 */
+  private readonly tapThresholdCss = 10;
+  private readonly touchLayoutOverride: boolean | null;
+  private touchLayoutActive: boolean;
 
   constructor(renderer: Renderer) {
     this.renderer = renderer;
     this.canvas = renderer.displayCanvas;
+    const override = new URLSearchParams(window.location.search).get('touch');
+    this.touchLayoutOverride = override === '1' ? true : override === '0' ? false : null;
+    this.touchLayoutActive = this.detectPrimaryTouchDevice();
+    this.applyInputModeToDocument();
     this.setupListeners();
   }
 
+  private detectPrimaryTouchDevice(): boolean {
+    if (this.touchLayoutOverride !== null) return this.touchLayoutOverride;
+    const coarse = window.matchMedia?.('(pointer: coarse)').matches ?? false;
+    const noHover = window.matchMedia?.('(hover: none)').matches ?? false;
+    return coarse || ((navigator.maxTouchPoints ?? 0) > 0 && noHover);
+  }
+
+  private applyInputModeToDocument(): void {
+    document.documentElement.dataset.inputMode = this.touchLayoutActive ? 'touch' : 'pointer';
+  }
+
+  private activateTouchLayout(pointerType: string): void {
+    if (this.touchLayoutOverride === false) return;
+    if (pointerType !== 'touch' && pointerType !== 'pen') return;
+    if (this.touchLayoutActive) return;
+    this.touchLayoutActive = true;
+    this.applyInputModeToDocument();
+    this.inputModeCallback?.(true);
+  }
+
   private setupListeners(): void {
-    // 触摸事件
-    this.canvas.addEventListener('touchstart', (e) => {
-      e.preventDefault();
-      const touch = e.touches[0];
-      this.handleDown(touch.clientX, touch.clientY);
-    }, { passive: false });
+    this.canvas.addEventListener('pointerdown', (event) => {
+      if (!event.isPrimary || this.activePointerId !== null) return;
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
 
-    this.canvas.addEventListener('touchmove', (e) => {
-      e.preventDefault();
-      const touch = e.touches[0];
-      this.handleMove(touch.clientX, touch.clientY);
-    }, { passive: false });
-
-    this.canvas.addEventListener('touchend', (e) => {
-      e.preventDefault();
-      // 使用 changedTouches 获取实际释放坐标, 避免重复转换
-      const touch = e.changedTouches[0];
-      if (touch) {
-        this.handleUp(touch.clientX, touch.clientY);
-      } else {
-        this.handleUp(this.pressStartX, this.pressStartY);
+      event.preventDefault();
+      this.activateTouchLayout(event.pointerType);
+      this.activePointerId = event.pointerId;
+      try {
+        this.canvas.setPointerCapture(event.pointerId);
+      } catch {
+        // 某些旧 WebView 不支持 capture；后续 cancel 仍能安全清理状态。
       }
-    }, { passive: false });
-
-    // 鼠标事件
-    this.canvas.addEventListener('mousedown', (e) => {
-      this.handleDown(e.clientX, e.clientY);
+      this.handleDown(event.clientX, event.clientY);
     });
 
-    this.canvas.addEventListener('mousemove', (e) => {
-      if (this.isPressed) {
-        this.handleMove(e.clientX, e.clientY);
-      }
+    this.canvas.addEventListener('pointermove', (event) => {
+      if (event.pointerId !== this.activePointerId || !this.isPressed) return;
+      event.preventDefault();
+      this.handleMove(event.clientX, event.clientY);
     });
 
-    this.canvas.addEventListener('mouseup', (e) => {
-      this.handleUp(e.clientX, e.clientY);
+    this.canvas.addEventListener('pointerup', (event) => {
+      if (event.pointerId !== this.activePointerId) return;
+      event.preventDefault();
+      this.handleUp(event.clientX, event.clientY);
+      this.finishPointer(event.pointerId);
     });
 
-    this.canvas.addEventListener('mouseleave', () => {
-      if (this.isPressed) this.releaseCallback?.(this.lastX, this.lastY);
-      this.isPressed = false;
-      this.isDragging = false;
+    this.canvas.addEventListener('pointercancel', (event) => {
+      if (event.pointerId !== this.activePointerId) return;
+      event.preventDefault();
+      this.cancelGesture();
+      this.finishPointer(event.pointerId);
     });
+
+    this.canvas.addEventListener('lostpointercapture', (event) => {
+      if (event.pointerId !== this.activePointerId) return;
+      this.cancelGesture();
+      this.activePointerId = null;
+    });
+
+    this.canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+  }
+
+  private finishPointer(pointerId: number): void {
+    this.activePointerId = null;
+    try {
+      if (this.canvas.hasPointerCapture(pointerId)) this.canvas.releasePointerCapture(pointerId);
+    } catch {
+      // 指针可能已由浏览器释放。
+    }
+  }
+
+  private clearLongPressTimer(): void {
+    if (this.longPressTimer !== null) {
+      window.clearTimeout(this.longPressTimer);
+      this.longPressTimer = null;
+    }
   }
 
   private handleDown(clientX: number, clientY: number): void {
     const pos = this.renderer.screenToLogical(clientX, clientY);
-    this.pressStartTime = Date.now();
+    this.pressStartTime = performance.now();
     this.pressStartX = pos.x;
     this.pressStartY = pos.y;
+    this.pressStartClientX = clientX;
+    this.pressStartClientY = clientY;
     this.lastX = pos.x;
     this.lastY = pos.y;
     this.isPressed = true;
     this.isDragging = false;
 
-    // 长按检测
-    setTimeout(() => {
-      if (this.isPressed &&
-          Math.abs(this.pressStartX - this.getLastX()) < this.tapThreshold &&
-          Math.abs(this.pressStartY - this.getLastY()) < this.tapThreshold) {
-        if (Date.now() - this.pressStartTime >= this.longPressThreshold) {
-          this.longPressCallback?.(this.pressStartX, this.pressStartY);
-        }
-      }
+    this.clearLongPressTimer();
+    this.longPressTimer = window.setTimeout(() => {
+      this.longPressTimer = null;
+      if (!this.isPressed || this.isDragging) return;
+      if (performance.now() - this.pressStartTime < this.longPressThreshold) return;
+      this.longPressCallback?.(this.pressStartX, this.pressStartY);
     }, this.longPressThreshold);
   }
-
-  private lastX: number = 0;
-  private lastY: number = 0;
-
-  private getLastX(): number { return this.lastX; }
-  private getLastY(): number { return this.lastY; }
 
   private handleMove(clientX: number, clientY: number): void {
     const pos = this.renderer.screenToLogical(clientX, clientY);
     this.lastX = pos.x;
     this.lastY = pos.y;
     if (!this.isDragging) {
-      const dist = Math.hypot(pos.x - this.pressStartX, pos.y - this.pressStartY);
-      if (dist < this.tapThreshold) return;
+      const cssDistance = Math.hypot(
+        clientX - this.pressStartClientX,
+        clientY - this.pressStartClientY,
+      );
+      if (cssDistance < this.tapThresholdCss) return;
       this.isDragging = true;
+      this.clearLongPressTimer();
     }
     this.moveCallback?.(pos.x, pos.y);
   }
@@ -125,15 +175,16 @@ export class InputSystem {
   private handleUp(clientX: number, clientY: number): void {
     if (!this.isPressed) return;
     this.isPressed = false;
+    this.clearLongPressTimer();
 
     const pos = this.renderer.screenToLogical(clientX, clientY);
-    const dist = Math.sqrt(
-      (pos.x - this.pressStartX) ** 2 + (pos.y - this.pressStartY) ** 2
+    const cssDistance = Math.hypot(
+      clientX - this.pressStartClientX,
+      clientY - this.pressStartClientY,
     );
-    const duration = Date.now() - this.pressStartTime;
+    const duration = performance.now() - this.pressStartTime;
 
-    // 如果是轻触 (短时间 + 小位移)
-    if (!this.isDragging && dist < this.tapThreshold && duration < this.longPressThreshold) {
+    if (!this.isDragging && cssDistance < this.tapThresholdCss && duration < this.longPressThreshold) {
       this.tapCallback?.(pos.x, pos.y);
     }
 
@@ -141,38 +192,40 @@ export class InputSystem {
     this.isDragging = false;
   }
 
-  /**
-   * 设置轻触回调
-   */
+  private cancelGesture(): void {
+    if (!this.isPressed) return;
+    this.isPressed = false;
+    this.clearLongPressTimer();
+    this.releaseCallback?.(this.lastX, this.lastY);
+    this.isDragging = false;
+  }
+
+  get isTouchOptimized(): boolean {
+    return this.touchLayoutActive;
+  }
+
+  onInputModeChange(callback: InputModeCallback): void {
+    this.inputModeCallback = callback;
+    callback(this.touchLayoutActive);
+  }
+
   onTap(callback: InputCallback): void {
     this.tapCallback = callback;
   }
 
-  /**
-   * 设置长按回调
-   */
   onLongPress(callback: InputCallback): void {
     this.longPressCallback = callback;
   }
 
-  /**
-   * 设置移动回调
-   */
-  onMove(callback: (x: number, y: number) => void): void {
+  onMove(callback: InputCallback): void {
     this.moveCallback = callback;
   }
 
-  /**
-   * 设置释放回调
-   */
   onRelease(callback: InputCallback): void {
     this.releaseCallback = callback;
   }
 
-  /**
-   * 逻辑坐标转瓦片坐标
-   */
-  toTile(x: number, y: number, offsetX: number = 0, offsetY: number = 0): { tx: number; ty: number } {
+  toTile(x: number, y: number, offsetX = 0, offsetY = 0): { tx: number; ty: number } {
     return {
       tx: Math.floor((x - offsetX) / TILE_SIZE),
       ty: Math.floor((y - offsetY) / TILE_SIZE),

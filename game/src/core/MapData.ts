@@ -590,11 +590,13 @@ export class MapData {
    * 直接设置建筑方框位置 (触屏点击地图时使用)
    * 对应原版 al() 中 bN/bO 赋值
    */
-  setBuildingBox(tileX: number, tileY: number): void {
+  setBuildingBox(tileX: number, tileY: number, followCamera: boolean = true): void {
     if (!this.mapData) return;
     this.boxX = Math.max(0, Math.min(tileX * TILE_SIZE, this.mapData.width * TILE_SIZE - TILE_SIZE));
     this.boxY = Math.max(0, Math.min(tileY * TILE_SIZE, this.mapData.height * TILE_SIZE - TILE_SIZE));
-    this.updateCameraTarget();
+    // 触屏点选的位置本来就在视口内，不应在手指抬起后立即把该位置移走。
+    // 键盘移动仍保留原版镜头跟随。
+    if (followCamera) this.updateCameraTarget();
   }
 
   getSpawnPoints(): { x: number; y: number; type: number }[] {
