@@ -32,6 +32,8 @@ import {
   TOWER_ATTACK_DURATION_TICKS,
   TOWER_PROJECTILE_RANGE_TYPES,
   MAX_ENEMIES,
+  ENEMY_ARRAY_SIZE,
+  ENEMY_ATTR_COUNT,
   TOWER_COST_Q1100,
   TOWER_UPGRADE_COST_R1101,
   TECH_COST_G1057,
@@ -418,7 +420,11 @@ test('敌人防御力按原版减伤，伤害最低仍扣 1 点', () => {
   assert.equal(enemy.hp, 99);
 });
 
-test('活动敌人达到原版 30 个槽位后暂停刷怪', () => {
+test('原版敌人池为 80×28，达到 30 个活动敌人后仍继续刷怪', () => {
+  assert.equal(MAX_ENEMIES, 80);
+  assert.equal(ENEMY_ARRAY_SIZE, 80);
+  assert.equal(ENEMY_ATTR_COUNT, 28);
+
   const map = {
     getSpawnCheckPixel() { return { x: 8, y: 8 }; },
     getSpawnPixel() { return { x: 8, y: 8 }; },
@@ -434,13 +440,13 @@ test('活动敌人达到原版 30 个槽位后暂停刷怪', () => {
     aR: number;
     spawnTick(): void;
   };
-  internal.enemies = Array.from({ length: MAX_ENEMIES }, (_, spawnIndex) => createMovingEnemy({ spawnIndex }));
-  internal.aT = 0;
-  internal.aX = 1;
+  internal.enemies = Array.from({ length: 30 }, (_, spawnIndex) => createMovingEnemy({ spawnIndex }));
+  internal.aT = 30;
+  internal.aX = 31;
   internal.aR = -1;
   internal.spawnTick();
-  assert.equal(internal.enemies.length, MAX_ENEMIES);
-  assert.equal(internal.aT, 0);
+  assert.equal(internal.enemies.length, 31);
+  assert.equal(internal.aT, 31);
 });
 
 test('投石与道路机关在攻击和升级期间保持建造时解析出的道路朝向', () => {

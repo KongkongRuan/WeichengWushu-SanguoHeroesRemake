@@ -80,7 +80,7 @@ game/src/
 │   ├── Renderer.ts            # 混合渲染架构 (逻辑240×320 + 物理高清缩放)
 │   ├── Scale2x.ts             # Scale2x/3x 像素高清化算法
 │   ├── MapData.ts             # 地图加载、瓦片渲染、路径查找
-│   ├── Enemy.ts               # 敌人系统 (c1107[30][18] 数组还原)
+│   ├── Enemy.ts               # 敌人系统 (b1066[80][28] 数组还原)
 │   ├── Tower.ts               # 塔系统 (建造、攻击、升级、武将觉醒)
 │   ├── TechTree.ts            # 科技树系统 (a1052 分支 + 17种科技效果)
 │   ├── AudioSystem.ts         # MIDI 音乐播放 (midi-player-js + soundfont)
@@ -175,7 +175,7 @@ game/src/
 - ✅ 默认地图生成 (JSON 加载失败时的备用方案)
 
 #### 2.2.3 敌人系统 (`Enemy.ts`) ✅
-- ✅ **c1107[30][18] 数组还原**: 30个敌人槽位，每个18个属性
+- ✅ **b1066[80][28] 数组还原**: 80个敌人槽位，每个28个属性（单波最多79个）
 - ✅ **敌人生成**: 还原 `c(int n, int n2, int n3, int n4)` 生成函数
 - ✅ **HP 计算**: `hp = slope * variant + base`，类型16/18减半
 - ✅ **路径跟踪**: 沿 `pathCache` 路径移动，支持多路径
@@ -620,7 +620,8 @@ npx tsc --noEmit   # 类型检查 (无错误)
 | `a1052` | short[][] | `TECH_BRANCHES` | 科技树分支 |
 | `b1015` | String[] | heroes.ts全部文本 | 游戏文本数组 |
 | `c1051` | int[][] | `TOWER_UPGRADE_PATHS` | 塔升级路径 |
-| `c1107` | int[30][18] | `Enemy[]` | 敌人数组 |
+| `b1066` | int[80][28] | `Enemy[]` | 敌人数组 |
+| `c1107` | int[30][18] | `Tower[]` | 建筑数组 |
 | `d1053` | int[][] | `STORY_LEVEL_SEQUENCE`等 | 关卡序列 |
 | `e1054` | int[] | `LEVEL_CONFIG` | 关卡配置 |
 | `f1055` | int[] | `TOWER_LEVEL_LIMITS` | 塔等级限制 |

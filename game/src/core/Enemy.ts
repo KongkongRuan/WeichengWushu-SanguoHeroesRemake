@@ -42,7 +42,6 @@ import {
   ENEMY_ANIM_L1083,
   ENEMY_DRAW_OFFSETS_D1091,
   ENEMY_SRC_RECTS_A1092,
-  MAX_ENEMIES,
 } from '../data/gameData';
 
 // 敌人状态 (对应原版 b1066[n][8], var45[var3=8])
@@ -270,9 +269,9 @@ export class EnemySystem {
   // 刷怪 (对应原版 l(int) 行22811-22948, 固定 l(1))
   // ============================================================
   private spawnTick(): void {
-    // 原版 b1066 是 30 个活动敌人槽位；达到上限时只暂停刷怪，
-    // 等已有单位离场后再继续当前波次，避免把道路填满后永久互相阻塞。
-    if (this.aT >= this.aX || this.enemies.length >= MAX_ENEMIES) return;
+    // 原版 b1066 是 80×28 的敌人池，且 aX 已在 computeWaveParams() 封顶 79。
+    // l(int) 这里只检查本波是否已经刷完，不存在 30 个活动敌人时暂停刷怪的规则。
+    if (this.aT >= this.aX) return;
 
     // 出生空闲检查: b(b1069[aN][0], b1069[aN][1]+13) — 出生点下方13px的格子可进入才刷
     // (两个反编译器一致确认 +13 偏移; 效果: 敌人成串而出, 约0.8-1.1s/个, 无全局匀速定时器)

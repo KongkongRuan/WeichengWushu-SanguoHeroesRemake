@@ -660,9 +660,11 @@ export const BUILDING_BOX_INIT: number[][] = [
   [96, 32],    // level 8
 ];
 
-export const MAX_ENEMIES = 30;        // 最大同屏敌人数 (bt >= 30 时游戏结束)
-export const ENEMY_ARRAY_SIZE = 30;   // 敌人数组大小 c1107[30][18]
-export const ENEMY_ATTR_COUNT = 18;   // 每个敌人属性数量
+// 原版敌人池是 b1066[80][28]；c1107[30][18] 是建筑池，不能混用。
+// 单波数量另由 EnemySystem 按原版封顶为 79，因此正常流程不会占满第 80 个槽位。
+export const ENEMY_ARRAY_SIZE = 80;
+export const ENEMY_ATTR_COUNT = 28;
+export const MAX_ENEMIES = ENEMY_ARRAY_SIZE; // 兼容旧调用名：表示敌人池容量，不是 30 人同屏限制
 
 // ============================================================
 // HP 计算 (还原 a.java 中的公式)
@@ -708,8 +710,8 @@ export const COLORS = {
 } as const;
 
 // ============================================================
-// 敌人属性索引 (c1107[bt][18] 各字段含义)
-// 从生成函数 c(int n, int n2, int n3, int n4) 提取
+// 旧版敌人属性索引兼容导出。原版敌人实体实际存放在 b1066[80][28]；
+// c1107[30][18] 属于建筑系统。
 // ============================================================
 export const ENEMY_ATTR = {
   X: 0,           // X坐标
