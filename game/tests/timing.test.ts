@@ -458,6 +458,25 @@ test('投石与道路机关在攻击和升级期间保持建造时解析出的�
   assert.deepEqual([...TOWER_PATH_FACING_TYPES], [2, 6, 7, 8, 9, 10]);
 });
 
+test('建造预览按原版区分四向建筑与单向道路机关', () => {
+  const map = {
+    getTerrain(tx: number, ty: number) {
+      return tx === 9 && ty >= 10 && ty <= 12 ? 0 : 8;
+    },
+  };
+  const system = new TowerSystem({} as never, map as never);
+  const previewOrientations = (system as unknown as {
+    buildPreviewArrowOrientations(x: number, y: number, type: number): number[];
+  }).buildPreviewArrowOrientations;
+
+  for (const type of [0, 1, 3, 4, 5, 7]) {
+    assert.deepEqual(previewOrientations.call(system, 10, 10, type), [0, 1, 2, 3]);
+  }
+  for (const type of [2, 6, 8, 9, 10]) {
+    assert.deepEqual(previewOrientations.call(system, 10, 10, type), [3]);
+  }
+});
+
 test('每类建筑的攻击状态足够播放原版完整动作', () => {
   assert.deepEqual([...TOWER_ATTACK_DURATION_TICKS], [5, 13, 13, 20, 5, 20, 6, 30, 16, 16, 10]);
   assert.equal(TOWER_ATTACK_DURATION_TICKS[7], 30); // 13 帧蓄力 + 17 帧释放

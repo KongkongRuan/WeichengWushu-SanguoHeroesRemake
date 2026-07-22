@@ -338,6 +338,16 @@ export class TowerSystem {
   }
 
   /**
+   * 建造预览的绿色攻击方向箭头。
+   * 原版 p1099=0 的弓手塔等六类建筑可向四周攻击；p1099=1 的突刺、擂木、
+   * 沸水、滚油和断龙闸只朝建造时解析出的道路方向攻击。
+   */
+  private buildPreviewArrowOrientations(tileX: number, tileY: number, type: number): number[] {
+    if (TOWER_DIRECTION_P1099[this.spriteType(type)] !== 1) return [0, 1, 2, 3];
+    return [this.resolvePathFacing(tileX, tileY, type)];
+  }
+
+  /**
    * 放置塔
    * 任务B-3: 接入原版科技建筑门禁 (e1105), 未解锁禁止建造 (原版 M() case 0 行8373-8389)
    * 任务A: 建造费改用原版 q1100 (经 buildCostProvider), 与建造栏显示价格一致
@@ -2223,15 +2233,21 @@ export class TowerSystem {
       }
     }
 
-    // ---- q(int,int) 行24225: 全部可建 (x1126) 时画 4 个呼吸角标 (ui_16, 10x12帧)
+    // ---- q(int,int) 行24225: 全部可建 (x1126) 时画呼吸方向箭头 (ui_16, 10x12帧)
+    // 四向建筑画满四边；单向机关只画实际建成后采用的道路朝向。
     if (allOk) {
-      const bracket = this.spr('ui', 16);
-      if (bracket) {
+      const arrow = this.spr('ui', 16);
+      if (arrow) {
         const bounce = (this.previewFrame & 1) << 1; // 原版 (a1019&1)<<1
-        for (let k = 0; k < 4; k++) {
-          const cx = bx + (fp << 3) + CURSOR_BRACKET_Q1159[k][0] * ((fp << 3) + 8 + bounce);
-          const cy = by + (fp << 3) + CURSOR_BRACKET_Q1159[k][1] * ((fp << 3) + 8 + bounce);
-          this.renderer.drawSpriteTransform(bracket, k * 10, 0, 10, 12, cx, cy, 0);
+        const orientations = this.buildPreviewArrowOrientations(
+          this.buildX,
+          this.buildY,
+          this.pendingBuildType,
+        );
+        for (const orientation of orientations) {
+          const cx = bx + (fp << 3) + CURSOR_BRACKET_Q1159[orientation][0] * ((fp << 3) + 8 + bounce);
+          const cy = by + (fp << 3) + CURSOR_BRACKET_Q1159[orientation][1] * ((fp << 3) + 8 + bounce);
+          this.renderer.drawSpriteTransform(arrow, orientation * 10, 0, 10, 12, cx, cy, 0);
         }
       }
     }
