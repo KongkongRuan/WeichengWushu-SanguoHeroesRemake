@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "esbuild tests/timing.test.ts --bundle --platform=node --format=cjs --alias:virtual:level-maps=./src/data/emptyLevelMaps.ts --outfile=.test-dist/timing.test.cjs && node --test .test-dist/timing.test.cjs",
+    "test": "node tests/run-tests.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

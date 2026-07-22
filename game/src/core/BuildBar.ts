@@ -77,6 +77,8 @@ export interface BuildBarHost {
   trySpendGold(cost: number): boolean;
   /** 已建塔数 (原版 bt, k(int) 要求>0 才能建装置) */
   getTowerCount(): number;
+  /** 当前规则与军议修正后的建造费。 */
+  getBuildCost?(origTowerId: number): number;
   /** 选塔完成, 进入选位模式 (原版 aw=3 滑出收尾 → bF=1, K() case 3 行8204-8208) */
   enterPlacement(origTowerId: number): void;
   /** 升级选中塔 (动作16) */
@@ -120,6 +122,10 @@ export class BuildBarSystem {
   private touchOptimized = false;
   /** 触屏端必须由用户明确点过一次，不能把打开栏时的默认高亮当成确认。 */
   private touchArmedIndex: number | null = null;
+  /** 键盘/软键拆除必须二次确认，避免动态状态或误触直接破坏建筑。 */
+  private demolishArmedIndex: number | null = null;
+  /** 非原版错误码能表达的临时动作状态。 */
+  private actionNotice: string | null = null;
 
   // ===== 科技层状态 (原版 a1056/b1059/e1105) =====
   private techBuilt: boolean[] = new Array(5).fill(false);   // a1056: 装置已建
@@ -142,6 +148,7 @@ export class BuildBarSystem {
     if (this.touchOptimized === enabled) return;
     this.touchOptimized = enabled;
     this.touchArmedIndex = null;
+    this.demolishArmedIndex = null;
     if (this.aw !== 0) this.configureVisibleItems();
   }
 
@@ -218,6 +225,9 @@ export class BuildBarSystem {
     this.av = 0;
     this.o = -1;
     this.ay = null;
+    this.touchArmedIndex = null;
+    this.demolishArmedIndex = null;
+    this.actionNotice = null;
   }
 
   /**
@@ -246,6 +256,8 @@ export class BuildBarSystem {
     this.aE = 0;
     this.o = -1;
     this.touchArmedIndex = null;
+    this.demolishArmedIndex = null;
+    this.actionNotice = null;
     this.configureVisibleItems();
     this.aw = 1;
   }
@@ -264,6 +276,8 @@ export class BuildBarSystem {
   /** 请求关闭 (原版 aw=2 滑出) */
   close(): void {
     this.touchArmedIndex = null;
+    this.demolishArmedIndex = null;
+    this.actionNotice = null;
     if (this.aw !== 0) this.aw = 2;
   }
 
@@ -276,12 +290,10 @@ export class BuildBarSystem {
         const tower = this.ay;
         if (!tower) return [ACTION_CANCEL];
         const levelAction = tower.level >= 7 ? ACTION_RESERVED : ACTION_UPGRADE;
-        if (tower.type === 10 && tower.gateState === 0) {
+        if (tower.type === 10) {
+          // 保持原版固定槽位：机关动作始终在第 0 项，拆除不会因 gateState 变化顶到默认项。
           const gateAction = tower.gateLoaded ? ACTION_RELEASE_GATE : ACTION_LOAD_GATE;
           return [gateAction, levelAction, ACTION_DEMOLISH, ACTION_CANCEL];
-        }
-        if (tower.type === 10 && tower.gateState !== 0) {
-          return [ACTION_DEMOLISH, ACTION_CANCEL];
         }
         return [levelAction, ACTION_DEMOLISH, ACTION_CANCEL];
       }
@@ -325,6 +337,8 @@ export class BuildBarSystem {
   navigate(dir: number): void {
     if (this.aw === 0) return;
     this.touchArmedIndex = null;
+    this.demolishArmedIndex = null;
+    this.actionNotice = null;
     this.o = -1; // 换项清除提示
     if (dir > 0) {
       this.aD++;
@@ -354,6 +368,8 @@ export class BuildBarSystem {
     // 同一个下标从“装填”变成“释放”再变成“拆除”，也会令升级重复执行。
     if (this.aw !== 1 || !this.host) return;
     const item = this.items()[this.aD];
+    if (item !== ACTION_DEMOLISH) this.demolishArmedIndex = null;
+    this.actionNotice = null;
     if (item === ACTION_CANCEL) {
       // 21=取消选择 (原版行8363-8365)
       this.aw = 2;
@@ -387,6 +403,10 @@ export class BuildBarSystem {
           this.aw = 2;
           return;
         }
+        if (tower.type === 10 && tower.gateState !== 0 && item !== ACTION_DEMOLISH) {
+          this.actionNotice = '断龙闸动作尚未结束';
+          return;
+        }
         if (item === ACTION_UPGRADE) {
           if (this.host.upgradeTower(tower)) this.aw = 2;
         } else if (item === ACTION_LOAD_GATE) {
@@ -395,7 +415,13 @@ export class BuildBarSystem {
         } else if (item === ACTION_RELEASE_GATE) {
           if (this.host.releaseGate(tower)) this.aw = 2;
         } else if (item === ACTION_DEMOLISH) {
+          const touchConfirmed = this.touchOptimized && this.touchArmedIndex === this.aD;
+          if (!touchConfirmed && this.demolishArmedIndex !== this.aD) {
+            this.demolishArmedIndex = this.aD;
+            return;
+          }
           this.host.demolishTower(tower);
+          this.demolishArmedIndex = null;
           this.aw = 2;
         }
         break;
@@ -466,6 +492,8 @@ export class BuildBarSystem {
               const alreadyArmed = this.touchArmedIndex === idx;
               this.aD = idx;
               this.o = -1;
+              this.actionNotice = null;
+              this.demolishArmedIndex = null;
 
               if (item === ACTION_CANCEL) {
                 // 取消没有付费或破坏性，单击立即关闭。
@@ -485,6 +513,8 @@ export class BuildBarSystem {
             } else {
               this.aD = idx;
               this.o = -1;
+              this.actionNotice = null;
+              this.demolishArmedIndex = null;
             }
             return true;
           }
@@ -509,6 +539,8 @@ export class BuildBarSystem {
     this.aE = next;
     this.aD = next;
     this.touchArmedIndex = null;
+    this.demolishArmedIndex = null;
+    this.actionNotice = null;
     this.o = -1;
   }
 
@@ -598,7 +630,8 @@ export class BuildBarSystem {
 
       // 选中双框高亮 (原版行10589-10607: 色16580557 双drawRect)
       if (idx === this.aD) {
-        const armed = this.touchOptimized && this.touchArmedIndex === idx;
+        const armed = (this.touchOptimized && this.touchArmedIndex === idx)
+          || this.demolishArmedIndex === idx;
         r.setColor(armed
           ? item === ACTION_DEMOLISH ? 0xB23A48 : 0x2F7A5A
           : COLOR_BAR_BG);
@@ -669,7 +702,7 @@ export class BuildBarSystem {
       }
       // 价格: 金图标 + q1100 (J() 行8064-8078)
       if (ui19) r.drawImageRegion(ui19, UI19_GOLD_SX, 0, UI19_GOLD_W, 12, 210, var8 + 2, UI19_GOLD_W, 12);
-      r.drawText(`${TOWER_COST_Q1100[item]}`, 224, stripTextY, COLOR_TEXT, 8);
+      r.drawText(`${this.host?.getBuildCost?.(item) ?? TOWER_COST_Q1100[item]}`, 224, stripTextY, COLOR_TEXT, 8);
       this.renderTowerPreview(item, 1, iconCX, iconCY, panelY);
     } else if (this.aC === BAR_CAT_TECH && item >= 11 && item <= 15) {
       // ===== 科技装置项 (J() 行8091-8131: aC==1 分支) =====
@@ -718,7 +751,9 @@ export class BuildBarSystem {
     // ---- 描述/提示文本行 (J() 行7945-7954: e(item,67,y,163,av))
     const descY = var8 + 22;
     let desc = '';
-    if (this.o >= 0) {
+    if (this.actionNotice) {
+      desc = this.actionNotice;
+    } else if (this.o >= 0) {
       desc = BAR_MESSAGES[this.o] ?? ''; // 提示消息 b1015[o+113] (a(int×5) 行10672)
     } else if (item === ACTION_CANCEL) {
       desc = ORIG_ACTION_DESC[5]; // 取消选择 b1015[23]
@@ -734,9 +769,12 @@ export class BuildBarSystem {
     } else if (this.aC === BAR_CAT_TOWER && item >= 16) {
       desc = ORIG_ACTION_DESC[item - 16] ?? '';
     }
-    if (this.touchOptimized && this.touchArmedIndex === this.aD && this.o < 0) {
+    const confirmationArmed = (this.touchOptimized && this.touchArmedIndex === this.aD)
+      || this.demolishArmedIndex === this.aD;
+    if (confirmationArmed && this.o < 0 && !this.actionNotice) {
       const confirmation = item === ACTION_DEMOLISH ? '再次点击拆除' : '再次点击确认';
-      desc = desc ? `${confirmation} · ${desc}` : confirmation;
+      const prompt = !this.touchOptimized && item === ACTION_DEMOLISH ? '再次按确认拆除' : confirmation;
+      desc = desc ? `${prompt} · ${desc}` : prompt;
     }
     this.drawWrapped(desc, 67, descY, 163, COLOR_TEXT, 8, 10);
   }

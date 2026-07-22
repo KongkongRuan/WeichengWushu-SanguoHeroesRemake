@@ -15,10 +15,16 @@ import { HEROES, Faction } from '../data/heroes';
 import type { TechTreeSystem, TechEffectInstance, HeroState } from './TechTree';
 import type { Tower } from './Tower';
 import { CheatProfile, createDefaultCheatProfile, normalizeCheatProfile } from './CheatProgress';
+import type { EnhancedRunStateV1 } from '../enhancement/RunState';
+import type { RulesetId } from '../enhancement/Ruleset';
+import { normalizeRuleset } from '../enhancement/Ruleset';
+import { BattleRecordProfile, createBattleRecordProfile } from '../enhancement/BattleRecords';
 
 const SAVE_KEY = 'weicheng_save_v1';
 const SETTINGS_KEY = 'weicheng_settings_v1';
 const CHEAT_PROFILE_KEY = 'weicheng_cheat_profile_v1';
+const ENHANCEMENT_PROFILE_KEY = 'weicheng_enhancement_profile_v1';
+export const CURRENT_SAVE_VERSION = 2;
 
 // ============================================================
 // 存档数据结构
@@ -49,7 +55,7 @@ export interface SaveData {
   towers: {
     x: number; y: number; type: number; level: number; damage: number; range: number; fireRate: number;
     heroId: number; effectType: number; hp: number; maxHp: number;
-    orientation?: number; gateLoaded?: boolean; gateState?: number;
+    orientation?: number; gateLoaded?: boolean; gateState?: number; instanceId?: number; attackSequence?: number;
   }[];
 
   // 统计
@@ -73,6 +79,10 @@ export interface SaveData {
   battleCheatsUsed?: string[];
   battleLeaks?: number;
   quickDeployEligible?: boolean;
+
+  // ====== 玩法增强（v2；经典存档不需要 enhancedRun） ======
+  rulesetId?: RulesetId;
+  enhancedRun?: EnhancedRunStateV1;
 }
 
 // ============================================================
@@ -84,6 +94,23 @@ export interface GameSettings {
   sfxEnabled: boolean;
   showFps: boolean;
   scale: number;
+  rulesetId: RulesetId;
+}
+
+/** 纯函数迁移入口，未知未来版本会安全拒绝，旧 v1 会逐字段保留。 */
+export function migrateSaveData(source: unknown): SaveData | null {
+  if (!source || typeof source !== 'object') return null;
+  const raw = source as Partial<SaveData> & Record<string, unknown>;
+  const version = Number(raw.version ?? 1);
+  if (version > CURRENT_SAVE_VERSION || version < 1) return null;
+  const migrated = { ...raw } as SaveData;
+  migrated.version = CURRENT_SAVE_VERSION;
+  migrated.timestamp = Number(raw.timestamp) || 0;
+  migrated.rulesetId = normalizeRuleset(raw.rulesetId);
+  migrated.battleLeaks = Math.max(0, Number(raw.battleLeaks) || 0);
+  migrated.quickDeployEligible = raw.quickDeployEligible !== false;
+  migrated.battleCheatsUsed = Array.isArray(raw.battleCheatsUsed) ? [...raw.battleCheatsUsed] : [];
+  return migrated;
 }
 
 // ============================================================
@@ -112,7 +139,7 @@ export class SaveSystem {
    */
   save(data: SaveData): boolean {
     try {
-      data.version = 1;
+      data.version = CURRENT_SAVE_VERSION;
       data.timestamp = Date.now();
       const json = JSON.stringify(data);
       localStorage.setItem(SAVE_KEY, json);
@@ -133,9 +160,9 @@ export class SaveSystem {
       const json = localStorage.getItem(SAVE_KEY);
       if (!json) return null;
 
-      const data = JSON.parse(json) as SaveData;
-      if (data.version !== 1) {
-        console.warn('Save data version mismatch, ignoring old save');
+      const data = migrateSaveData(JSON.parse(json));
+      if (!data) {
+        console.warn('Save data version is unsupported');
         return null;
       }
       return data;
@@ -191,12 +218,14 @@ export class SaveSystem {
       sfxEnabled: true,
       showFps: false,
       scale: 2,
+      rulesetId: 'classic',
     };
 
     try {
       const json = localStorage.getItem(SETTINGS_KEY);
       if (!json) return defaultSettings;
       const settings = { ...defaultSettings, ...JSON.parse(json) };
+      settings.rulesetId = normalizeRuleset(settings.rulesetId);
       return settings;
     } catch (e) {
       return defaultSettings;
@@ -225,6 +254,26 @@ export class SaveSystem {
     }
   }
 
+  loadEnhancementProfile(): BattleRecordProfile {
+    try {
+      const json = localStorage.getItem(ENHANCEMENT_PROFILE_KEY);
+      return json ? createBattleRecordProfile(JSON.parse(json)) : createBattleRecordProfile();
+    } catch (e) {
+      console.error('Failed to load enhancement profile:', e);
+      return createBattleRecordProfile();
+    }
+  }
+
+  saveEnhancementProfile(profile: BattleRecordProfile): boolean {
+    try {
+      localStorage.setItem(ENHANCEMENT_PROFILE_KEY, JSON.stringify(createBattleRecordProfile(profile)));
+      return true;
+    } catch (e) {
+      console.error('Failed to save enhancement profile:', e);
+      return false;
+    }
+  }
+
   /**
    * 从游戏状态创建存档数据
    */
@@ -242,7 +291,7 @@ export class SaveSystem {
     const awakenedHeroes = techTree.getAwakenedHeroes();
 
     return {
-      version: 1,
+      version: CURRENT_SAVE_VERSION,
       timestamp: Date.now(),
       levelIndex,
       currentLevel,
@@ -280,6 +329,8 @@ export class SaveSystem {
         orientation: t.orientation,
         gateLoaded: t.gateLoaded,
         gateState: t.gateState,
+        instanceId: t.instanceId,
+        attackSequence: t.attackSequence,
       })),
       totalKills: stats.totalKills,
       totalGoldEarned: stats.totalGoldEarned,
@@ -389,7 +440,7 @@ export class SaveSystem {
   /**
    * 获取存档摘要信息 (用于存档选择界面)
    */
-  getSaveSummary(): { level: string; gold: number; heroes: number; time: string } | null {
+  getSaveSummary(): { level: string; gold: number; heroes: number; time: string; rulesetId: RulesetId } | null {
     const data = this.load();
     if (!data) return null;
 
@@ -402,6 +453,7 @@ export class SaveSystem {
       gold: data.gold,
       heroes: data.awakenedHeroes.length,
       time: this.getFormattedSaveTime(),
+      rulesetId: normalizeRuleset(data.rulesetId),
     };
   }
 }

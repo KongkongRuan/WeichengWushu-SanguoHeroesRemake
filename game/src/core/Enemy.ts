@@ -27,6 +27,12 @@ import { MapData } from './MapData';
 import { SpriteLoader } from './SpriteLoader';
 import { canStartWave as canRequestWave } from './Timing';
 import { HEROES } from '../data/heroes';
+import type { RulesetId } from '../enhancement/Ruleset';
+import { FeatureContext } from '../enhancement/Ruleset';
+import { SeededRng } from '../enhancement/SeededRng';
+import type { WavePlan } from '../enhancement/WaveIntel';
+import type { CombatEvents, CombatStatusId, StatusRemovalReason } from '../enhancement/CombatEvents';
+import type { ModifierResolver } from '../enhancement/ModifierResolver';
 import {
   TILE_SIZE,
   MAP_TOP_BAR_H,
@@ -61,6 +67,7 @@ export enum EnemyState {
  * 敌人结构 (字段注释标注原版 b1066[n][idx] 对应索引)
  */
 export interface Enemy {
+  instanceId?: number;  // 强化战报使用的稳定局内 ID
   x: number;           // [0]  X坐标 (地图像素)
   y: number;           // [1]  Y坐标 (地图像素)
   hp: number;          // [2]  当前HP
@@ -100,6 +107,37 @@ export interface Enemy {
   hitTimer: number;      // [10] 受击动画计时，-1 表示空闲
   lastDamage: number;    // [16] 最近一次显示的伤害
   impactDir: number;     // [9] 擂木推出方向
+  fireSourceTowerId?: number;
+  poisonSourceTowerId?: number;
+  freezeSourceTowerId?: number;
+  paralyzeSourceTowerId?: number;
+  slowSourceTowerId?: number;
+  lastDamageSourceId?: number;
+  killCredited?: boolean;
+  armorBreakTimer?: number;
+  armorBreakAmount?: number;
+  armorBreakSourceTowerId?: number;
+}
+
+export interface SerializedEnemySystem {
+  currentWave: number;
+  spawnedInWave: number;
+  waveSize: number;
+  spawnTimer: number;
+  enemyType: number;
+  waveHp: number;
+  waveDefense: number;
+  waveSpeed: number;
+  totalSpawnIndex: number;
+  bossType: number;
+  bossId: number;
+  bossPending: boolean;
+  wavePending: boolean;
+  totalSpawned: number;
+  totalKilled: number;
+  nextEnemyInstanceId: number;
+  currentWavePlan: WavePlan | null;
+  enemies: Enemy[];
 }
 
 export class EnemySystem {
@@ -129,6 +167,12 @@ export class EnemySystem {
   private fireDamage: number = 8; // 原版 z(int)：由蜀国七级烟火是否仍在场动态决定
   private detourClockwise: boolean = false; // 对应原版 q1082，绕行方向交替
   private visualFrame: number = 0;
+  private features = new FeatureContext('classic');
+  private rng: SeededRng | null = null;
+  private events: CombatEvents | null = null;
+  private modifiers: ModifierResolver | null = null;
+  private currentWavePlan: WavePlan | null = null;
+  private nextEnemyInstanceId = 1;
 
   // 统计
   private totalSpawned: number = 0;
@@ -137,8 +181,8 @@ export class EnemySystem {
   private goldReward: number = 5;
 
   // 回调
-  private onEnemyKilled: ((gold: number) => void) | null = null;
-  private onEnemyEscaped: (() => void) | null = null;
+  private onEnemyKilled: ((gold: number, enemy: Enemy) => void) | null = null;
+  private onEnemyEscaped: ((enemy: Enemy) => void) | null = null;
   private onBossWave: ((bossType: number, bossId: number) => void) | null = null;
 
   // 关卡是否已开始 (剧情阶段不生成敌人)
@@ -172,6 +216,19 @@ export class EnemySystem {
     this.fireDamage = Math.max(0, Math.floor(damage));
   }
 
+  setEnhancementContext(
+    rulesetId: RulesetId,
+    rng: SeededRng | null,
+    events: CombatEvents | null,
+    modifiers: ModifierResolver | null,
+  ): void {
+    this.features = new FeatureContext(rulesetId);
+    this.rng = rng;
+    this.events = events;
+    this.modifiers = modifiers;
+    if (!this.features.waveIntel) this.currentWavePlan = null;
+  }
+
   /**
    * 标记关卡已开始 (剧情阶段结束后调用)
    */
@@ -179,7 +236,7 @@ export class EnemySystem {
     this.levelStarted = true;
   }
 
-  setCallbacks(onKilled: (gold: number) => void, onEscaped: () => void, onBossWave?: (bossType: number, bossId: number) => void): void {
+  setCallbacks(onKilled: (gold: number, enemy: Enemy) => void, onEscaped: (enemy: Enemy) => void, onBossWave?: (bossType: number, bossId: number) => void): void {
     this.onEnemyKilled = onKilled;
     this.onEnemyEscaped = onEscaped;
     this.onBossWave = onBossWave ?? null;
@@ -190,6 +247,7 @@ export class EnemySystem {
    * 敌人直接清空 (不释放占用格 — 地形副本由 MapData.loadLevel 重建)
    */
   reset(): void {
+    for (const enemy of this.enemies) this.emitRemainingStatusRemovals(enemy);
     this.enemies = [];
     this.aS = 0;
     this.aT = 0;
@@ -203,12 +261,15 @@ export class EnemySystem {
     this.detourClockwise = false;
     this.totalSpawned = 0;
     this.totalKilled = 0;
+    this.currentWavePlan = null;
+    this.nextEnemyInstanceId = 1;
     this.levelStarted = false;
   }
 
   /** 金手指：立即清除当前画面上的敌人，不产生额外金币。 */
   clearAllEnemies(): void {
     for (const enemy of this.enemies) {
+      this.emitRemainingStatusRemovals(enemy);
       this.mapData.releaseTileAtPixel(enemy.x, enemy.y);
     }
     this.enemies = [];
@@ -217,8 +278,69 @@ export class EnemySystem {
   /** 请求首波/下一波；对应原版 g1046==35 ('#') 的条件判断。 */
   requestNextWave(): boolean {
     if (!this.canStartNextWave) return false;
+    if (this.features.waveIntel) this.prepareNextWavePlan();
     this.p1078 = true;
     return true;
+  }
+
+  prepareNextWavePlan(): WavePlan | null {
+    if (!this.features.waveIntel || !this.canStartNextWave) return null;
+    const wave = this.aS + 1;
+    if (this.currentWavePlan?.wave === wave) return this.currentWavePlan;
+    this.currentWavePlan = this.calculateWavePlan(wave);
+    this.events?.emit('wavePlanned', {
+      wave, enemyType: this.currentWavePlan.enemyType, count: this.currentWavePlan.count,
+      bossId: this.currentWavePlan.bossId,
+    });
+    return this.currentWavePlan;
+  }
+
+  private calculateWavePlan(wave: number): WavePlan {
+    const elite = wave % 4 === 0;
+    let enemyType = 0;
+    let bossType = 0;
+    let bossId = 0;
+    if (elite) {
+      let off = 0;
+      if (this.aN > 1 && this.aN < 6 && (FACTION_OFFSET_A1132[this.faction]?.[this.aN] ?? 0) === 1) {
+        off = (BOSS_LIST_Z1131[this.aN]?.length ?? 0) >> 1;
+      }
+      const idx = (wave >> 2) + off - 1;
+      const entry = BOSS_TABLE_A1067[this.aN]?.[idx] ?? [1, 1];
+      bossId = BOSS_LIST_Z1131[this.aN]?.[idx] ?? 0;
+      enemyType = entry[0] >> 1;
+      bossType = entry[1];
+    } else {
+      const roll = this.rng?.nextInt(21) ?? 0;
+      const prob = WAVE_PROB_J1080[this.aN] ?? WAVE_PROB_J1080[0];
+      enemyType = prob.length - 1;
+      for (let i = 0; i < prob.length; i++) {
+        if (roll <= prob[i]) { enemyType = i; break; }
+      }
+    }
+    const stats = UNIT_STATS_I1079[enemyType] ?? UNIT_STATS_I1079[0];
+    return {
+      wave,
+      enemyType,
+      count: Math.min(79, stats[2] + stats[3] * wave),
+      spawnLane: null,
+      bossType,
+      bossId,
+      elite,
+    };
+  }
+
+  private applyWavePlan(plan: WavePlan): void {
+    this.aS = plan.wave;
+    this.aV = plan.enemyType;
+    this.aX = plan.count;
+    this.ba = plan.bossType;
+    this.bb = plan.bossId;
+    this.o1077 = plan.elite;
+    const stats = UNIT_STATS_I1079[this.aV] ?? UNIT_STATS_I1079[0];
+    this.aW = stats[0] + stats[1] * this.aS + (this.ba === 3 ? this.aS * 10 : 0);
+    this.aY = stats[4] * this.aS + (this.ba === 1 ? this.aS : 0);
+    this.aZ = stats[5];
   }
 
   // ============================================================
@@ -304,13 +426,14 @@ export class EnemySystem {
     const sp = this.mapData.getSpawnPixel();
     const elite = this.o1077;
     const enemy: Enemy = {
+      instanceId: this.nextEnemyInstanceId++,
       x: sp.x,                                // [0] = b1069[aN][0]
       y: sp.y,                                // [1] = b1069[aN][1]
       hp: elite ? this.aW * 10 : this.aW,     // [2] 名将波10倍HP
       defense: this.aY,                       // [3] 原版 aY，攻击时从伤害中扣除
       goldReward: elite ? 50 : 5,             // 原版结算固定奖励，不是波次 aY
-      speed: this.aZ,                         // [4]
-      baseSpeed: this.aZ,
+      speed: this.modifiers?.enemySpeed(this.aZ, elite) ?? this.aZ, // [4]
+      baseSpeed: this.modifiers?.enemySpeed(this.aZ, elite) ?? this.aZ,
       slowScale: 1,
       dir: this.mapData.getPathDirAtPixel(sp.x, sp.y), // [5] = c(x,y) 出生格方向
       variant: elite ? (this.aV << 1) + 1 : this.aV << 1, // [6]
@@ -351,6 +474,9 @@ export class EnemySystem {
     this.totalSpawned++;
     // 占用出生格 a(x, y, true)
     this.mapData.occupyTileAtPixel(sp.x, sp.y);
+    this.events?.emit('enemySpawned', {
+      enemyId: enemy.instanceId ?? 0, wave: this.aS, enemyType: enemy.unitType, elite: enemy.elite,
+    });
   }
 
   // ============================================================
@@ -368,11 +494,20 @@ export class EnemySystem {
     // 1. O() 波次推进 (行8518-8566)
     if (this.p1078) {
       this.p1078 = false;
-      this.o1077 = (this.aS & 3) === 3; // 每第4波为名将波
       this.aR = 0;
       this.aT = 0;
-      this.aS++;
-      this.computeWaveParams(); // R()
+      if (this.features.waveIntel) {
+        const plan = this.currentWavePlan?.wave === this.aS + 1
+          ? this.currentWavePlan
+          : this.calculateWavePlan(this.aS + 1);
+        this.currentWavePlan = plan;
+        this.applyWavePlan(plan);
+      } else {
+        this.o1077 = (this.aS & 3) === 3; // 每第4波为名将波
+        this.aS++;
+        this.computeWaveParams(); // R()
+      }
+      this.events?.emit('waveStarted', { wave: this.aS });
       // 名将音乐和横幅在首个名将实体实际生成时通过回调触发。
     }
 
@@ -453,6 +588,7 @@ export class EnemySystem {
 
   /** 旧存档和测试对象缺少新增字段时，按原版出生值补齐。 */
   private ensureCombatFields(enemy: Enemy): void {
+    enemy.instanceId ??= this.nextEnemyInstanceId++;
     enemy.fireTimer ??= 0;
     enemy.paralyzeTimer ??= 0;
     enemy.freezeTimer ??= 0;
@@ -470,14 +606,85 @@ export class EnemySystem {
     enemy.impactDir ??= enemy.dir;
     enemy.speed ??= enemy.baseSpeed ?? 1;
     enemy.baseSpeed ??= enemy.speed;
+    enemy.fireSourceTowerId ??= 0;
+    enemy.poisonSourceTowerId ??= 0;
+    enemy.freezeSourceTowerId ??= 0;
+    enemy.paralyzeSourceTowerId ??= 0;
+    enemy.slowSourceTowerId ??= 0;
+    enemy.lastDamageSourceId ??= 0;
+    enemy.armorBreakTimer ??= 0;
+    enemy.armorBreakAmount ??= 0;
+    enemy.armorBreakSourceTowerId ??= 0;
   }
 
-  private recordStatusDamage(enemy: Enemy, amount: number): void {
+  private statusDuration(enemy: Enemy, status: CombatStatusId): number {
+    switch (status) {
+      case 'paralyze': return enemy.paralyzeTimer;
+      case 'freeze': return enemy.freezeTimer;
+      case 'poison': return enemy.poisonTimer;
+      case 'fire': return enemy.fireTimer;
+      case 'slow': return enemy.slowTimer;
+      case 'armor_break': return enemy.armorBreakTimer ?? 0;
+    }
+  }
+
+  private statusSource(enemy: Enemy, status: CombatStatusId): number {
+    switch (status) {
+      case 'paralyze': return enemy.paralyzeSourceTowerId ?? 0;
+      case 'freeze': return enemy.freezeSourceTowerId ?? 0;
+      case 'poison': return enemy.poisonSourceTowerId ?? 0;
+      case 'fire': return enemy.fireSourceTowerId ?? 0;
+      case 'slow': return enemy.slowSourceTowerId ?? 0;
+      case 'armor_break': return enemy.armorBreakSourceTowerId ?? 0;
+    }
+  }
+
+  private clearStatusSource(enemy: Enemy, status: CombatStatusId): void {
+    switch (status) {
+      case 'paralyze': enemy.paralyzeSourceTowerId = 0; break;
+      case 'freeze': enemy.freezeSourceTowerId = 0; break;
+      case 'poison': enemy.poisonSourceTowerId = 0; break;
+      case 'fire': enemy.fireSourceTowerId = 0; break;
+      case 'slow': enemy.slowSourceTowerId = 0; break;
+      case 'armor_break': enemy.armorBreakSourceTowerId = 0; break;
+    }
+  }
+
+  private emitStatusRemoved(
+    enemy: Enemy,
+    status: CombatStatusId,
+    reason: StatusRemovalReason,
+  ): void {
+    this.events?.emit('statusRemoved', {
+      enemyId: enemy.instanceId ?? 0,
+      towerId: this.statusSource(enemy, status),
+      status,
+      reason,
+    });
+    this.clearStatusSource(enemy, status);
+  }
+
+  private emitExpiredStatus(enemy: Enemy, status: CombatStatusId, previousDuration: number): void {
+    if (previousDuration > 0 && this.statusDuration(enemy, status) <= 0) {
+      this.emitStatusRemoved(enemy, status, 'expired');
+    }
+  }
+
+  private emitRemainingStatusRemovals(enemy: Enemy): void {
+    const statuses: CombatStatusId[] = ['paralyze', 'freeze', 'poison', 'fire', 'slow', 'armor_break'];
+    for (const status of statuses) {
+      if (this.statusDuration(enemy, status) > 0) this.emitStatusRemoved(enemy, status, 'enemy_removed');
+    }
+  }
+
+  private recordStatusDamage(enemy: Enemy, amount: number, towerId: number = 0): void {
     const damage = Math.max(0, Math.floor(amount));
     if (damage <= 0) return;
     enemy.hp -= damage;
+    enemy.lastDamageSourceId = towerId;
     enemy.lastDamage = damage;
     if (enemy.hitTimer < 0) enemy.hitTimer = 4;
+    this.events?.emit('enemyDamaged', { enemyId: enemy.instanceId ?? 0, towerId, damage, category: 'dot' });
   }
 
   /**
@@ -487,6 +694,32 @@ export class EnemySystem {
   private updateStatusEffects(enemy: Enemy): boolean {
     let immobilized = false;
     const aligned = (enemy.x & 7) === 0 && (enemy.y & 7) === 0;
+    const previous = {
+      paralyze: enemy.paralyzeTimer,
+      freeze: enemy.freezeTimer,
+      poison: enemy.poisonTimer,
+      fire: enemy.fireTimer,
+      slow: enemy.slowTimer,
+      armorBreak: enemy.armorBreakTimer ?? 0,
+    };
+
+    if (enemy.hp > 0 && enemy.state !== EnemyState.DYING && enemy.state !== EnemyState.SETTLE) {
+      const control = previous.paralyze > 0
+        ? { status: 'paralyze' as const, towerId: enemy.paralyzeSourceTowerId ?? 0 }
+        : previous.freeze > 0
+          ? { status: 'freeze' as const, towerId: enemy.freezeSourceTowerId ?? 0 }
+          : previous.slow > 0 && enemy.baseSpeed > 1
+            ? { status: 'slow' as const, towerId: enemy.slowSourceTowerId ?? 0 }
+            : null;
+      if (control && control.towerId > 0) {
+        this.events?.emit('enemyControlled', {
+          enemyId: enemy.instanceId ?? 0,
+          towerId: control.towerId,
+          status: control.status,
+          frames: 1,
+        });
+      }
+    }
 
     if (enemy.paralyzeTimer > 0) {
       enemy.paralyzeFrame = (enemy.paralyzeFrame + 1) % 3;
@@ -505,7 +738,7 @@ export class EnemySystem {
     if (enemy.poisonTimer > 0) {
       enemy.poisonFrame = (enemy.poisonFrame + 1) % 3;
       if ((enemy.poisonTimer & 7) === 0) {
-        this.recordStatusDamage(enemy, enemy.poisonPower);
+        this.recordStatusDamage(enemy, this.modifiers?.poisonDamage(enemy.poisonPower) ?? enemy.poisonPower, enemy.poisonSourceTowerId);
       }
       enemy.poisonTimer--;
     } else {
@@ -516,7 +749,7 @@ export class EnemySystem {
     if (enemy.fireTimer > 0) {
       if ((enemy.fireTimer & 7) === 0) {
         enemy.firePower = this.fireDamage;
-        this.recordStatusDamage(enemy, this.fireDamage);
+        this.recordStatusDamage(enemy, this.fireDamage, enemy.fireSourceTowerId);
       }
       enemy.fireFrame = (enemy.fireFrame + 1) % 6;
       enemy.fireTimer--;
@@ -528,7 +761,9 @@ export class EnemySystem {
       if (enemy.freezeTimer >= 44) {
         if (enemy.freezeFrame < 3) enemy.freezeFrame++;
       } else if (enemy.freezeTimer <= 4) {
-        if (enemy.freezeTimer === 4) this.recordStatusDamage(enemy, 10);
+        if (enemy.freezeTimer === 4) {
+          this.recordStatusDamage(enemy, this.modifiers?.freezeShatterDamage(10) ?? 10, enemy.freezeSourceTowerId);
+        }
         if (enemy.freezeFrame > 0) enemy.freezeFrame--;
       }
       enemy.freezeTimer--;
@@ -562,6 +797,16 @@ export class EnemySystem {
     );
     enemy.slowScale = enemy.baseSpeed > 0 ? enemy.speed / enemy.baseSpeed : 1;
     enemy.dotScale = enemy.firePower >= 16 ? 2 : 1;
+    if ((enemy.armorBreakTimer ?? 0) > 0) {
+      enemy.armorBreakTimer = Math.max(0, (enemy.armorBreakTimer ?? 0) - 1);
+      if (enemy.armorBreakTimer === 0) enemy.armorBreakAmount = 0;
+    }
+    this.emitExpiredStatus(enemy, 'paralyze', previous.paralyze);
+    this.emitExpiredStatus(enemy, 'freeze', previous.freeze);
+    this.emitExpiredStatus(enemy, 'poison', previous.poison);
+    this.emitExpiredStatus(enemy, 'fire', previous.fire);
+    this.emitExpiredStatus(enemy, 'slow', previous.slow);
+    this.emitExpiredStatus(enemy, 'armor_break', previous.armorBreak);
     return immobilized;
   }
 
@@ -609,7 +854,9 @@ export class EnemySystem {
       case EnemyState.SETTLE: { // case 6: 死亡结算
         // 原版结算: 精英 bz+=50、普通 bz+=5；金手指 z1169 翻倍由 Game 回调层处理。
         this.totalKilled++;
-        this.onEnemyKilled?.(enemy.goldReward);
+        this.onEnemyKilled?.(enemy.goldReward, enemy);
+        this.events?.emit('enemyDied', { enemyId: enemy.instanceId ?? 0, towerId: enemy.lastDamageSourceId || null });
+        this.emitRemainingStatusRemovals(enemy);
         // 原版: 精英死亡时清空所有敌人[26]及 ba — H5不影响逻辑, 跳过
         this.removeEnemy(index);
         return;
@@ -663,7 +910,9 @@ export class EnemySystem {
         enemy.chargeTimer++;
         if (enemy.chargeTimer > 4) {
           // 5逻辑帧后: by(城防)-1, 移除敌人; by<=0 由 Game 判负
-          this.onEnemyEscaped?.();
+          this.onEnemyEscaped?.(enemy);
+          this.events?.emit('enemyEntered', { enemyId: enemy.instanceId ?? 0 });
+          this.emitRemainingStatusRemovals(enemy);
           this.removeEnemy(index);
         }
         return;
@@ -1068,6 +1317,48 @@ export class EnemySystem {
 
   /** 名将名单索引 (bb, z1131查得) */
   get bossId(): number { return this.bb; }
+
+  get wavePlan(): WavePlan | null { return this.currentWavePlan ? { ...this.currentWavePlan } : null; }
+
+  exportState(): SerializedEnemySystem {
+    return {
+      currentWave: this.aS, spawnedInWave: this.aT, waveSize: this.aX, spawnTimer: this.aR,
+      enemyType: this.aV, waveHp: this.aW, waveDefense: this.aY, waveSpeed: this.aZ,
+      totalSpawnIndex: this.aQ, bossType: this.ba, bossId: this.bb, bossPending: this.o1077,
+      wavePending: this.p1078, totalSpawned: this.totalSpawned, totalKilled: this.totalKilled,
+      nextEnemyInstanceId: this.nextEnemyInstanceId,
+      currentWavePlan: this.currentWavePlan ? { ...this.currentWavePlan } : null,
+      enemies: this.enemies.map(enemy => ({ ...enemy })),
+    };
+  }
+
+  restoreState(state: SerializedEnemySystem): void {
+    if (!state || !Array.isArray(state.enemies)) return;
+    for (const enemy of this.enemies) this.mapData.releaseTileAtPixel(enemy.x, enemy.y);
+    this.aS = Math.max(0, state.currentWave | 0);
+    this.aT = Math.max(0, state.spawnedInWave | 0);
+    this.aX = Math.max(0, state.waveSize | 0);
+    this.aR = state.spawnTimer | 0;
+    this.aV = state.enemyType | 0;
+    this.aW = Math.max(0, state.waveHp | 0);
+    this.aY = Math.max(0, state.waveDefense | 0);
+    this.aZ = Math.max(0, state.waveSpeed | 0);
+    this.aQ = Math.max(0, state.totalSpawnIndex | 0);
+    this.ba = state.bossType | 0;
+    this.bb = state.bossId | 0;
+    this.o1077 = state.bossPending === true;
+    this.p1078 = state.wavePending === true;
+    this.totalSpawned = Math.max(0, state.totalSpawned | 0);
+    this.totalKilled = Math.max(0, state.totalKilled | 0);
+    this.nextEnemyInstanceId = Math.max(1, state.nextEnemyInstanceId | 0);
+    this.currentWavePlan = state.currentWavePlan ? { ...state.currentWavePlan } : null;
+    this.enemies = state.enemies.map(enemy => ({ ...enemy }));
+    for (const enemy of this.enemies) {
+      this.ensureCombatFields(enemy);
+      this.mapData.occupyTileAtPixel(enemy.x, enemy.y);
+    }
+    this.levelStarted = true;
+  }
 
   /**
    * 过关判定 (对应原版 G() case2 行7492-7527:

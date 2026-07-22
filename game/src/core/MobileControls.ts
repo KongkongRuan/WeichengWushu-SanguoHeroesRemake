@@ -18,6 +18,7 @@ export interface MobileControlState {
   speed: number;
   paused: boolean;
   waveReady: boolean;
+  comboCountdownSeconds: number | null;
   context: MobileControlContext;
 }
 
@@ -80,7 +81,9 @@ export class MobileControls {
     if (this.pauseButton) this.pauseButton.textContent = state.paused ? '继续' : '暂停';
     if (this.waveButton) {
       this.waveButton.disabled = !state.waveReady || state.paused;
-      this.waveButton.textContent = state.waveReady ? '出兵 ▶' : '波次进行中';
+      this.waveButton.textContent = state.waveReady
+        ? state.comboCountdownSeconds == null ? '出兵 ▶' : `出兵 ${state.comboCountdownSeconds.toFixed(1)}s`
+        : '波次进行中';
     }
 
     // 操作栏直接在画面内二次点击确认；大按钮只保留给需要移动塔影的建造选位。

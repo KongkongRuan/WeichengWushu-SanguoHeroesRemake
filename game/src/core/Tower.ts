@@ -36,6 +36,15 @@ import {
 import { TOWER_NAMES, TOWER_DESCRIPTIONS, HEROES, Hero, HERO_EFFECT_DESCRIPTIONS } from '../data/heroes';
 import type { TechTreeSystem } from './TechTree';
 import { linearLevelValue } from './Timing';
+import type { RulesetId } from '../enhancement/Ruleset';
+import { FeatureContext } from '../enhancement/Ruleset';
+import type {
+  CombatEvents,
+  CombatStatusId,
+  StatusRemovalReason,
+} from '../enhancement/CombatEvents';
+import type { ModifierResolver } from '../enhancement/ModifierResolver';
+import type { ReactionResult, ReactionSystem } from '../enhancement/ReactionSystem';
 
 // 武将ID到武将对象的映射 (避免循环依赖, 在模块加载时构建)
 const HEROES_MAP: Record<number, Hero> = {};
@@ -44,6 +53,7 @@ HEROES.forEach(h => { HEROES_MAP[h.id] = h; });
 const BUILD_EFFECT_FRAME_COUNT = 9;
 
 export interface Tower {
+  instanceId?: number; // 强化战报使用的稳定局内 ID
   x: number;          // 瓦片X坐标
   y: number;          // 瓦片Y坐标
   type: number;       // 原版塔类型 (0-10)
@@ -71,6 +81,7 @@ export interface Tower {
   volleyFrames: number[]; // 原版 C1134：弓手塔/麻痹矢五枚投射物帧
   liquidPattern: number; // 原版 entity[11]：沸水/滚油每次启动时随机的三格液体纹理偏移
   liquidIgnited: boolean; // 原版 entity[16]：本轮滚油是否已被燃烧敌人引燃
+  liquidIgnitionSourceTowerId?: number; // 强化规则：本轮引燃滚油的火焰来源
   buildEffect: number;  // 0=无，1=建造成功，2=升级成功（对应原版 entity[4] 的 3/4 状态）
   buildEffectFrame: number; // ui_20 白烟帧（0..8）
   strikeX: number;      // 原版 entity[11]：最近一次攻击的地图像素 X
@@ -78,6 +89,7 @@ export interface Tower {
   gateLoaded: boolean;   // 断龙闸 entity[15]：是否已经装填石块
   gateState: number;     // 断龙闸 entity[10]：0待命 1释放中 2落闸
   gateTimer: number;     // 断龙闸动作计时，对应 entity[13]
+  attackSequence?: number;
 }
 
 export class TowerSystem {
@@ -114,6 +126,13 @@ export class TowerSystem {
   private lastUpgradeFailure = '';
   // 精灵图缓存 (避免 getByPrefix 每帧线性查找)
   private spriteCache: Map<string, HTMLImageElement | null> = new Map();
+  private features = new FeatureContext('classic');
+  private events: CombatEvents | null = null;
+  private modifiers: ModifierResolver | null = null;
+  private reactions: ReactionSystem | null = null;
+  private getLives: () => number = () => 10;
+  private nextTowerInstanceId = 1;
+  private activeEnemies: Enemy[] = [];
 
   // 塔配置直接按原版 type 0-10 编号。伤害/范围/攻击间隔的初值分别来自
   // s1102/t1103/u1104；建造费运行时由 q1100 provider 注入。
@@ -232,6 +251,20 @@ export class TowerSystem {
    */
   setMapLevel(level: number): void {
     this.mapLevel = level;
+  }
+
+  setEnhancementContext(
+    rulesetId: RulesetId,
+    events: CombatEvents | null,
+    modifiers: ModifierResolver | null,
+    reactions: ReactionSystem | null,
+    getLives: () => number,
+  ): void {
+    this.features = new FeatureContext(rulesetId);
+    this.events = events;
+    this.modifiers = modifiers;
+    this.reactions = reactions;
+    this.getLives = getLives;
   }
 
   setFaction(faction: number): void {
@@ -365,12 +398,12 @@ export class TowerSystem {
 
     // 原版建造费 (q1100) 优先, 否则用 towerConfigs。装填半价只影响断龙闸装填，
     // 不能把所有新建建筑的 q1100 都减半。
-    const baseCost = this.buildCostProvider?.(type) ?? config.cost;
-    const actualCost = baseCost;
+    const actualCost = this.getBuildCost(type);
     if (this.gold < actualCost) return false;
 
     const stats = this.originalStats(type, 1);
     const tower: Tower = {
+      instanceId: this.nextTowerInstanceId++,
       x: tileX,
       y: tileY,
       type,
@@ -404,6 +437,7 @@ export class TowerSystem {
       gateLoaded: false,
       gateState: 0,
       gateTimer: 0,
+      attackSequence: 0,
     };
 
     this.towers.push(tower);
@@ -414,14 +448,22 @@ export class TowerSystem {
     }
     this.gold -= actualCost;
     this.onGoldSpent?.(actualCost);
+    this.events?.emit('towerBuilt', { towerId: tower.instanceId ?? 0, type, cost: actualCost });
     return true;
+  }
+
+  /** 原版动作16显示的逐级升级费用；塔升级不等于购买科技建筑。 */
+  getBuildCost(type: number): number {
+    const base = this.buildCostProvider?.(type) ?? this.towerConfigs[type]?.cost ?? 0;
+    return this.modifiers?.buildCost(base, type) ?? base;
   }
 
   /** 原版动作16显示的逐级升级费用；塔升级不等于购买科技建筑。 */
   getUpgradeCost(tower: Tower): number | null {
     if (tower.level >= 7) return null;
     const [baseCost, stepCost] = TOWER_UPGRADE_COST_R1101[this.spriteType(tower.type)] ?? [50, 50];
-    return baseCost + stepCost * Math.max(0, tower.level - 1);
+    const base = baseCost + stepCost * Math.max(0, tower.level - 1);
+    return this.modifiers?.upgradeCost(base) ?? base;
   }
 
   /**
@@ -446,6 +488,7 @@ export class TowerSystem {
     this.beginUpgradeEffect(tower);
     this.gold -= cost;
     this.onGoldSpent?.(cost);
+    this.events?.emit('towerUpgraded', { towerId: tower.instanceId ?? 0, level: tower.level, cost });
     return true;
   }
 
@@ -475,6 +518,7 @@ export class TowerSystem {
     tower.heroId = heroId;
     this.techTree?.registerAwakenedHero(tower, hero);
     this.onHeroAwakened?.(hero, tower);
+    this.events?.emit('towerAwakened', { towerId: tower.instanceId ?? 0, heroId });
   }
 
   getUpgradeFailureMessage(): string {
@@ -486,8 +530,7 @@ export class TowerSystem {
    * onGoldSpent 以负数回调通知 Game 入账 (与 placeTower 扣费的正数回调对称)
    */
   sellTower(tower: Tower): void {
-    const refund = this.demolishRefundProvider?.(tower)
-      ?? Math.floor(this.towerConfigs[tower.type].cost * tower.level * 0.7);
+    const refund = this.getDemolishRefund(tower);
     this.gold += refund;
     this.onGoldSpent?.(-refund);
     const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(tower.type)] ?? 1;
@@ -498,6 +541,20 @@ export class TowerSystem {
     }
     this.towers = this.towers.filter(t => t !== tower);
     this.selectedTower = null;
+    this.events?.emit('towerSold', { towerId: tower.instanceId ?? 0, refund });
+  }
+
+  getDemolishRefund(tower: Tower): number {
+    const baseRefund = this.demolishRefundProvider?.(tower)
+      ?? Math.floor(this.towerConfigs[tower.type].cost * tower.level * 0.7);
+    return this.modifiers?.demolishRefund(baseRefund, this.investedGold(tower)) ?? baseRefund;
+  }
+
+  private investedGold(tower: Tower): number {
+    let total = this.buildCostProvider?.(tower.type) ?? this.towerConfigs[tower.type]?.cost ?? 0;
+    const [base, step] = TOWER_UPGRADE_COST_R1101[this.spriteType(tower.type)] ?? [0, 0];
+    for (let level = 1; level < tower.level; level++) total += base + step * Math.max(0, level - 1);
+    return total;
   }
 
   /**
@@ -580,6 +637,13 @@ export class TowerSystem {
    * 更新所有塔 - 应用全局科技加成
    */
   update(enemies: Enemy[], offsetX: number, offsetY: number): void {
+    this.activeEnemies = enemies;
+    if (this.features.reactions && this.reactions) {
+      this.reactions.tickZones(enemies, (enemy, damage, towerId) => {
+        const tower = this.towers.find(item => item.instanceId === towerId);
+        this.recordRawDamage(tower, enemy as Enemy, damage, 'reaction', towerId);
+      });
+    }
     this.updateDebuffs();
     this.tickAnim();
     for (const tower of this.towers) {
@@ -645,7 +709,7 @@ export class TowerSystem {
         if (!this.isActiveEnemy(enemy)) continue;
         if (Math.hypot(offsetX + enemy.x - tx, offsetY + enemy.y - ty) < tower.range) {
           // 原版 p(type,level) 只刷新 [15]，不会把正在播放的 [22] 减速帧重置为 0。
-          this.setSlow(enemy, 48, false);
+          this.setSlow(enemy, 48, false, tower.instanceId ?? 0);
         }
       }
     }
@@ -695,10 +759,12 @@ export class TowerSystem {
     tower.attackState = 1;
     tower.attackPhase = type === 0 || type === 1 || type === 4 || type === 6 ? 1 : 0;
     tower.attackFrame = 0;
+    tower.attackSequence = (tower.attackSequence ?? 0) + 1;
     tower.volleyFrames = type === 0 || type === 4 ? [0, 1, 2, 3, 4] : [];
     if (type === 8 || type === 9) {
       tower.liquidPattern = (Math.random() * 3) | 0;
       tower.liquidIgnited = false;
+      tower.liquidIgnitionSourceTowerId = 0;
     }
     const extendedLiquid = (type === 8 || type === 9)
       && this.faction === 1
@@ -842,6 +908,7 @@ export class TowerSystem {
     // 吴国投石终阶以自身七级伤害 90 为半径，给其他塔 +10 攻击。
     if (this.towers.some(t => t !== tower && t.heroId === 25
       && Math.hypot((t.x - tower.x) * TILE_SIZE, (t.y - tower.y) * TILE_SIZE) < 90)) damage += 10;
+    damage = this.modifiers?.directDamage(damage, this.spriteType(tower.type), this.getLives()) ?? damage;
     return Math.max(0, Math.floor(damage));
   }
 
@@ -857,7 +924,8 @@ export class TowerSystem {
   }
 
   private effectiveFireRate(tower: Tower): number {
-    return [24, 29].includes(tower.heroId) ? tower.fireRate - 10 : tower.fireRate;
+    const base = [24, 29].includes(tower.heroId) ? tower.fireRate - 10 : tower.fireRate;
+    return this.modifiers?.fireRate(base, this.spriteType(tower.type)) ?? base;
   }
 
   private ensureEnemyCombatFields(enemy: Enemy): void {
@@ -876,13 +944,161 @@ export class TowerSystem {
     enemy.hitTimer ??= -1;
     enemy.lastDamage ??= 0;
     enemy.impactDir ??= enemy.dir ?? 0;
+    enemy.instanceId ??= 0;
+    enemy.armorBreakTimer ??= 0;
+    enemy.armorBreakAmount ??= 0;
+    enemy.lastDamageSourceId ??= 0;
+    enemy.fireSourceTowerId ??= 0;
+    enemy.poisonSourceTowerId ??= 0;
+    enemy.freezeSourceTowerId ??= 0;
+    enemy.paralyzeSourceTowerId ??= 0;
+    enemy.slowSourceTowerId ??= 0;
+    enemy.armorBreakSourceTowerId ??= 0;
   }
 
-  private recordDamage(enemy: Enemy, damage: number): void {
-    const amount = Math.max(0, Math.floor(damage));
+  private statusDuration(enemy: Enemy, status: CombatStatusId): number {
+    switch (status) {
+      case 'paralyze': return enemy.paralyzeTimer;
+      case 'freeze': return enemy.freezeTimer;
+      case 'poison': return enemy.poisonTimer;
+      case 'fire': return enemy.fireTimer;
+      case 'slow': return enemy.slowTimer;
+      case 'armor_break': return enemy.armorBreakTimer ?? 0;
+    }
+  }
+
+  private statusSource(enemy: Enemy, status: CombatStatusId): number {
+    switch (status) {
+      case 'paralyze': return enemy.paralyzeSourceTowerId ?? 0;
+      case 'freeze': return enemy.freezeSourceTowerId ?? 0;
+      case 'poison': return enemy.poisonSourceTowerId ?? 0;
+      case 'fire': return enemy.fireSourceTowerId ?? 0;
+      case 'slow': return enemy.slowSourceTowerId ?? 0;
+      case 'armor_break': return enemy.armorBreakSourceTowerId ?? 0;
+    }
+  }
+
+  private setStatusSource(enemy: Enemy, status: CombatStatusId, towerId: number): void {
+    switch (status) {
+      case 'paralyze': enemy.paralyzeSourceTowerId = towerId; break;
+      case 'freeze': enemy.freezeSourceTowerId = towerId; break;
+      case 'poison': enemy.poisonSourceTowerId = towerId; break;
+      case 'fire': enemy.fireSourceTowerId = towerId; break;
+      case 'slow': enemy.slowSourceTowerId = towerId; break;
+      case 'armor_break': enemy.armorBreakSourceTowerId = towerId; break;
+    }
+  }
+
+  private emitStatusSet(
+    enemy: Enemy,
+    status: CombatStatusId,
+    previousDuration: number,
+    duration: number,
+    towerId: number,
+  ): void {
+    if (duration <= previousDuration) return;
+    const payload = { enemyId: enemy.instanceId ?? 0, towerId, status, duration };
+    if (previousDuration > 0) {
+      this.events?.emit('statusRefreshed', { ...payload, previousDuration });
+    } else {
+      this.events?.emit('statusApplied', payload);
+    }
+  }
+
+  private emitStatusDurationChange(
+    enemy: Enemy,
+    status: CombatStatusId,
+    previousDuration: number,
+    reason: StatusRemovalReason,
+  ): void {
+    const duration = this.statusDuration(enemy, status);
+    if (previousDuration <= 0 || duration === previousDuration) return;
+    const towerId = this.statusSource(enemy, status);
+    if (duration > 0) return;
+    this.events?.emit('statusRemoved', { enemyId: enemy.instanceId ?? 0, towerId, status, reason });
+    this.setStatusSource(enemy, status, 0);
+  }
+
+  private clearEnemyStatus(enemy: Enemy, status: CombatStatusId, reason: StatusRemovalReason): void {
+    const previousDuration = this.statusDuration(enemy, status);
+    if (previousDuration <= 0) return;
+    switch (status) {
+      case 'paralyze': enemy.paralyzeTimer = 0; break;
+      case 'freeze': enemy.freezeTimer = 0; enemy.freezeFrame = 0; break;
+      case 'poison': enemy.poisonTimer = 0; enemy.poisonPower = 0; break;
+      case 'fire': enemy.fireTimer = 0; enemy.fireFrame = 0; break;
+      case 'slow': enemy.slowTimer = 0; break;
+      case 'armor_break': enemy.armorBreakTimer = 0; enemy.armorBreakAmount = 0; break;
+    }
+    this.emitStatusDurationChange(enemy, status, previousDuration, reason);
+  }
+
+  private recordDamage(tower: Tower, enemy: Enemy, damage: number, category: 'direct' | 'dot' | 'reaction' = 'direct'): void {
+    const amount = Math.min(Math.max(0, enemy.hp), Math.max(0, Math.floor(damage)));
     enemy.hp -= amount;
+    enemy.lastDamageSourceId = tower.instanceId ?? 0;
     enemy.lastDamage = amount;
     if (enemy.hitTimer < 0) enemy.hitTimer = 4;
+    this.events?.emit('enemyDamaged', {
+      enemyId: enemy.instanceId ?? 0, towerId: tower.instanceId ?? 0, damage: amount, category,
+    });
+  }
+
+  private recordRawDamage(
+    tower: Tower | undefined,
+    enemy: Enemy,
+    rawDamage: number,
+    category: 'direct' | 'dot' | 'reaction',
+    fallbackTowerId: number = 0,
+  ): number {
+    this.ensureEnemyCombatFields(enemy);
+    const defense = Math.max(0, (enemy.defense ?? 0) - (enemy.armorBreakAmount ?? 0));
+    const amount = Math.min(Math.max(0, enemy.hp), Math.max(1, Math.floor(rawDamage) - defense));
+    if (tower) this.recordDamage(tower, enemy, amount, category);
+    else {
+      enemy.hp -= amount;
+      enemy.lastDamageSourceId = fallbackTowerId;
+      enemy.lastDamage = amount;
+      if (enemy.hitTimer < 0) enemy.hitTimer = 4;
+      this.events?.emit('enemyDamaged', {
+        enemyId: enemy.instanceId ?? 0, towerId: fallbackTowerId, damage: amount, category,
+      });
+    }
+    return amount;
+  }
+
+  private handleReaction(tower: Tower, enemy: Enemy): ReactionResult | null {
+    if (!this.features.reactions || !this.reactions) return null;
+    const eventId = `${tower.instanceId ?? 0}:${tower.attackSequence ?? 0}`;
+    const consumedStatuses: CombatStatusId[] = ['paralyze', 'freeze', 'poison', 'fire'];
+    const before = new Map(consumedStatuses.map(status => [status, this.statusDuration(enemy, status)]));
+    const previousArmorBreak = this.statusDuration(enemy, 'armor_break');
+    const result = this.reactions.resolveBeforeHit(eventId, tower, enemy);
+    if (!result) return null;
+    for (const status of consumedStatuses) {
+      this.emitStatusDurationChange(enemy, status, before.get(status) ?? 0, 'consumed');
+    }
+    const armorBreakDuration = this.statusDuration(enemy, 'armor_break');
+    if (armorBreakDuration > 0 && armorBreakDuration !== previousArmorBreak) {
+      const towerId = tower.instanceId ?? 0;
+      this.setStatusSource(enemy, 'armor_break', towerId);
+      this.emitStatusSet(enemy, 'armor_break', previousArmorBreak, armorBreakDuration, towerId);
+    }
+    if (result.damage > 0) {
+      for (const target of this.activeEnemies) {
+        if (!this.isLivingEnemy(target)) continue;
+        if (Math.abs(target.x - enemy.x) > 24 || Math.abs(target.y - enemy.y) > 24) continue;
+        if ((this.spriteType(tower.type) === 3 || this.spriteType(tower.type) === 9)
+          && target.bossType === 5) continue;
+        this.recordRawDamage(tower, target, result.damage, 'reaction');
+      }
+    }
+    this.events?.emit('reactionTriggered', {
+      reactionId: result.reactionId, towerId: tower.instanceId ?? 0,
+      assistTowerId: result.assistTowerId,
+      enemyId: enemy.instanceId ?? 0, damage: result.damage, visualCue: result.visualCue,
+    });
+    return result;
   }
 
   private damageEnemy(
@@ -893,21 +1109,27 @@ export class TowerSystem {
     rawOverride?: number,
   ): boolean {
     this.ensureEnemyCombatFields(enemy);
+    const type = this.spriteType(tower.type);
+    const reaction = (applyEffect || type === 8 || (type === 9 && tower.liquidIgnited))
+      ? this.handleReaction(tower, enemy)
+      : null;
     let effectApplied = false;
-    if (applyEffect && tower.effectType > 0) {
+    if (applyEffect && tower.effectType > 0 && reaction?.reactionId !== 'ice_fire_burst') {
       effectApplied = this.applyTowerEffect(enemy, tower);
     } else if (applyEffect) {
       effectApplied = this.applyHeroSlow(enemy, tower);
     }
-    const rawDamage = Math.max(1, Math.floor(rawOverride ?? (this.towerDamage(tower) * scale)));
+    const reactionMultiplier = reaction?.multiplier ?? 1;
+    if (enemy.hp <= 0) return effectApplied;
+    const rawDamage = Math.max(1, Math.floor((rawOverride ?? (this.towerDamage(tower) * scale)) * reactionMultiplier));
     // 原版 b1066[3]=aY 是敌人防御力；每次受击至少扣1点。
     const ignoresDefense = [1, 2, 7].includes(tower.heroId);
-    this.recordDamage(enemy,
-      Math.max(1, rawDamage - (ignoresDefense ? 0 : Math.max(0, enemy.defense ?? 0))));
+    const defense = Math.max(0, (enemy.defense ?? 0) - (enemy.armorBreakAmount ?? 0));
+    this.recordDamage(tower, enemy,
+      Math.max(1, rawDamage - (ignoresDefense ? 0 : defense)));
     // 原版兵种4在未被麻痹/寒冰控制时会立即熄灭火焰并重置架炮周期。
     if (enemy.unitType === 4 && enemy.paralyzeTimer === 0 && enemy.freezeTimer === 0) {
-      enemy.fireTimer = 0;
-      enemy.fireFrame = 0;
+      this.clearEnemyStatus(enemy, 'fire', 'cleared');
       enemy.siegeTimer = 0;
     }
     return effectApplied;
@@ -927,8 +1149,8 @@ export class TowerSystem {
       if (enemy === target || !this.isLivingEnemy(enemy)) continue;
       if (Math.abs(enemy.x - target.x) > 24 || Math.abs(enemy.y - target.y) > 24) continue;
       // 魏国范围效果只刷新附近敌人的计时；动画归零和冰火互斥只作用于主目标。
-      if (effect === 1) this.setParalyze(enemy, 48, false);
-      else this.setFreeze(enemy, 48, false, false);
+      if (effect === 1) this.setParalyze(enemy, 48, false, tower.instanceId ?? 0);
+      else this.setFreeze(enemy, 48, false, false, tower.instanceId ?? 0);
     }
   }
 
@@ -966,18 +1188,39 @@ export class TowerSystem {
           }
           break;
         case 8: // 沸水先熄灭火焰；4号 Boss 完全免疫沸水伤害
-          enemy.fireTimer = 0;
-          enemy.fireFrame = 0;
+          this.clearEnemyStatus(enemy, 'fire', 'cleared');
           if (enemy.hitTimer < 0 && enemy.bossType !== 4) this.damageEnemy(tower, enemy, 1, false);
           break;
         case 9: // 滚油遇到正在燃烧的敌人后，本轮液体会继续点燃后续目标
           if (enemy.hitTimer < 0) {
             if (enemy.fireTimer > 0) {
               if (tower.attackPhase === 1) tower.attackFrame = Math.max(0, tower.attackFrame - 2);
+              if (!tower.liquidIgnited) {
+                tower.liquidIgnitionSourceTowerId = enemy.fireSourceTowerId ?? 0;
+              }
               tower.liquidIgnited = true;
             }
             // 滚油直接写 [11]=48：不重置火焰帧，也不解除同时存在的寒冰。
-            if (tower.liquidIgnited) this.setFire(enemy, 48, false, false);
+            if (tower.liquidIgnited) {
+              this.setFire(enemy, this.modifiers?.fireDuration(48) ?? 48, false, false, tower.instanceId ?? 0);
+            }
+            if (tower.liquidIgnited && this.features.reactions && this.reactions) {
+              const eventId = `${tower.instanceId ?? 0}:${tower.attackSequence ?? 0}`;
+              const result = this.reactions.igniteGround(
+                eventId,
+                tower,
+                enemy.x >> 4,
+                enemy.y >> 4,
+                tower.liquidIgnitionSourceTowerId,
+              );
+              if (result) {
+                this.events?.emit('reactionTriggered', {
+                  reactionId: result.reactionId, towerId: tower.instanceId ?? 0,
+                  assistTowerId: result.assistTowerId,
+                  enemyId: enemy.instanceId ?? 0, damage: 0, visualCue: result.visualCue,
+                });
+              }
+            }
             this.damageEnemy(tower, enemy, 1, false);
           }
           break;
@@ -1042,21 +1285,19 @@ export class TowerSystem {
     switch (tower.effectType) {
       case 1: // 麻痹
         if (!this.rollStatusEffect(tower, false)) return false;
-        this.setParalyze(enemy, tower.level === 7 && this.faction === 0 ? 96 : 48);
+        this.setParalyze(enemy, this.modifiers?.paralyzeDuration(tower.level === 7 && this.faction === 0 ? 96 : 48) ?? (tower.level === 7 && this.faction === 0 ? 96 : 48), true, tower.instanceId ?? 0);
         break;
       case 2: // 冰冻
         if (!this.rollStatusEffect(tower, true)) return false;
-        this.setFreeze(enemy, tower.level === 7 && this.faction === 0 ? 96 : 48);
+        this.setFreeze(enemy, this.modifiers?.freezeDuration(tower.level === 7 && this.faction === 0 ? 96 : 48) ?? (tower.level === 7 && this.faction === 0 ? 96 : 48), true, true, tower.instanceId ?? 0);
         break;
       case 3: // 中毒
-        if (tower.level >= enemy.poisonPower) {
-          enemy.poisonPower = tower.level;
-          enemy.poisonTimer = Math.max(
-            enemy.poisonTimer,
-            tower.level === 7 && this.faction === 2 ? 96 : 48,
-          );
-        }
-        enemy.poisonFrame = 0;
+        this.setPoison(
+          enemy,
+          tower.level === 7 && this.faction === 2 ? 96 : 48,
+          tower.level,
+          tower.instanceId ?? 0,
+        );
         this.applyHeroSlow(enemy, tower);
         enemy.effect = 3;
         enemy.timer = Math.max(enemy.timer ?? 0, enemy.poisonTimer);
@@ -1064,10 +1305,10 @@ export class TowerSystem {
       case 4: // 火焰
         // 类型9滚油由道路交互决定是否点燃，普通命中本身不直接附火。
         if (this.spriteType(tower.type) === 9) return false;
-        this.setFire(enemy, tower.level === 7 && this.faction === 2 ? 96 : 48);
+        this.setFire(enemy, this.modifiers?.fireDuration(tower.level === 7 && this.faction === 2 ? 96 : 48) ?? (tower.level === 7 && this.faction === 2 ? 96 : 48), true, true, tower.instanceId ?? 0);
         break;
       case 5: // 减速
-        this.setSlow(enemy, 48);
+        this.setSlow(enemy, 48, true, tower.instanceId ?? 0);
         break;
       default:
         return this.applyHeroSlow(enemy, tower);
@@ -1087,16 +1328,19 @@ export class TowerSystem {
 
   private applyHeroSlow(enemy: Enemy, tower: Tower): boolean {
     if (![3, 6].includes(tower.heroId) || enemy.bossType === 7) return false;
-    this.setSlow(enemy, 48);
+    this.setSlow(enemy, 48, true, tower.instanceId ?? 0);
     return true;
   }
 
-  private setParalyze(enemy: Enemy, duration: number, resetFrame: boolean = true): void {
+  private setParalyze(enemy: Enemy, duration: number, resetFrame: boolean = true, towerId: number = 0): void {
     this.ensureEnemyCombatFields(enemy);
+    const previousDuration = enemy.paralyzeTimer;
     enemy.paralyzeTimer = Math.max(enemy.paralyzeTimer, duration);
+    if (duration >= previousDuration) enemy.paralyzeSourceTowerId = towerId;
     if (resetFrame) enemy.paralyzeFrame = 0;
     enemy.effect = 1;
     enemy.timer = Math.max(enemy.timer ?? 0, enemy.paralyzeTimer);
+    this.emitStatusSet(enemy, 'paralyze', previousDuration, enemy.paralyzeTimer, enemy.paralyzeSourceTowerId ?? 0);
   }
 
   private setFreeze(
@@ -1104,17 +1348,18 @@ export class TowerSystem {
     duration: number,
     resetFrame: boolean = true,
     extinguishFire: boolean = true,
+    towerId: number = 0,
   ): void {
     this.ensureEnemyCombatFields(enemy);
+    const previousDuration = enemy.freezeTimer;
     enemy.freezeTimer = Math.max(enemy.freezeTimer, duration);
+    if (duration >= previousDuration) enemy.freezeSourceTowerId = towerId;
     if (resetFrame) enemy.freezeFrame = 0;
     // 原版只有寒冰塔的主目标会立即熄灭火焰；魏国范围冰冻只写计时。
-    if (extinguishFire) {
-      enemy.fireTimer = 0;
-      enemy.fireFrame = 0;
-    }
+    if (extinguishFire) this.clearEnemyStatus(enemy, 'fire', 'replaced');
     enemy.effect = 2;
     enemy.timer = Math.max(enemy.timer ?? 0, enemy.freezeTimer);
+    this.emitStatusSet(enemy, 'freeze', previousDuration, enemy.freezeTimer, enemy.freezeSourceTowerId ?? 0);
   }
 
   private currentFirePower(): number {
@@ -1131,26 +1376,41 @@ export class TowerSystem {
     duration: number,
     resetFrame: boolean = true,
     clearFreeze: boolean = true,
+    towerId: number = 0,
   ): void {
     this.ensureEnemyCombatFields(enemy);
+    const previousDuration = enemy.fireTimer;
     enemy.fireTimer = Math.max(enemy.fireTimer, duration);
+    if (duration >= previousDuration) enemy.fireSourceTowerId = towerId;
     if (resetFrame) enemy.fireFrame = 0;
     enemy.firePower = this.currentFirePower();
     // 原版只有烟火主命中会解除寒冰；滚油直接刷新火焰计时，可与寒冰共存。
-    if (clearFreeze) {
-      enemy.freezeTimer = 0;
-      enemy.freezeFrame = 0;
-    }
+    if (clearFreeze) this.clearEnemyStatus(enemy, 'freeze', 'replaced');
     enemy.effect = 4;
     enemy.timer = Math.max(enemy.timer ?? 0, enemy.fireTimer);
+    this.emitStatusSet(enemy, 'fire', previousDuration, enemy.fireTimer, enemy.fireSourceTowerId ?? 0);
   }
 
-  private setSlow(enemy: Enemy, duration: number, resetFrame: boolean = true): void {
+  private setPoison(enemy: Enemy, duration: number, power: number, towerId: number): void {
     this.ensureEnemyCombatFields(enemy);
+    const previousDuration = enemy.poisonTimer;
+    if (power < enemy.poisonPower) return;
+    enemy.poisonPower = power;
+    enemy.poisonTimer = Math.max(enemy.poisonTimer, duration);
+    if (duration >= previousDuration) enemy.poisonSourceTowerId = towerId;
+    enemy.poisonFrame = 0;
+    this.emitStatusSet(enemy, 'poison', previousDuration, enemy.poisonTimer, enemy.poisonSourceTowerId ?? 0);
+  }
+
+  private setSlow(enemy: Enemy, duration: number, resetFrame: boolean = true, towerId: number = 0): void {
+    this.ensureEnemyCombatFields(enemy);
+    const previousDuration = enemy.slowTimer;
     enemy.slowTimer = Math.max(enemy.slowTimer, duration);
+    if (duration >= previousDuration) enemy.slowSourceTowerId = towerId;
     if (resetFrame) enemy.slowFrame = 0;
     if ((enemy.effect ?? 0) === 0) enemy.effect = 5;
     enemy.timer = Math.max(enemy.timer ?? 0, enemy.slowTimer);
+    this.emitStatusSet(enemy, 'slow', previousDuration, enemy.slowTimer, enemy.slowSourceTowerId ?? 0);
   }
 
   /**
@@ -2288,6 +2548,10 @@ export class TowerSystem {
     return this.towers;
   }
 
+  getTowerByInstanceId(instanceId: number): Tower | undefined {
+    return this.towers.find(tower => tower.instanceId === instanceId);
+  }
+
   /**
    * 选择塔
    */
@@ -2295,6 +2559,22 @@ export class TowerSystem {
     const tower = this.getTowerAt(tileX, tileY);
     this.selectedTower = tower ?? null;
     return this.selectedTower;
+  }
+
+  renderEnhancementEffects(offsetX: number = 0, offsetY: number = 0): void {
+    if (!this.features.reactions || !this.reactions) return;
+    const ctx = this.renderer.virtualContext;
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    for (const zone of this.reactions.zones) {
+      const x = offsetX + zone.tx * TILE_SIZE;
+      const y = offsetY + zone.ty * TILE_SIZE;
+      ctx.fillStyle = (this.previewFrame & 1) === 0 ? '#ff7a18' : '#ffc23d';
+      ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
+      ctx.strokeStyle = '#ffef9a';
+      ctx.strokeRect(x + 1, y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
+    }
+    ctx.restore();
   }
 
   /** 查找光标覆盖的塔，但不改变确认选择状态。 */
@@ -2424,6 +2704,7 @@ export class TowerSystem {
     this.buildMode = false;
     this.buildX = 0;
     this.buildY = 0;
+    this.nextTowerInstanceId = 1;
   }
 
   // ============================================================
@@ -2516,6 +2797,7 @@ export class TowerSystem {
       const level = Math.max(1, Math.min(7, td.level ?? 1));
       const stats = this.originalStats(td.type ?? 0, level);
       const tower: Tower = {
+        instanceId: Number.isFinite(td.instanceId) ? Math.max(1, td.instanceId | 0) : this.nextTowerInstanceId++,
         x: td.x ?? 0,
         y: td.y ?? 0,
         type: td.type ?? 0,
@@ -2553,8 +2835,10 @@ export class TowerSystem {
         // 旧版曾把释放完成错误地保存为 3（永久“已使用”）；原版完成后会回到待命，可再次装填。
         gateState: td.gateState === 3 ? 0 : Math.max(0, Math.min(2, td.gateState ?? 0)),
         gateTimer: 0,
+        attackSequence: Math.max(0, td.attackSequence ?? 0),
       };
       this.towers.push(tower);
+      this.nextTowerInstanceId = Math.max(this.nextTowerInstanceId, (tower.instanceId ?? 0) + 1);
       const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(tower.type)] ?? 1;
       for (let dx = 0; dx < footprint; dx++) {
         for (let dy = 0; dy < footprint; dy++) {

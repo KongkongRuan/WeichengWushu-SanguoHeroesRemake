@@ -33,8 +33,11 @@ import type { MobileControlAction } from './MobileControls';
 import {
   FixedStepClock,
   LOGIC_STEP_NORMALIZED,
+  VisibilityAwareClock,
   originalDemolishRefund,
 } from './Timing';
+import { animationCadenceForState, GameState } from './GameState';
+export { GameState } from './GameState';
 import {
   LOGICAL_WIDTH,
   LOGICAL_HEIGHT,
@@ -58,6 +61,23 @@ import {
 } from '../data/gameData';
 import type { FactionEnding } from '../data/gameData';
 import { FACTION_ENDINGS } from '../data/gameData';
+import { FeatureContext, RulesetId, normalizeRuleset, rulesetLabel } from '../enhancement/Ruleset';
+import { SeededRng, createBattleSeed } from '../enhancement/SeededRng';
+import { CombatEvents } from '../enhancement/CombatEvents';
+import { DEPLOYMENT_CONFIG, DeploymentTracker, ENEMY_TYPE_NAMES } from '../enhancement/WaveIntel';
+import { CouncilSystem } from '../enhancement/CouncilSystem';
+import type { CouncilDefinition } from '../data/enhancement/councilData';
+import { ModifierResolver } from '../enhancement/ModifierResolver';
+import { ReactionSystem } from '../enhancement/ReactionSystem';
+import { BattleStats } from '../enhancement/BattleStats';
+import {
+  BattleRecordProfile, MEDAL_LABELS, MedalEvaluation, MedalId,
+  createBattleRecordKey, evaluateMedals, medalCount, mergeBattleRecord,
+} from '../enhancement/BattleRecords';
+import {
+  EnhancedRunStateV1, createEnhancedRunState, normalizeEnhancedRunState,
+  ENHANCEMENT_CONTENT_VERSION,
+} from '../enhancement/RunState';
 import {
   Faction,
   HEROES,
@@ -71,27 +91,6 @@ import {
   GAME_DESCRIPTION_TEXT,
   COPYRIGHT_TEXT,
 } from '../data/heroes';
-
-export enum GameState {
-  TITLE_MENU = 1,       // 原版 l=1: 标题主菜单
-  PLAYING = 2,
-  PAUSED = 3,
-  GAME_OVER = 4,
-  VICTORY = 5,
-  LEVEL_COMPLETE = 6,   // 原版 l=10 结算 (H5简化版)
-  HELP = 8,             // 帮助页 (原版 a(21), 显示 b1015[0])
-  LOADING_SCREEN = 10,  // ld 加载进度屏 (原版 k() 中的 e() 进度)
-  TECH_TREE_BROWSE = 12,
-  COUNTRY_SELECT = 15,  // 原版 l=15: 选择国家
-  CAMPAIGN_SELECT = 16, // 原版 l=16: 选择战役
-  UPGRADE_SELECT = 17,  // 原版 l=17: 升级模式 (武系/文系)
-  SOUND_PROMPT = 18,    // 原版 l=18: 声音询问
-  ENDING_ANIM = 19,     // 结局动画 (原版 state 46/47/48 的H5重制版)
-  CREDITS = 20,         // 关于页 (原版 a(20), 显示 b1015[1])
-  SETTINGS = 22,        // 设置页 (声音开关与音量)
-  SAVE_PANEL = 27,      // 存档面板 (新流程无入口, 保留代码)
-  LEVEL_INTRO = 40,     // 关卡剧情 (对应原版 state 23)
-}
 
 // 结局动画阶段 (对应原版 state 46/47/48)
 enum EndingAnimPhase {
@@ -151,6 +150,25 @@ export class Game {
   private buildBar: BuildBarSystem; // 原版底部建造栏/科技面板 (任务A/B)
   private mobileControls: MobileControls;
   private cheatProfile: CheatProfile = createDefaultCheatProfile();
+  private rulesetId: RulesetId = 'classic';
+  private features = new FeatureContext('classic');
+  private combatEvents = new CombatEvents();
+  private seededRng = new SeededRng(1);
+  private deployment = new DeploymentTracker();
+  private council = new CouncilSystem(this.seededRng);
+  private modifiers = new ModifierResolver(this.features, this.council);
+  private reactions = new ReactionSystem(this.modifiers);
+  private battleStats = new BattleStats();
+  private enhancementProfile: BattleRecordProfile = { version: 1, records: {} };
+  private enhancedSeed = 1;
+  private lastCompletedWave = 0;
+  private waveClearedByCommand = false;
+  private waveIntelExpanded = false;
+  /** -1 表示尚未明确选择，防止建造阶段的连续确认键误选刚弹出的军议。 */
+  private councilSelectionIndex = -1;
+  private councilTouchArmed = false;
+  private lastMedalEvaluation: MedalEvaluation | null = null;
+  private lastNewMedals: MedalId[] = [];
 
   private state: GameState = GameState.LOADING_SCREEN;
   private currentLevel: number = 0;
@@ -158,11 +176,11 @@ export class Game {
   private gold: number = INITIAL_GOLD_BY_MODE[0];
   // 城防 (对应原版 by, aj() 行14096 初始化为10; 冲入10个敌人则失败)
   private lives: number = 10;
-  private lastTime: number = 0;
+  private frameClock = new VisibilityAwareClock();
   private logicClock = new FixedStepClock();
   private visualClock = new FixedStepClock();
-  // 菜单/片头素材按约60FPS制作，与10Hz战斗逻辑分离，避免片头被放慢6倍。
-  private animationClock = new FixedStepClock(1000 / 60);
+  private originalUiClock = new FixedStepClock();
+  private cinematicClock = new FixedStepClock(1000 / 60);
   private frameCount: number = 0;   // 对应原版 a1019：每 100ms 增加一次
   private cameraX: number = 0;
   private cameraY: number = 0;
@@ -186,6 +204,7 @@ export class Game {
   private waveReadyElapsedMs: number = 0;
   private waveWasReady: boolean = false;
   private battleFailureRecorded: boolean = false;
+  private battleEndEmitted: boolean = false;
   private failureGrantedRescue: boolean = false;
   private lastVictoryKind: '正攻取胜' | '奇谋取胜' | '沙盒胜利' = '正攻取胜';
   private lastVictoryRewardLabels: string[] = [];
@@ -295,6 +314,7 @@ export class Game {
     this.techTree = new TechTreeSystem();
     this.saveSystem = SaveSystem.getInstance();
     this.cheatProfile = this.saveSystem.loadCheatProfile();
+    this.enhancementProfile = this.saveSystem.loadEnhancementProfile();
     // 兼容升级前已经通关的旧存档，避免老玩家必须重新打一遍才能进入沙盒。
     if (!this.cheatProfile.storyCompleted) {
       const oldSave = this.saveSystem.load();
@@ -309,8 +329,12 @@ export class Game {
     this.mobileControls = new MobileControls();
 
     this.setupCallbacks();
+    this.setupEnhancementEvents();
+    this.initializeEnhancementRuntime();
     this.setupInput();
     this.resize();
+    this.frameClock.setVisible(document.visibilityState !== 'hidden', performance.now());
+    document.addEventListener('visibilitychange', this.handleVisibilityChange);
     window.addEventListener('resize', () => this.resize());
     window.visualViewport?.addEventListener('resize', () => this.resize());
     screen.orientation?.addEventListener('change', () => this.resize());
@@ -337,6 +361,7 @@ export class Game {
         this.battleLeaks++;
         if (this.lives <= 0) {
           this.recordCurrentBattleFailure();
+          this.emitLevelEnded(false);
           this.state = GameState.GAME_OVER;
         }
       },
@@ -378,6 +403,7 @@ export class Game {
         return true;
       },
       getTowerCount: () => this.towerSystem.getTowers().length,
+      getBuildCost: (origTowerId) => this.towerSystem.getBuildCost(origTowerId),
       // 选塔完成→选位 (原版 K() case 3: bF=1)
       enterPlacement: (origTowerId) => {
         // BuildBar 条目已经是原版塔 id，渲染和数值层统一使用同一编号。
@@ -414,9 +440,7 @@ export class Game {
         return this.towerSystem.getUpgradeCost(tower);
       },
       getDemolishRefund: (tower) => {
-        const orig = tower.type;
-        if (orig < 0) return Math.floor((this.towerSystem.getTowerConfig(tower.type)?.cost ?? 0) * tower.level * 0.7);
-        return this.getOriginalDemolishRefund(orig, tower.level);
+        return this.towerSystem.getDemolishRefund(tower);
       },
       renderTowerPreview: (type, level, centerX, centerY) => {
         this.towerSystem.renderTowerPreview(type, level, centerX, centerY);
@@ -432,6 +456,79 @@ export class Game {
 
     this.uiSystem.setButtonCallback((btn) => this.handleButton(btn));
     this.uiSystem.setTechTree(this.techTree);
+  }
+
+  private setupEnhancementEvents(): void {
+    const towerInfo = (towerId: number) => {
+      const tower = this.towerSystem.getTowerByInstanceId(towerId);
+      const existing = this.battleStats.get(towerId);
+      return {
+        type: tower?.type ?? existing?.type ?? -1,
+        name: tower ? this.towerSystem.getTowerName(tower) : existing?.name ?? `建筑${towerId}`,
+      };
+    };
+    this.combatEvents.on('towerBuilt', ({ towerId, type, cost }) => {
+      this.battleStats.invest(towerId, type, this.towerSystem.getTowerConfig(type)?.name ?? '建筑', cost);
+      if (this.features.enhanced) this.council.consumeBuildDiscount();
+    });
+    this.combatEvents.on('towerUpgraded', ({ towerId, cost }) => {
+      const info = towerInfo(towerId);
+      this.battleStats.invest(towerId, info.type, info.name, cost);
+      if (this.features.enhanced) this.council.consumeUpgradeDiscount();
+    });
+    this.combatEvents.on('towerSold', ({ towerId }) => this.battleStats.sold(towerId));
+    this.combatEvents.on('enemyDamaged', ({ towerId, damage, category }) => {
+      if (towerId <= 0) return;
+      const info = towerInfo(towerId);
+      this.battleStats.damage(towerId, info.type, info.name, damage, category);
+    });
+    this.combatEvents.on('enemyDied', ({ towerId }) => {
+      if (towerId == null || towerId <= 0) return;
+      const info = towerInfo(towerId);
+      this.battleStats.kill(towerId, info.type, info.name);
+    });
+    this.combatEvents.on('enemyControlled', ({ towerId, frames }) => {
+      if (towerId <= 0) return;
+      const info = towerInfo(towerId);
+      this.battleStats.control(towerId, info.type, info.name, frames);
+    });
+    this.combatEvents.on('reactionTriggered', ({ towerId, assistTowerId, visualCue }) => {
+      const info = towerInfo(towerId);
+      if (assistTowerId != null && assistTowerId > 0 && assistTowerId !== towerId) {
+        const assist = towerInfo(assistTowerId);
+        this.battleStats.ensureTower(assistTowerId, assist.type, assist.name);
+      }
+      this.battleStats.reaction(towerId, info.type, info.name, assistTowerId);
+      if (this.state === GameState.PLAYING) this.uiSystem.showMessage(visualCue, 40);
+    });
+  }
+
+  private initializeEnhancementRuntime(source?: EnhancedRunStateV1 | null): void {
+    this.features = new FeatureContext(this.rulesetId);
+    const fallbackSeed = createBattleSeed(this.currentLevel, this.factionX);
+    const run = normalizeEnhancedRunState(source, fallbackSeed);
+    this.enhancedSeed = run.seed;
+    this.seededRng = new SeededRng(run.seed);
+    this.seededRng.restore(run.rngState);
+    this.deployment = new DeploymentTracker(run.deployment);
+    this.council = new CouncilSystem(this.seededRng, run.council);
+    this.modifiers = new ModifierResolver(this.features, this.council);
+    this.reactions = new ReactionSystem(this.modifiers, run.reactions);
+    this.battleStats = new BattleStats(run.stats);
+    this.lastCompletedWave = run.lastCompletedWave;
+    this.waveReadyElapsedMs = run.deployment.readyElapsedMs;
+    this.enemySystem.setEnhancementContext(this.rulesetId, this.seededRng, this.combatEvents, this.modifiers);
+    this.towerSystem.setEnhancementContext(
+      this.rulesetId, this.combatEvents, this.modifiers, this.reactions, () => this.lives,
+    );
+    this.syncEnhancementUi();
+  }
+
+  private syncEnhancementUi(): void {
+    this.uiSystem.setEnhancementStatus(
+      this.rulesetId,
+      this.council.selectedDefinitions().map(def => def.name),
+    );
   }
 
   /**
@@ -469,10 +566,15 @@ export class Game {
     this.waveReadyElapsedMs = 0;
     this.waveWasReady = false;
     this.battleFailureRecorded = false;
+    this.battleEndEmitted = false;
     this.failureGrantedRescue = false;
     this.lastVictoryRewardLabels = [];
     this.lastVictoryPointsAdded = 0;
     this.sandboxUnlockedOnLastVictory = false;
+    this.waveClearedByCommand = false;
+    this.lastMedalEvaluation = null;
+    this.lastNewMedals = [];
+    this.lastCompletedWave = 0;
   }
 
   private recordCurrentBattleFailure(): void {
@@ -485,20 +587,43 @@ export class Game {
 
   /** 真实时间计时，不受1/2/3倍速影响；暂停时不会累计。首波建造准备不计入挑战。 */
   private updateQuickDeployTimer(elapsedMs: number): void {
-    const ready = this.state === GameState.PLAYING
-      && !this.uiSystem.isPaused()
-      && this.enemySystem.canStartNextWave;
+    const ready = this.state === GameState.PLAYING && this.enemySystem.canStartNextWave;
     if (!ready) {
       this.waveWasReady = false;
       this.waveReadyElapsedMs = 0;
+      this.deployment.state.readyElapsedMs = 0;
       return;
     }
+    // 暂停只冻结准备窗口，不能把已经消耗的时间刷新为零。
+    if (this.uiSystem.isPaused()) return;
     if (!this.waveWasReady) {
       this.waveWasReady = true;
       this.waveReadyElapsedMs = 0;
+      this.deployment.state.readyElapsedMs = 0;
       return;
     }
     this.waveReadyElapsedMs += Math.max(0, elapsedMs);
+    this.deployment.state.readyElapsedMs = this.waveReadyElapsedMs;
+    if (this.features.deploymentRewards && this.deployment.expireCombo(this.waveReadyElapsedMs)) {
+      this.quickDeployEligible = false;
+      this.uiSystem.showMessage('连战中断', 45);
+    }
+  }
+
+  private emitLevelEnded(victory: boolean): void {
+    if (this.battleEndEmitted) return;
+    this.battleEndEmitted = true;
+    this.combatEvents.emit('levelEnded', { victory, cheatsUsed: this.battleCheatsUsed.size > 0 });
+  }
+
+  private comboCountdownRemainingMs(): number | null {
+    if (!this.features.deploymentRewards
+      || this.state !== GameState.PLAYING
+      || !this.enemySystem.canStartNextWave
+      || this.enemySystem.currentWave < 1
+      || this.deployment.state.combo <= 0) return null;
+    const remaining = DEPLOYMENT_CONFIG.eligibleMs - this.waveReadyElapsedMs;
+    return remaining > 0 ? remaining : null;
   }
 
   private settleBattleProgress(): void {
@@ -531,6 +656,52 @@ export class Game {
     }
     this.saveSystem.saveCheatProfile(this.cheatProfile);
     this.syncCheatMenu();
+
+    this.lastMedalEvaluation = evaluateMedals({
+      victory: true,
+      leaks: this.battleLeaks,
+      quickDeploy: this.quickDeployEligible,
+      cheatsUsed: usedCheat,
+    });
+    const recordKey = createBattleRecordKey(this.rulesetId, this.gameModeT, this.factionX, this.currentLevel);
+    const merged = mergeBattleRecord(
+      this.enhancementProfile,
+      recordKey,
+      this.lastMedalEvaluation,
+      this.deployment.state.maxCombo,
+      this.deployment.state.bonusGold,
+    );
+    this.lastNewMedals = merged.newlyEarned;
+    this.saveSystem.saveEnhancementProfile(this.enhancementProfile);
+    this.emitLevelEnded(true);
+  }
+
+  private settleEnhancedWave(wave: number): void {
+    if (!this.features.enhanced || wave <= this.lastCompletedWave) return;
+    this.lastCompletedWave = wave;
+    const comboGold = this.deployment.rewardWave(
+      wave,
+      this.waveClearedByCommand,
+      this.modifiers.comboRewardMultiplier(),
+    );
+    const income = this.modifiers.waveIncome();
+    const reward = comboGold + income;
+    if (reward > 0) {
+      this.gold += reward;
+      this.totalGoldEarned += reward;
+      this.syncGold();
+      this.uiSystem.showMessage(`连战 ${this.deployment.state.combo} · 额外 +${reward} 金`, 75);
+    }
+    this.combatEvents.emit('waveCompleted', { wave, bonusGold: reward });
+    this.waveClearedByCommand = false;
+
+    const offer = this.council.offerAfterWave(wave, this.enemySystem.totalWaves);
+    if (offer.length > 0 && this.council.state.pendingWave != null) {
+      this.councilSelectionIndex = -1;
+      this.councilTouchArmed = false;
+      this.state = GameState.COUNCIL;
+      this.autoSave();
+    }
   }
 
   /**
@@ -655,7 +826,42 @@ export class Game {
    *        选位模式 ←→↑↓=移幻影 Enter=放塔 Esc=取消
    */
   private handleKeyDown(e: KeyboardEvent): void {
-    if (this.state === GameState.PLAYING || this.state === GameState.LEVEL_INTRO) {
+    const isConfirmKey = e.key === 'Enter' || e.key === ' ';
+    // Confirm actions require a fresh press. Browser key repeat can otherwise
+    // carry one held key through a screen transition and activate the next screen.
+    if (isConfirmKey && e.repeat) {
+      e.preventDefault();
+      return;
+    }
+
+    if (this.state === GameState.LEVEL_INTRO) {
+      if (!isConfirmKey) return;
+      this.advanceLevelIntro();
+      e.preventDefault();
+      return;
+    }
+
+    if (this.state === GameState.COUNCIL) {
+      const offer = this.council.pendingDefinitions;
+      if (e.key === 'ArrowUp' && offer.length > 0) {
+        this.councilSelectionIndex = this.councilSelectionIndex < 0
+          ? offer.length - 1
+          : Math.max(0, this.councilSelectionIndex - 1);
+      } else if (e.key === 'ArrowDown' && offer.length > 0) {
+        this.councilSelectionIndex = this.councilSelectionIndex < 0
+          ? 0
+          : Math.min(offer.length - 1, this.councilSelectionIndex + 1);
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        const selected = offer[this.councilSelectionIndex];
+        if (selected) this.resolveCouncil(selected.id);
+      }
+      else if (e.key === 'Escape') this.resolveCouncil(null);
+      else return;
+      this.councilTouchArmed = false;
+      e.preventDefault();
+      return;
+    }
+    if (this.state === GameState.PLAYING) {
       // 建造栏打开: 栏内导航 (原版 M() 方向键)
       if (this.buildBar.isOpen) {
         switch (e.key) {
@@ -790,6 +996,7 @@ export class Game {
         else if (k === 'ArrowRight') this.settingsAction('volume_up');
         else if (k === 'ArrowUp') this.settingsAction('toggle');
         else if (k === 'ArrowDown' || k.toLowerCase() === 'g') this.settingsAction('toggle_graphics');
+        else if (k.toLowerCase() === 'r') this.settingsAction('toggle_rules');
         else if (k === 'Enter' || k === ' ') this.settingsAction('ok');
         else if (k === 'Escape') this.settingsAction('cancel');
         else handled = false;
@@ -799,6 +1006,10 @@ export class Game {
         if (k === 'ArrowUp') this.textScroll = Math.max(0, this.textScroll - 12);
         else if (k === 'ArrowDown') this.textScroll += 12;
         else if (k === 'Escape' || k === 'Enter') this.gotoTitle();
+        else handled = false;
+        break;
+      case GameState.LEVEL_COMPLETE:
+        if (k === 'Enter' || k === ' ') this.handleLevelCompleteTap();
         else handled = false;
         break;
       default:
@@ -867,6 +1078,9 @@ export class Game {
       case GameState.SETTINGS:
         this.handleSettingsTap(x, y, softLeft, softRight);
         return;
+      case GameState.COUNCIL:
+        this.handleCouncilTap(x, y);
+        return;
       case GameState.HELP:
       case GameState.CREDITS:
         // 仅返回软键 (原版: 帮助/关于=仅返回)
@@ -874,17 +1088,7 @@ export class Game {
         return;
       case GameState.LEVEL_INTRO:
         // 剧情阶段: 点击翻页或开始游戏 (对应原版 ad() case 2 中 bs++)
-        if (this.introPhase === 0) {
-          // 跳过动画
-          this.introPhase = 1;
-          this.introAnimProgress = 1;
-        } else if (this.introPhase < 4) {
-          // 翻到下一页剧情文本
-          this.introPhase++;
-        } else {
-          // 读完所有剧情, 开始游戏
-          this.endLevelIntro();
-        }
+        this.advanceLevelIntro();
         return;
       case GameState.SAVE_PANEL:
         this.handleSavePanelTap(x, y);
@@ -912,6 +1116,11 @@ export class Game {
 
     // 游戏中: 先检查UI按钮 (暂停菜单时也只能点UI按钮)
     if (this.uiSystem.handleTap(x, y)) return;
+
+    if (this.features.waveIntel && !this.uiSystem.isPaused() && x < 172 && y >= 20 && y <= 44) {
+      this.waveIntelExpanded = !this.waveIntelExpanded;
+      return;
+    }
 
     // ====== 暂停菜单可见时, 不处理地图点击 ======
     if (this.uiSystem.isPauseMenuVisible()) return;
@@ -1348,6 +1557,7 @@ export class Game {
     settings.musicEnabled = this.soundEnabled;
     settings.volume = this.volume;
     settings.scale = this.displayQuality;
+    settings.rulesetId = this.rulesetId;
     this.saveSystem.saveSettings(settings);
     this.uiSystem.setAudioSettings(this.soundEnabled, this.volume, this.displayQuality);
   }
@@ -1707,10 +1917,12 @@ export class Game {
       this.settingsAction(x < LOGICAL_WIDTH / 2 ? 'volume_down' : 'volume_up');
     } else if (y >= 176 && y <= 208) {
       this.settingsAction('toggle_graphics');
+    } else if (y >= 210 && y <= 238) {
+      this.settingsAction('toggle_rules');
     }
   }
 
-  private settingsAction(act: 'toggle' | 'toggle_graphics' | 'volume_down' | 'volume_up' | 'ok' | 'cancel'): void {
+  private settingsAction(act: 'toggle' | 'toggle_graphics' | 'toggle_rules' | 'volume_down' | 'volume_up' | 'ok' | 'cancel'): void {
     switch (act) {
       case 'toggle':
         this.soundEnabled = !this.soundEnabled;
@@ -1719,6 +1931,12 @@ export class Game {
         break;
       case 'toggle_graphics':
         this.toggleGraphicsQuality();
+        break;
+      case 'toggle_rules':
+        this.rulesetId = this.rulesetId === 'classic' ? 'enhanced' : 'classic';
+        this.initializeEnhancementRuntime();
+        this.persistSoundSetting();
+        this.uiSystem.showMessage(`规则：${rulesetLabel(this.rulesetId)}`, 60);
         break;
       case 'volume_down':
         this.changeVolume(-0.1);
@@ -1794,7 +2012,17 @@ export class Game {
     this.waveReadyElapsedMs = 0;
     this.waveWasReady = false;
     this.battleFailureRecorded = false;
+    this.battleEndEmitted = false;
     this.failureGrantedRescue = false;
+    this.rulesetId = normalizeRuleset(data.rulesetId);
+    const restoredRun = this.rulesetId === 'enhanced'
+      ? normalizeEnhancedRunState(data.enhancedRun, createBattleSeed(this.currentLevel, this.factionX))
+      : null;
+    if (restoredRun) {
+      this.battleLeaks = Math.max(this.battleLeaks, restoredRun.medalProgress.leaks);
+      this.quickDeployEligible = this.quickDeployEligible && restoredRun.medalProgress.quickDeployEligible;
+    }
+    this.initializeEnhancementRuntime(restoredRun);
     this.techTree.setFaction(this.factionX as Faction);
     this.towerSystem.setFaction(this.factionX);
     this.enemySystem.setFaction(this.factionX);
@@ -1829,6 +2057,16 @@ export class Game {
     // 加载关卡 (resetTech=false: 保留刚恢复的科技建筑层)
     void this.startLevel(this.currentLevel, false).then(() => {
       if (savedTowers) this.towerSystem.restoreFromSave(savedTowers);
+      if (restoredRun?.waveRuntime) {
+        this.enemySystem.restoreState(restoredRun.waveRuntime);
+        this.state = this.council.state.pendingWave != null ? GameState.COUNCIL : GameState.PLAYING;
+        if (this.state === GameState.COUNCIL) {
+          this.councilSelectionIndex = -1;
+          this.councilTouchArmed = false;
+        }
+        this.uiSystem.setWaveReady(this.enemySystem.canStartNextWave);
+      }
+      this.syncEnhancementUi();
     });
   }
 
@@ -1911,6 +2149,7 @@ export class Game {
     switch (action) {
       case 'cheat_clear_enemies':
         this.enemySystem.clearAllEnemies();
+        this.waveClearedByCommand = true;
         message = GAME_HELP_TEXT.clearEnemies;
         break;
       case 'cheat_all_tech':
@@ -1937,9 +2176,10 @@ export class Game {
     }
 
     this.syncCheatMenu();
+    this.combatEvents.emit('commandUsed', { action });
     const suffix = sandbox
       ? '（沙盒无限）'
-      : `（军令剩余${availableCommandPoints(this.cheatProfile, battleKey)}）`;
+      : `（军令剩余${availableCommandPoints(this.cheatProfile, battleKey)}；无漏/迅捷失效）`;
     this.uiSystem.showMessage(`${message}${suffix}`, 90);
     this.autoSave();
   }
@@ -1992,6 +2232,10 @@ export class Game {
         break;
       case 'pause_settings':
         this.uiSystem.openPausePage('settings');
+        break;
+      case 'open_council_summary':
+        this.syncEnhancementUi();
+        this.uiSystem.openPausePage('council');
         break;
       case 'cheat_back':
         this.uiSystem.openPausePage('main');
@@ -2074,11 +2318,19 @@ export class Game {
     const nextWave = this.enemySystem.currentWave + 1;
     if (this.enemySystem.requestNextWave()) {
       // 第一波允许玩家安心布防；从第二波开始，准备就绪后5秒内出兵才算“及时”。
-      if (nextWave > 1 && this.waveReadyElapsedMs > 5000) this.quickDeployEligible = false;
+      if (this.features.deploymentRewards) {
+        const deployment = this.deployment.deploy(nextWave, this.waveReadyElapsedMs);
+        if (!deployment.timely) this.quickDeployEligible = false;
+      } else if (nextWave > 1 && this.waveReadyElapsedMs > 5000) {
+        this.quickDeployEligible = false;
+      }
+      this.waveClearedByCommand = false;
       this.waveWasReady = false;
       this.waveReadyElapsedMs = 0;
+      this.deployment.state.readyElapsedMs = 0;
       this.uiSystem.setWaveReady(false);
-      this.uiSystem.showMessage(`第 ${nextWave} 波开始`, 45);
+      const combo = this.features.deploymentRewards && nextWave > 1 ? ` · 连战 ${this.deployment.state.combo}` : '';
+      this.uiSystem.showMessage(`第 ${nextWave} 波开始${combo}`, 45);
     } else if (!this.enemySystem.isLevelComplete) {
       this.uiSystem.showMessage('当前还不能出兵', 30);
     }
@@ -2103,6 +2355,11 @@ export class Game {
     this.mapOffsetY = MAP_TOP_BAR_H;
   }
 
+  /** 后台标签页不推进战斗、动画或连战准备计时；恢复时从当前时刻重新计时。 */
+  private handleVisibilityChange = (): void => {
+    this.frameClock.setVisible(document.visibilityState !== 'hidden', performance.now());
+  };
+
   /**
    * 加载关卡
    */
@@ -2114,6 +2371,7 @@ export class Game {
     this.currentLevel = level;
     if (resetTech) {
       this.resetBattleChallengeState();
+      this.initializeEnhancementRuntime(createEnhancedRunState(createBattleSeed(level, this.factionX)));
       // 原版 aj() 在每场战斗重新建立战场：金币、塔、科技建筑和科技效果
       // 都不从上一关继承。读档传 false 才保留存档中的这些状态。
       this.gold = INITIAL_GOLD_BY_MODE[this.gameModeT === 1 ? 1 : 0];
@@ -2204,9 +2462,8 @@ export class Game {
    * 游戏主循环
    */
   private gameLoop = (timestamp: number): void => {
-    // 最多追赶 1 秒，避免切回后台标签页时一次执行数百个逻辑帧。
-    const elapsedMs = Math.max(0, Math.min(1000, timestamp - this.lastTime));
-    this.lastTime = timestamp;
+    // 页面不可见期间返回 0；前台卡顿最多追赶 1 秒。
+    const elapsedMs = this.frameClock.advance(timestamp, 1000);
 
     // a1019 是真实时间的 10Hz 视觉节拍，不随 60/120/144Hz 或游戏倍速改变。
     this.frameCount += this.visualClock.advance(elapsedMs, 1, 10);
@@ -2223,42 +2480,43 @@ export class Game {
     this.uiSystem.update(elapsedMs);
 
     const playingActive = this.state === GameState.PLAYING && !this.uiSystem.isPaused();
-    const nonPlayingAnimated = this.state !== GameState.PLAYING && this.isAnimatedState();
+    const animationCadence = animationCadenceForState(this.state);
     if (playingActive) {
-      this.animationClock.reset();
+      this.originalUiClock.reset();
+      this.cinematicClock.reset();
       const speed = this.uiSystem.getGameSpeed();
       // 追帧上限按倍速同比扩大，保证 x1/x2/x3 都保留相同的 1 秒真实时间窗口。
       // 固定上限 10 会让 x3 在一次较长卡顿后丢掉额外战斗帧，破坏攻防相对结果。
       const steps = this.logicClock.advance(elapsedMs, speed, 10 * speed);
       for (let i = 0; i < steps; i++) this.runLogicStep();
-    } else if (nonPlayingAnimated) {
+    } else if (animationCadence === 'original-ui') {
       this.logicClock.reset();
+      this.cinematicClock.reset();
+      const steps = this.originalUiClock.advance(elapsedMs, 1, 10);
+      for (let i = 0; i < steps; i++) this.runOriginalUiFrame();
+    } else if (animationCadence === 'cinematic') {
+      this.logicClock.reset();
+      this.originalUiClock.reset();
       // 动画不追赶后台挂起时间；前台低帧率最多补6个显示帧。
-      const steps = this.animationClock.advance(Math.min(elapsedMs, 100), 1, 6);
-      for (let i = 0; i < steps; i++) this.runAnimationFrame(1);
+      const steps = this.cinematicClock.advance(Math.min(elapsedMs, 100), 1, 6);
+      for (let i = 0; i < steps; i++) this.runCinematicFrame(1);
     } else {
       // 暂停期间不积攒游戏逻辑，恢复时不会瞬间补帧。
       this.logicClock.reset();
-      this.animationClock.reset();
+      this.originalUiClock.reset();
+      this.cinematicClock.reset();
     }
 
     this.updateQuickDeployTimer(elapsedMs);
+    const comboCountdownMs = this.comboCountdownRemainingMs();
+    this.uiSystem.setComboCountdownSeconds(
+      comboCountdownMs == null ? null : Math.ceil(comboCountdownMs / 100) / 10,
+    );
 
     this.render();
 
     requestAnimationFrame(this.gameLoop);
   };
-
-  private isAnimatedState(): boolean {
-    return this.state === GameState.LEVEL_INTRO ||
-      this.state === GameState.ENDING_ANIM ||
-      this.state === GameState.LOADING_SCREEN ||
-      this.state === GameState.TITLE_MENU ||
-      this.state === GameState.COUNTRY_SELECT ||
-      this.state === GameState.UPGRADE_SELECT ||
-      this.state === GameState.CAMPAIGN_SELECT ||
-      this.state === GameState.SETTINGS;
-  }
 
   /** 执行一次原版 100ms 逻辑帧。 */
   private runLogicStep(): void {
@@ -2267,22 +2525,31 @@ export class Game {
     }
   }
 
-  /** 菜单与片头按固定60Hz显示帧推进，刷新率只影响平滑度、不影响总时长。 */
-  private runAnimationFrame(dt: number): void {
+  /** H5 重制过场按固定 60Hz 推进，刷新率只影响平滑度、不影响总时长。 */
+  private runCinematicFrame(dt: number): void {
     if (this.state === GameState.LEVEL_INTRO) {
       this.updateLevelIntro(dt);
     } else if (this.state === GameState.ENDING_ANIM) {
       this.updateEndingAnim(dt);
     } else if (this.state === GameState.LOADING_SCREEN) {
       this.updateLoadingScreen(dt);
-    } else if (this.state === GameState.TITLE_MENU) {
-      this.updateTitleMenu(dt);
+    }
+  }
+
+  /** 原版菜单状态机严格按 100ms 一帧推进，包括共用的山体背景。 */
+  private runOriginalUiFrame(): void {
+    if (this.state === GameState.TITLE_MENU) {
+      this.updateTitleMenu(1);
     } else if (this.state === GameState.COUNTRY_SELECT) {
       this.updateMenuBackground();
     } else if (this.state === GameState.UPGRADE_SELECT) {
       this.updateMenuBackground();
       this.updateUpgradeSelect();
     } else if (this.state === GameState.CAMPAIGN_SELECT) {
+      this.updateMenuBackground();
+    } else if (this.state === GameState.COUNCIL) {
+      this.updateMenuBackground();
+    } else if (this.state === GameState.LEVEL_COMPLETE) {
       this.updateMenuBackground();
     } else if (this.state === GameState.SETTINGS) {
       this.updateMenuBackground();
@@ -2302,6 +2569,18 @@ export class Game {
     this.towerSystem.update(this.enemySystem.getActiveEnemies(), 0, MAP_TOP_BAR_H);
     this.castleRenderer.update();
     this.uiSystem.setWaveReady(this.enemySystem.canStartNextWave);
+
+    if (this.enemySystem.canStartNextWave) {
+      const completedWave = this.enemySystem.currentWave;
+      if (completedWave > this.lastCompletedWave) {
+        if (this.features.enhanced) this.settleEnhancedWave(completedWave);
+        else {
+          this.lastCompletedWave = completedWave;
+          this.combatEvents.emit('waveCompleted', { wave: completedWave, bonusGold: 0 });
+        }
+      }
+      if (this.features.enhanced && this.state === GameState.PLAYING) this.enemySystem.prepareNextWavePlan();
+    }
 
     // 过关判定 (对应原版 G() case2 行7492-7527:
     //   aS==l1072[aN] 且 场上无敌 且 本波已刷完 且 城防>0)
@@ -2341,6 +2620,18 @@ export class Game {
     }
   }
 
+  /** 推进一段开场剧情，并确保当前输入不会继续传递给战斗操作。 */
+  private advanceLevelIntro(): void {
+    if (this.introPhase === 0) {
+      this.introPhase = 1;
+      this.introAnimProgress = 1;
+    } else if (this.introPhase < 4) {
+      this.introPhase++;
+    } else {
+      this.endLevelIntro();
+    }
+  }
+
   /**
    * 结束剧情阶段, 开始游戏
    */
@@ -2370,7 +2661,7 @@ export class Game {
    * 自动存档 (含战役进度 X/ac/T/aO/d1073 新字段)
    */
   private autoSave(): void {
-    if (this.state !== GameState.PLAYING) return;
+    if (this.state !== GameState.PLAYING && this.state !== GameState.COUNCIL) return;
     const saveData = this.saveSystem.createSaveData(
       this.levelIndex,
       this.currentLevel,
@@ -2394,6 +2685,28 @@ export class Game {
     saveData.battleCheatsUsed = [...this.battleCheatsUsed];
     saveData.battleLeaks = this.battleLeaks;
     saveData.quickDeployEligible = this.quickDeployEligible;
+    saveData.rulesetId = this.rulesetId;
+    if (this.features.enhanced) {
+      const snapshot = this.seededRng.snapshot();
+      saveData.enhancedRun = {
+        version: 1,
+        contentVersion: ENHANCEMENT_CONTENT_VERSION,
+        seed: this.enhancedSeed,
+        rngState: snapshot.state,
+        currentWavePlan: this.enemySystem.wavePlan,
+        waveRuntime: this.enemySystem.exportState(),
+        deployment: this.deployment.serialize(),
+        council: this.council.serialize(),
+        reactions: this.reactions.serialize(),
+        medalProgress: {
+          leaks: this.battleLeaks,
+          quickDeployEligible: this.quickDeployEligible,
+          cheatsUsed: this.battleCheatsUsed.size > 0,
+        },
+        stats: this.battleStats.serialize(),
+        lastCompletedWave: this.lastCompletedWave,
+      };
+    }
     this.saveSystem.save(saveData);
   }
 
@@ -2454,6 +2767,9 @@ export class Game {
       case GameState.LEVEL_INTRO:
         this.renderLevelIntro();
         break;
+      case GameState.COUNCIL:
+        this.renderCouncil();
+        break;
       case GameState.PLAYING:
       case GameState.PAUSED:
         this.renderPlaying();
@@ -2485,8 +2801,38 @@ export class Game {
     this.renderer.present();
   }
 
+  private handleCouncilTap(x: number, y: number): void {
+    const offer = this.council.pendingDefinitions;
+    for (let i = 0; i < offer.length; i++) {
+      const top = 48 + i * 72;
+      if (x < 12 || x > LOGICAL_WIDTH - 12 || y < top || y > top + 64) continue;
+      if (this.inputSystem.isTouchOptimized && (this.councilSelectionIndex !== i || !this.councilTouchArmed)) {
+        this.councilSelectionIndex = i;
+        this.councilTouchArmed = true;
+      } else {
+        this.resolveCouncil(offer[i].id);
+      }
+      return;
+    }
+    if (y >= 276) this.resolveCouncil(null);
+  }
+
+  private resolveCouncil(id: string | null): void {
+    const wave = this.council.state.pendingWave ?? 0;
+    const selected = this.council.resolve(id);
+    if (selected?.immediate === 'reinforce_city') this.lives++;
+    if (selected?.resetCombo) this.deployment.resetCombo();
+    this.combatEvents.emit('councilResolved', { wave, councilId: selected?.id ?? null });
+    this.syncEnhancementUi();
+    this.state = GameState.PLAYING;
+    this.councilTouchArmed = false;
+    this.autoSave();
+    this.uiSystem.showMessage(selected ? `军议：${selected.name}` : '已跳过军议', 75);
+  }
+
   private syncMobileControls(): void {
     const playing = this.state === GameState.PLAYING;
+    const countdownMs = this.comboCountdownRemainingMs();
     this.mobileControls.update({
       visible: playing && this.inputSystem.isTouchOptimized,
       gold: this.gold,
@@ -2497,6 +2843,7 @@ export class Game {
       speed: this.uiSystem.getGameSpeed(),
       paused: this.uiSystem.isPaused(),
       waveReady: this.enemySystem.canStartNextWave,
+      comboCountdownSeconds: countdownMs == null ? null : Math.ceil(countdownMs / 100) / 10,
       context: this.buildBar.isOpen
         ? 'bar'
         : this.towerSystem.isBuildMode ? 'placement' : 'normal',
@@ -2907,6 +3254,10 @@ export class Game {
     if (this.cheatProfile.cleanVictoryKeys.includes(battleRecordKey(this.factionX, this.battleAN))) {
       r.drawText('★', Math.min(228, nameX + nameW + 4), lay.nameY - 11, 0xFFD700, 10);
     }
+    const medalKey = createBattleRecordKey(this.rulesetId, this.gameModeT, this.factionX, this.battleAN);
+    const medals = medalCount(this.enhancementProfile.records[medalKey]);
+    r.drawText(`${'◆'.repeat(medals)}${'◇'.repeat(3 - medals)}`, 4, lay.nameY - 11, 0xD18A22, 8);
+    r.drawText(`[${rulesetLabel(this.rulesetId)}]`, 198, 3, this.features.enhanced ? 0xD5317A : 0x506E91, 8);
     // 自由模式 (k1029): 战役名旁 ◀▶
     if (this.gameModeT === 1) {
       this.renderArrows(nameX - 4 - 6, nameX + nameW + 2 + 4, lay.nameY - 10);
@@ -2976,9 +3327,9 @@ export class Game {
     r.drawText('设置', 108, 32, 0x53678A, 14);
     // 面板
     r.setColor(0xFCFFCD);
-    r.fillRect(20, 92, 200, 140);
+    r.fillRect(20, 82, 200, 166);
     r.setColor(0x53678A);
-    r.drawRect(20, 92, 200, 140);
+    r.drawRect(20, 82, 200, 166);
     // 声音开关 (b1015[101] 声音 / [102]开 / [103]关)
     r.drawText('声音', 48, 112, 0x53678A, 12);
     r.drawText(this.soundEnabled ? '开' : '关', 156, 112, this.soundEnabled ? 0xD5317A : 0x506E91, 12);
@@ -2988,7 +3339,10 @@ export class Game {
     r.drawText('画面', 48, 184, 0x53678A, 12);
     r.drawText(this.displayQuality === 2 ? '高清重制' : '原版像素', 126, 184, 0xD5317A, 11);
     this.renderArrows(116, 204, 186);
-    r.drawText('↑声音  ↓画面  ←→音量', 52, 214, 0x506E91, 9);
+    r.drawText('规则', 48, 216, 0x53678A, 12);
+    r.drawText(rulesetLabel(this.rulesetId), 156, 216, this.features.enhanced ? 0xD5317A : 0x506E91, 12);
+    this.renderArrows(136, 186, 218);
+    r.drawText('点击箭头/整行切换 · 键盘 R 切规则', 34, 252, 0x506E91, 8);
     // 软键: 确定(左)+返回(右)
     this.uiSystem.renderSoftkeyBar(SOFTKEY_OK, SOFTKEY_BACK);
   }
@@ -3163,6 +3517,7 @@ export class Game {
 
     // 渲染塔 (应用相机偏移)
     this.towerSystem.render(-this.mapData.cameraX, -this.mapData.cameraY + MAP_TOP_BAR_H);
+    this.towerSystem.renderEnhancementEffects(-this.mapData.cameraX, -this.mapData.cameraY + MAP_TOP_BAR_H);
 
     // 渲染敌人 (EnemySystem 内部应用相机偏移)
     this.enemySystem.render();
@@ -3199,6 +3554,56 @@ export class Game {
     }
     this.uiSystem.render(this.gold, this.lives, this.currentLevel,
       this.enemySystem.currentWave, this.enemySystem.totalWaves);
+    this.renderEnhancementHud();
+  }
+
+  private renderEnhancementHud(): void {
+    const r = this.renderer;
+    const label = `[${rulesetLabel(this.rulesetId)}]`;
+    if (!this.features.waveIntel) {
+      this.renderer.drawText(label, 2, 22, 0x9AA7B8, 8);
+      return;
+    }
+    const plan = this.enemySystem.wavePlan;
+    const countdownMs = this.comboCountdownRemainingMs();
+    const typeName = plan ? (ENEMY_TYPE_NAMES[plan.enemyType] ?? `兵种${plan.enemyType}`) : '';
+    const summary = plan
+      ? `${label} ${plan.wave}/${this.enemySystem.totalWaves} ${typeName}×${plan.count} 连战${this.deployment.state.combo}`
+      : '';
+    const panelWidth = this.waveIntelExpanded ? 212 : 168;
+    const height = (this.waveIntelExpanded ? 48 : 18) + (countdownMs == null ? 0 : 14);
+    const ctx = this.renderer.virtualContext;
+    ctx.save();
+    ctx.globalAlpha = 0.86;
+    ctx.fillStyle = '#10241f';
+    ctx.fillRect(2, 21, panelWidth, height);
+    ctx.strokeStyle = '#d5a33e';
+    ctx.strokeRect(2, 21, panelWidth, height);
+    ctx.restore();
+    if (!plan) {
+      this.renderer.drawText(`${label} 等待军情…`, 6, 25, 0xFFD36A, 8);
+      return;
+    }
+    const comboReward = Math.min(10, this.deployment.state.combo * 2) * this.modifiers.comboRewardMultiplier();
+    this.renderer.drawText(summary, 6, 25, 0xFFD36A, 8);
+    if (countdownMs != null) {
+      const timerColor = countdownMs <= 2000 ? 0xFF8C68 : 0xFFD36A;
+      const timerY = this.waveIntelExpanded ? 68 : 40;
+      const countdownText = `连战保持 ${(Math.ceil(countdownMs / 100) / 10).toFixed(1)}秒`;
+      this.renderer.drawText(countdownText, 6, timerY, timerColor, 8);
+      const progress = Math.max(0, Math.min(1, countdownMs / DEPLOYMENT_CONFIG.eligibleMs));
+      const barX = Math.min(panelWidth - 48, Math.ceil(10 + r.measureText(countdownText, 8).width));
+      const barWidth = Math.max(32, panelWidth - barX - 6);
+      ctx.fillStyle = '#314940';
+      ctx.fillRect(barX, timerY + 3, barWidth, 3);
+      ctx.fillStyle = countdownMs <= 2000 ? '#ff8c68' : '#ffd36a';
+      ctx.fillRect(barX, timerY + 3, Math.max(1, Math.floor(barWidth * progress)), 3);
+    }
+    if (this.waveIntelExpanded) {
+      const boss = plan.elite ? (HEROES[plan.bossId]?.name ?? '名将') : '无名将';
+      this.renderer.drawText(`路线：主路 · ${boss}`, 6, 40, 0xFCFFCD, 8);
+      this.renderer.drawText(`当前波额外金币：${comboReward} · 点击收起`, 6, 54, 0xA9D7C5, 8);
+    }
   }
 
   private renderHoveredEntityInfo(): void {
@@ -3225,6 +3630,12 @@ export class Game {
       }
       this.renderer.drawText(`${this.towerSystem.getTowerDisplayDamage(tower)}`, 132, y, 0x53678A, 9);
       this.renderer.drawText(`${tower.level}`, 201, y, 0x53678A, 9);
+      if (this.features.battleStats && tower.instanceId != null) {
+        const stat = this.battleStats.get(tower.instanceId);
+        if (stat) {
+          this.renderer.drawText(`伤${this.battleStats.totalDamage(stat)} 杀${stat.kills} 联${stat.reactions}`, 40, y, 0x2F7A5A, 8);
+        }
+      }
       return;
     }
 
@@ -3273,7 +3684,7 @@ export class Game {
       const data = this.saveSystem.load();
       if (data) {
         this.renderer.drawText(
-          `关卡:${data.currentLevel ?? '?'} 金币:${data.gold ?? '?'} 武将:${data.awakenedHeroes?.length ?? 0}`,
+          `[${rulesetLabel(normalizeRuleset(data.rulesetId))}] 关卡:${data.currentLevel ?? '?'} 金币:${data.gold ?? '?'} 武将:${data.awakenedHeroes?.length ?? 0}`,
           28, iy + 20, 0xAAAAFF, 9,
         );
       } else {
@@ -3300,28 +3711,196 @@ export class Game {
   }
 
   private renderLevelComplete(): void {
-    this.renderer.setColor(COLORS.TEXT);
-    this.renderer.drawText('关卡完成!', LOGICAL_WIDTH / 2 - 30, 116, 0xFCFFCD, 14);
-    const kindColor = this.lastVictoryKind === '正攻取胜' ? 0xFFD700
-      : this.lastVictoryKind === '奇谋取胜' ? 0xAAAAFF : 0x2F7A5A;
-    const kindW = this.renderer.measureText(this.lastVictoryKind, 12).width;
-    this.renderer.drawText(this.lastVictoryKind, (LOGICAL_WIDTH - kindW) / 2, 142, kindColor, 12);
-    if (this.lastVictoryRewardLabels.length > 0) {
-      const rewardText = `奖励：${this.lastVictoryRewardLabels.join('、')}`;
-      const rewardW = this.renderer.measureText(rewardText, 8).width;
-      this.renderer.drawText(rewardText, Math.max(4, (LOGICAL_WIDTH - rewardW) / 2), 164, 0xFCFFCD, 8);
-      const pointText = this.lastVictoryPointsAdded > 0
-        ? `军令 +${this.lastVictoryPointsAdded}（${this.cheatProfile.commandPoints}/${COMMAND_POINT_MAX}）`
-        : `军令已满（${COMMAND_POINT_MAX}/${COMMAND_POINT_MAX}）`;
-      const pointW = this.renderer.measureText(pointText, 9).width;
-      this.renderer.drawText(pointText, (LOGICAL_WIDTH - pointW) / 2, 181, 0xFFD700, 9);
+    const r = this.renderer;
+    const blue = 0x53678A;
+    const pink = 0xD5317A;
+    const gold = 0xD18A22;
+    const paper = 0xFCFFCD;
+    const muted = 0x7E8CA2;
+    const centerText = (text: string, y: number, color: number, size: number): void => {
+      const w = r.measureText(text, size).width;
+      r.drawText(text, (LOGICAL_WIDTH - w) / 2, y, color, size);
+    };
+
+    // 沿用主菜单的云纹、远山和粉色城景，让结算属于同一套美术语言。
+    this.renderCommonBackground(16, 0);
+    this.renderPanelStrip(this.spr('ui', 3), 0, 0xCD3E7E);
+    const battleName = BATTLE_NAMES[this.battleAN] ?? `第 ${this.currentLevel + 1} 关`;
+    centerText(`捷报 · ${battleName}`, 2, paper, 8);
+
+    centerText('凯 旋 战 报', 20, blue, 8);
+    centerText('关 卡 告 捷', 32, pink, 20);
+
+    const kindColor = this.lastVictoryKind === '正攻取胜' ? 0xB97818
+      : this.lastVictoryKind === '奇谋取胜' ? 0x6D64A8 : 0x2F7A5A;
+    const kindW = Math.ceil(r.measureText(this.lastVictoryKind, 10).width);
+    const kindX = Math.floor((LOGICAL_WIDTH - kindW - 24) / 2);
+    r.setColor(0xF4E5B8);
+    r.fillRect(kindX, 61, kindW + 24, 17);
+    r.setColor(kindColor);
+    r.drawRect(kindX, 61, kindW + 24, 17);
+    r.fillRect(kindX - 4, 65, 4, 9);
+    r.fillRect(kindX + kindW + 24, 65, 4, 9);
+    centerText(this.lastVictoryKind, 64, kindColor, 10);
+
+    // 中央军功簿：单一纸张面板内用分隔线组织信息，避免结算数据散落在背景上。
+    r.setColor(0xA94A6F);
+    r.fillRect(13, 88, 220, 186);
+    r.setColor(0xFFFBE8);
+    r.fillRect(9, 84, 220, 186);
+    r.setColor(blue);
+    r.drawRect(9, 84, 220, 186);
+    r.setColor(0xE7C56A);
+    r.drawRect(12, 87, 214, 180);
+    for (const [x, y] of [[9, 84], [224, 84], [9, 265], [224, 265]]) {
+      r.setColor(pink);
+      r.fillRect(x, y, 5, 5);
     }
-    if (this.sandboxUnlockedOnLastVictory) {
-      const unlockText = '已解锁沙盒模式：无限金手指';
-      const unlockW = this.renderer.measureText(unlockText, 9).width;
-      this.renderer.drawText(unlockText, (LOGICAL_WIDTH - unlockW) / 2, 200, 0x2F7A5A, 9);
-    }
-    this.renderer.drawText('点击继续', LOGICAL_WIDTH / 2 - 20, 226, 0xFCFFCD, 10);
+
+    r.setColor(0xF1DFA9);
+    r.fillRect(17, 94, 30, 13);
+    r.drawText('封赏', 22, 96, pink, 8);
+    const rewardText = this.lastVictoryRewardLabels.length > 0
+      ? this.lastVictoryRewardLabels.join('、')
+      : (this.lastVictoryKind === '沙盒胜利' ? '沙盒演练，无额外封赏' : '本关无额外军令封赏');
+    r.drawText(this.fitTextToWidth(rewardText, 166, 8), 53, 96, blue, 8);
+    const commandText = this.sandboxUnlockedOnLastVictory
+      ? '沙盒模式已解锁 · 金手指无限使用'
+      : this.lastVictoryPointsAdded > 0
+        ? `军令 +${this.lastVictoryPointsAdded} · 当前 ${this.cheatProfile.commandPoints}/${COMMAND_POINT_MAX}`
+        : `军令 ${this.cheatProfile.commandPoints}/${COMMAND_POINT_MAX}`;
+    r.drawText(this.fitTextToWidth(commandText, 198, 8), 21, 113,
+      this.sandboxUnlockedOnLastVictory ? 0x2F7A5A : gold, 8);
+
+    r.setColor(0xD7CDAF);
+    r.fillRect(17, 130, 204, 1);
+    r.setColor(0xF1DFA9);
+    r.fillRect(17, 138, 30, 13);
+    r.drawText('功勋', 22, 140, pink, 8);
+    const medalIds: MedalId[] = ['clear', 'flawless', 'swift'];
+    medalIds.forEach((id, index) => {
+      const earned = this.lastMedalEvaluation?.earned.includes(id) ?? false;
+      const isNew = this.lastNewMedals.includes(id);
+      const label = `${earned ? '◆' : '◇'} ${MEDAL_LABELS[id]}${isNew ? ' 新' : ''}`;
+      r.drawText(label, 54 + index * 55, 140, earned ? gold : muted, 8);
+    });
+    const failed = this.lastMedalEvaluation
+      ? Object.entries(this.lastMedalEvaluation.failed)[0]
+      : null;
+    const medalNote = failed
+      ? `未获${MEDAL_LABELS[failed[0] as MedalId]}：${failed[1]}`
+      : this.lastMedalEvaluation ? '三项战功均已记录' : '沙盒演练不记录功勋';
+    r.drawText(this.fitTextToWidth(medalNote, 198, 8), 21, 158, failed ? muted : 0x2F7A5A, 8);
+
+    r.setColor(0xD7CDAF);
+    r.fillRect(17, 176, 204, 1);
+    r.setColor(0xF1DFA9);
+    r.fillRect(17, 184, 30, 13);
+    r.drawText('战报', 22, 186, pink, 8);
+    const top = this.battleStats.topDamage(3);
+    const damageSummary = top.length > 0
+      ? top.map(stat => `${stat.name} ${this.battleStats.totalDamage(stat)}`).join(' · ')
+      : '暂无建筑伤害记录';
+    r.drawText(this.fitTextToWidth(damageSummary, 166, 8), 53, 186, blue, 8);
+
+    const resultStats = [
+      ['联动', this.battleStats.reactionCount],
+      ['最高连战', this.deployment.state.maxCombo],
+      ['额外金币', this.deployment.state.bonusGold],
+    ] as const;
+    resultStats.forEach(([label, value], index) => {
+      const x = 18 + index * 68;
+      if (index > 0) {
+        r.setColor(0xD7CDAF);
+        r.fillRect(x - 4, 207, 1, 43);
+      }
+      r.drawText(label, x, 210, muted, 7);
+      const valueText = `${value}`;
+      const valueW = r.measureText(valueText, 12).width;
+      r.drawText(valueText, x + (62 - valueW) / 2, 226, blue, 12);
+    });
+
+    const buttonX = 66;
+    const buttonY = 279;
+    r.setColor(0xA94A6F);
+    r.fillRect(buttonX + 2, buttonY + 2, 108, 24);
+    r.setColor(paper);
+    r.fillRect(buttonX, buttonY, 108, 24);
+    r.setColor(blue);
+    r.drawRect(buttonX, buttonY, 108, 24);
+    centerText('点击继续', buttonY + 5, blue, 10);
+    this.renderArrows(buttonX + 10, buttonX + 98, buttonY + 7);
+    this.uiSystem.renderSoftkeyBar(SOFTKEY_OK, -1);
+  }
+
+  private renderCouncil(): void {
+    const r = this.renderer;
+    const blue = 0x53678A;
+    const pink = 0xD5317A;
+    const gold = 0xB97818;
+    const paper = 0xFCFFCD;
+    const muted = 0x7E8CA2;
+    const centerText = (text: string, y: number, color: number, size: number): void => {
+      const w = r.measureText(text, size).width;
+      r.drawText(text, (LOGICAL_WIDTH - w) / 2, y, color, size);
+    };
+
+    this.renderCommonBackground(16, 0);
+    this.renderPanelStrip(this.spr('ui', 3), 0, 0xCD3E7E);
+    centerText(`第 ${this.council.state.pendingWave ?? 0} 波 · 军议`, 2, paper, 8);
+    centerText('军 帐 议 事', 18, blue, 14);
+    centerText('择一策施行，或跳过本次军议', 36, muted, 8);
+
+    const offer = this.council.pendingDefinitions;
+    offer.forEach((def: CouncilDefinition, index: number) => {
+      const y = 48 + index * 72;
+      const selected = index === this.councilSelectionIndex;
+      if (selected) {
+        r.setColor(0xA94A6F);
+        r.fillRect(14, y + 2, LOGICAL_WIDTH - 24, 64);
+      }
+      r.setColor(selected ? 0xFFF4C7 : 0xFFFBE8);
+      r.fillRect(10, y, LOGICAL_WIDTH - 20, 64);
+      r.setColor(selected ? pink : blue);
+      r.drawRect(10, y, LOGICAL_WIDTH - 20, 64);
+      if (selected) {
+        r.setColor(0xE7C56A);
+        r.drawRect(13, y + 3, LOGICAL_WIDTH - 26, 58);
+      }
+
+      r.drawText(selected ? '◆' : '◇', 19, y + 7, selected ? gold : muted, 9);
+      r.drawText(def.name, 33, y + 6, selected ? pink : blue, 11);
+      if (selected) {
+        r.setColor(pink);
+        r.fillRect(184, y + 6, 34, 13);
+        r.drawText('待定', 193, y + 8, paper, 7);
+      }
+
+      r.setColor(0xF1DFA9);
+      r.fillRect(19, y + 25, 14, 13);
+      r.drawText('利', 22, y + 27, gold, 8);
+      r.drawText(this.fitTextToWidth(def.benefit, 174, 8), 39, y + 27, blue, 8);
+      r.setColor(def.cost === '无' ? 0xDDE8DD : 0xF2D9D9);
+      r.fillRect(19, y + 43, 14, 13);
+      r.drawText('代', 22, y + 45, def.cost === '无' ? 0x4D8062 : 0xA94A6F, 8);
+      r.drawText(this.fitTextToWidth(def.cost, 174, 8), 39, y + 45,
+        def.cost === '无' ? 0x4D8062 : 0xA94A6F, 8);
+    });
+
+    const touchHint = this.inputSystem.isTouchOptimized ? '再次点击所选卡确认' : '↑↓先选择 · Enter确认';
+    r.setColor(0xFFFBE8);
+    r.fillRect(43, 263, 154, 15);
+    r.setColor(0xD7CDAF);
+    r.drawRect(43, 263, 154, 15);
+    centerText(touchHint, 267, muted, 8);
+    r.setColor(0xA94A6F);
+    r.fillRect(78, 284, 88, 22);
+    r.setColor(paper);
+    r.fillRect(76, 282, 88, 22);
+    r.setColor(blue);
+    r.drawRect(76, 282, 88, 22);
+    centerText('暂不施行', 287, blue, 9);
+    this.uiSystem.renderSoftkeyBar(-1, SOFTKEY_BACK);
   }
 
   // ============================================================
@@ -3412,6 +3991,16 @@ export class Game {
     }
   }
 
+  /** 保留单行布局，超出可用宽度时在末尾收束为省略号。 */
+  private fitTextToWidth(text: string, maxW: number, size: number): string {
+    if (this.renderer.measureText(text, size).width <= maxW) return text;
+    let fitted = text;
+    while (fitted.length > 0 && this.renderer.measureText(`${fitted}…`, size).width > maxW) {
+      fitted = fitted.slice(0, -1);
+    }
+    return fitted ? `${fitted}…` : '';
+  }
+
   // ====== 文字换行绘制工具方法 ======
   private drawWrappedText(text: string, x: number, y: number, maxW: number, lineH: number, color: number, size: number): void {
     if (!text) return;
@@ -3462,13 +4051,15 @@ export class Game {
     this.soundEnabled = settings.musicEnabled;
     this.volume = settings.volume;
     this.displayQuality = settings.scale === 1 ? 1 : 2;
+    this.rulesetId = normalizeRuleset(settings.rulesetId);
+    this.initializeEnhancementRuntime();
     this.renderer.setDisplayMode(this.displayQuality === 2 ? 'hd' : 'original');
     this.audioSystem.setVolume(this.volume);
     this.uiSystem.setAudioSettings(this.soundEnabled, this.volume, this.displayQuality);
 
     // 不再播放原版厂商 LOGO 动画，直接加载地图图集。
     this.startLoadingScreen();
-    this.lastTime = performance.now();
+    this.frameClock.setVisible(document.visibilityState !== 'hidden', performance.now());
     requestAnimationFrame(this.gameLoop);
 
     // 隐藏加载画面

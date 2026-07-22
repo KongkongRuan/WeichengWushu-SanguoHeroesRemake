@@ -8,6 +8,8 @@ import { LOGICAL_WIDTH, LOGICAL_HEIGHT, COLORS } from '../data/gameData';
 import { TOWER_NAMES, FACTION_NAMES, GAME_HELP_TEXT, GAME_DESCRIPTION_TEXT, COPYRIGHT_TEXT } from '../data/heroes';
 import type { TechTreeSystem, BranchState } from './TechTree';
 import type { SpriteLoader } from './SpriteLoader';
+import type { RulesetId } from '../enhancement/Ruleset';
+import { rulesetLabel } from '../enhancement/Ruleset';
 
 export interface Button {
   x: number;
@@ -24,7 +26,7 @@ export interface Button {
 }
 
 type ButtonCallback = (button: Button) => void;
-type PausePage = 'main' | 'cheats' | 'cheat_rules' | 'settings' | 'help' | 'about';
+type PausePage = 'main' | 'cheats' | 'cheat_rules' | 'council' | 'settings' | 'help' | 'about';
 
 const CHEAT_RULES_TEXT = [
   '常驻军令最多5枚。',
@@ -63,6 +65,7 @@ export class UISystem {
 
   // 原版 # 键的触屏入口：只有清场且本波刷完时才显示。
   private waveReady: boolean = false;
+  private comboCountdownSeconds: number | null = null;
 
   // ====== 新增: 游戏控制状态 (对应原版 isPausedInGame / 速度切换) ======
   // 游戏速度 (1=正常, 2=2倍速, 3=3倍速)
@@ -82,6 +85,8 @@ export class UISystem {
   private cheatSandboxMode: boolean = false;
   private cheatUsedActions: Set<string> = new Set();
   private touchOptimized: boolean = false;
+  private rulesetId: RulesetId = 'classic';
+  private councilNames: string[] = [];
 
   // ====== 新增: 科技树面板翻页状态 ======
   // 当前科技树页码 (0-based)
@@ -190,6 +195,13 @@ export class UISystem {
     this.updateButtons();
   }
 
+  setComboCountdownSeconds(seconds: number | null): void {
+    const normalized = seconds == null ? null : Math.max(0, Math.round(seconds * 10) / 10);
+    if (this.comboCountdownSeconds === normalized) return;
+    this.comboCountdownSeconds = normalized;
+    if (this.waveReady) this.updateButtons();
+  }
+
   // ============================================================
   // 新增: 游戏控制接口 (对应原版 handleVolumeInput / isPausedInGame)
   // ============================================================
@@ -266,6 +278,12 @@ export class UISystem {
     this.cheatSandboxMode = status.sandboxMode;
     this.cheatUsedActions = new Set(status.usedActions);
     if (this.pausePage === 'cheats') this.updateButtons();
+  }
+
+  setEnhancementStatus(rulesetId: RulesetId, councilNames: string[] = []): void {
+    this.rulesetId = rulesetId;
+    this.councilNames = [...councilNames];
+    if (this.pauseMenuVisible) this.updateButtons();
   }
 
   /**
@@ -401,7 +419,8 @@ export class UISystem {
     if (!this.touchOptimized && this.waveReady && !this.paused) {
       this.buttons.push({
         x: LOGICAL_WIDTH - 66, y: 23, w: 62, h: 24,
-        label: '出兵 ▶', icon: '▶', color: 0x2F7A5A,
+        label: this.comboCountdownSeconds == null ? '出兵 ▶' : `${this.comboCountdownSeconds.toFixed(1)}s 出兵`,
+        icon: '▶', color: 0x2F7A5A,
         action: 'start_wave', visible: true, enabled: true,
       });
     }
@@ -432,6 +451,7 @@ export class UISystem {
       const labels: [string, string, boolean?][] = this.pausePage === 'main'
         ? [
             ['继续游戏', 'resume'], ['金手指', 'open_cheats'],
+            [`军议 · ${rulesetLabel(this.rulesetId)}`, 'open_council_summary'],
             ['设置', 'pause_settings'], ['帮助', 'pause_help'],
             ['关于', 'pause_about'], ['退出', 'back_to_menu'],
           ] : (this.pausePage === 'cheats' ? [
@@ -447,8 +467,14 @@ export class UISystem {
             [`音量：${Math.round(this.audioVolume * 100)}%`, 'volume_up'],
             ['降低音量', 'volume_down'],
             [`画面：${this.graphicsQuality === 2 ? '高清重制' : '原版像素'}`, 'toggle_graphics'],
+            [`规则：${rulesetLabel(this.rulesetId)}（标题设置）`, 'noop', false],
             ['返回上级', 'cheat_back'],
-          ] : [['返回上级', 'cheat_back']]));
+          ] : (this.pausePage === 'council'
+            ? [...(this.councilNames.length > 0
+                ? this.councilNames.map(name => [`✓ ${name}`, 'noop', false] as [string, string, boolean])
+                : [['尚未获得军议', 'noop', false] as [string, string, boolean]]),
+              ['返回上级', 'cheat_back']]
+            : [['返回上级', 'cheat_back']])));
       const menuH = labels.length * itemH + 20;
       const menuX = (LOGICAL_WIDTH - menuW) / 2;
       const menuY = (LOGICAL_HEIGHT - menuH) / 2;
@@ -714,8 +740,9 @@ export class UISystem {
     const menuW = rulesPage ? 196 : 164;
     const itemH = 24;
     const count = this.pausePage === 'cheats' ? 7
-      : this.pausePage === 'settings' ? 5
-      : (this.pausePage === 'help' || this.pausePage === 'about' ? 1 : 6);
+      : this.pausePage === 'settings' ? 6
+      : this.pausePage === 'council' ? Math.max(2, this.councilNames.length + 1)
+      : (this.pausePage === 'help' || this.pausePage === 'about' ? 1 : 7);
     const menuH = rulesPage ? 230 : count * itemH + 20;
     const menuX = (LOGICAL_WIDTH - menuW) / 2;
     const menuY = (LOGICAL_HEIGHT - menuH) / 2;
@@ -732,6 +759,7 @@ export class UISystem {
     const title = this.pausePage === 'main' ? '已暂停'
       : this.pausePage === 'cheats' ? cheatTitle
       : this.pausePage === 'cheat_rules' ? '军令规则'
+      : this.pausePage === 'council' ? `军议 · ${rulesetLabel(this.rulesetId)}`
       : this.pausePage === 'settings' ? '设置'
       : this.pausePage === 'help' ? '游戏帮助' : '关于';
     this.renderer.drawText(title, (LOGICAL_WIDTH - title.length * 6) / 2, menuY - 14, 0xFFD700, 12);
