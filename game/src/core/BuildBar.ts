@@ -69,6 +69,13 @@ const TOUCH_AV_MAX = 58;
 const TOUCH_VISIBLE_ITEMS = 5;
 const TOUCH_ITEM_SPACING = 40;
 
+export interface TechCostDetail {
+  baseCost: number;
+  discount: number;
+  finalCost: number;
+  explanations: string[];
+}
+
 /** Game 侧宿主接口 (避免循环依赖, 全部回调注入) */
 export interface BuildBarHost {
   /** 当前金币 (原版 bz) */
@@ -81,6 +88,8 @@ export interface BuildBarHost {
   getBuildCost?(origTowerId: number): number;
   /** 最终价格和每一项修正，强化规则不能只显示扣费结果而不解释原因。 */
   getBuildCostDetail?(origTowerId: number): BuildCostDetail;
+  /** 科技装置的最终价格与军议折扣来源。 */
+  getTechCostDetail?(techIndex: number): TechCostDetail;
   /** 选塔完成, 进入选位模式 (原版 aw=3 滑出收尾 → bF=1, K() case 3 行8204-8208) */
   enterPlacement(origTowerId: number): void;
   /** 升级选中塔 (动作16) */
@@ -449,7 +458,8 @@ export class BuildBarSystem {
       this.o = 3; // 该城池已经修建 (b1015[116])
       return;
     }
-    if (!this.host.trySpendGold(TECH_COST_G1057[i])) {
+    const costDetail = this.techCostDetail(i);
+    if (!this.host.trySpendGold(costDetail.finalCost)) {
       this.o = 0; // 金不足 (b1015[113])
       return;
     }
@@ -460,6 +470,16 @@ export class BuildBarSystem {
     }
     this.aw = 2; // 原版: 购买成功关栏
     this.host.onTechBuilt(i);
+  }
+
+  private techCostDetail(techIndex: number): TechCostDetail {
+    const baseCost = TECH_COST_G1057[techIndex] ?? 0;
+    return this.host?.getTechCostDetail?.(techIndex) ?? {
+      baseCost,
+      discount: 0,
+      finalCost: baseCost,
+      explanations: [],
+    };
   }
 
   /**
@@ -694,6 +714,9 @@ export class BuildBarSystem {
     const buildCostDetail = this.aC === BAR_CAT_BUILD && item < 11
       ? this.host?.getBuildCostDetail?.(item)
       : undefined;
+    const techCostDetail = this.aC === BAR_CAT_TECH && item >= 11 && item <= 15
+      ? this.techCostDetail(item - 11)
+      : undefined;
 
     // 大图标区中心 (左面板 0..57)
     const iconCX = 28;
@@ -723,7 +746,7 @@ export class BuildBarSystem {
       } else {
         // 价格: 金图标 + g1057 (J() 行8112-8129)
         if (ui19) r.drawImageRegion(ui19, UI19_GOLD_SX, 0, UI19_GOLD_W, 12, 210, var8 + 2, UI19_GOLD_W, 12);
-        r.drawText(`${TECH_COST_G1057[techIdx]}`, 224, stripTextY, COLOR_TEXT, 8);
+        r.drawText(`${techCostDetail?.finalCost ?? TECH_COST_G1057[techIdx]}`, 224, stripTextY, COLOR_TEXT, 8);
       }
     } else if (this.aC === BAR_CAT_TOWER && this.ay) {
       // ===== 塔操作项 (J() 行7966-8053: aC>=2 分支) =====
@@ -779,6 +802,10 @@ export class BuildBarSystem {
     }
     if (this.o < 0 && !this.actionNotice && buildCostDetail?.explanations.length) {
       const priceNotice = `造价说明：${buildCostDetail.explanations.join('，')}`;
+      desc = desc ? `${priceNotice}。${desc}` : priceNotice;
+    }
+    if (this.o < 0 && !this.actionNotice && techCostDetail?.explanations.length) {
+      const priceNotice = techCostDetail.explanations.join('，');
       desc = desc ? `${priceNotice}。${desc}` : priceNotice;
     }
     const confirmationArmed = (this.touchOptimized && this.touchArmedIndex === this.aD)

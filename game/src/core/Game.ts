@@ -53,6 +53,7 @@ import {
   COLORS,
   TOWER_COST_Q1100,
   TOWER_UPGRADE_COST_R1101,
+  TECH_COST_G1057,
   TECH_CASTLE_PART_H1060,
   INITIAL_GOLD_BY_MODE,
   BAR_MESSAGES,
@@ -70,7 +71,7 @@ import type { CouncilDefinition } from '../data/enhancement/councilData';
 import { ModifierResolver } from '../enhancement/ModifierResolver';
 import { ReactionSystem } from '../enhancement/ReactionSystem';
 import { BattleStats } from '../enhancement/BattleStats';
-import { bossBreachDamage, enemyBreachDamage } from '../enhancement/BalanceRules';
+import { bossBreachDamage, enemyBreachDamage, formatPercent } from '../enhancement/BalanceRules';
 import {
   BattleRecordProfile, MEDAL_LABELS, MedalEvaluation, MedalId,
   createBattleRecordKey, evaluateMedals, medalCount, mergeBattleRecord,
@@ -91,6 +92,7 @@ import {
   GAME_HELP_TEXT,
   GAME_DESCRIPTION_TEXT,
   COPYRIGHT_TEXT,
+  TOWER_NAMES,
 } from '../data/heroes';
 
 // 结局动画阶段 (对应原版 state 46/47/48)
@@ -413,6 +415,19 @@ export class Game {
       getTowerCount: () => this.towerSystem.getTowers().length,
       getBuildCost: (origTowerId) => this.towerSystem.getBuildCost(origTowerId),
       getBuildCostDetail: (origTowerId) => this.towerSystem.getBuildCostDetail(origTowerId),
+      getTechCostDetail: (techIndex) => {
+        const baseCost = TECH_COST_G1057[techIndex] ?? 0;
+        const discount = this.features.enhanced ? this.council.techDiscount(techIndex) : 0;
+        const finalCost = Math.max(1, Math.round(baseCost * (1 - discount)));
+        return {
+          baseCost,
+          discount,
+          finalCost,
+          explanations: discount > 0
+            ? [`军议配套：原价${baseCost}，现价${finalCost}（-${formatPercent(discount)}）`]
+            : [],
+        };
+      },
       // 选塔完成→选位 (原版 K() case 3: bF=1)
       enterPlacement: (origTowerId) => {
         // BuildBar 条目已经是原版塔 id，渲染和数值层统一使用同一编号。
@@ -461,6 +476,7 @@ export class Game {
       deselectTower: () => this.towerSystem.deselectTower(),
       onTechBuilt: (techIndex) => {
         // 原版: 装置建成即 e1105 解锁两塔 + b1059 城堡部件长出
+        if (this.features.enhanced) this.council.consumeTechDiscount(techIndex);
         this.castleRenderer.startPartAnimation(TECH_CASTLE_PART_H1060[techIndex] ?? 0);
         this.uiSystem.showMessage(`装置建成: ${ORIG_TECH_DESC[techIndex]}`, 120);
         this.autoSave();
@@ -482,7 +498,10 @@ export class Game {
     };
     this.combatEvents.on('towerBuilt', ({ towerId, type, cost }) => {
       this.battleStats.invest(towerId, type, this.towerSystem.getTowerConfig(type)?.name ?? '建筑', cost);
-      if (this.features.enhanced) this.council.consumeBuildDiscount();
+      if (this.features.enhanced) {
+        this.council.consumeBuildDiscount();
+        this.council.consumePrototypeDiscount(type);
+      }
     });
     this.combatEvents.on('towerUpgraded', ({ towerId, cost }) => {
       const info = towerInfo(towerId);
@@ -2870,7 +2889,10 @@ export class Game {
     this.state = GameState.PLAYING;
     this.councilTouchArmed = false;
     this.autoSave();
-    const councilResult = selected ? `军议：${selected.name}` : '已跳过军议';
+    const prototypeNotice = selected?.prototype
+      ? ` · 已备${TOWER_NAMES[selected.prototype.towerType] ?? '对应建筑'}样机优惠`
+      : '';
+    const councilResult = selected ? `军议：${selected.name}${prototypeNotice}` : '已跳过军议';
     const preparation = this.deployment.isPreparationProtected(wave)
       ? ' · 整备期：连战已保护'
       : '';
@@ -3970,15 +3992,26 @@ export class Game {
         r.drawText('待定', 193, y + 8, paper, 7);
       }
 
+      const benefitY = def.prototype ? y + 22 : y + 25;
+      const costY = def.prototype ? y + 37 : y + 43;
       r.setColor(0xF1DFA9);
-      r.fillRect(19, y + 25, 14, 13);
-      r.drawText('利', 22, y + 27, gold, 8);
-      r.drawText(this.fitTextToWidth(def.benefit, 174, 8), 39, y + 27, blue, 8);
+      r.fillRect(19, benefitY, 14, 13);
+      r.drawText('利', 22, benefitY + 2, gold, 8);
+      r.drawText(this.fitTextToWidth(def.benefit, 174, 8), 39, benefitY + 2, blue, 8);
       r.setColor(def.cost === '无' ? 0xDDE8DD : 0xF2D9D9);
-      r.fillRect(19, y + 43, 14, 13);
-      r.drawText('代', 22, y + 45, def.cost === '无' ? 0x4D8062 : 0xA94A6F, 8);
-      r.drawText(this.fitTextToWidth(def.cost, 174, 8), 39, y + 45,
+      r.fillRect(19, costY, 14, 13);
+      r.drawText('代', 22, costY + 2, def.cost === '无' ? 0x4D8062 : 0xA94A6F, 8);
+      r.drawText(this.fitTextToWidth(def.cost, 174, 8), 39, costY + 2,
         def.cost === '无' ? 0x4D8062 : 0xA94A6F, 8);
+      if (def.prototype) {
+        const techName = TOWER_NAMES[11 + def.prototype.techIndex] ?? '对应装置';
+        const towerName = TOWER_NAMES[def.prototype.towerType] ?? '对应建筑';
+        const pairing = `配套：${techName}-${formatPercent(def.prototype.techDiscount)} · ${towerName}样机-${formatPercent(def.prototype.towerDiscount)}`;
+        r.setColor(0xE8E3C7);
+        r.fillRect(19, y + 52, 14, 11);
+        r.drawText('配', 22, y + 53, gold, 7);
+        r.drawText(this.fitTextToWidth(pairing, 174, 7), 39, y + 53, blue, 7);
+      }
     });
 
     const touchHint = this.inputSystem.isTouchOptimized ? '再次点击所选卡确认' : '↑↓先选择 · Enter确认';

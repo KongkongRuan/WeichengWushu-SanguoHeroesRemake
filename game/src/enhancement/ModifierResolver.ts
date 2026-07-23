@@ -16,10 +16,18 @@ export class ModifierResolver {
   enemyHealth(base: number, elite: boolean): number {
     return elite ? base : Math.max(1, Math.round(base * (1 + this.sum('normalEnemyHealth'))));
   }
-  buildCost(base: number, towerType: number): number {
+  buildCostBeforePrototype(base: number, towerType: number): number {
     let result = base;
     if (this.council.state.buildDiscountUses > 0) result *= 1 - this.sum('buildDiscount');
     if (towerType === 9) result *= 1 + this.sum('oilBuildCost');
+    return Math.max(1, Math.round(result));
+  }
+  prototypeTowerDiscount(towerType: number): number {
+    return this.features.enhanced ? this.council.prototypeDiscount(towerType) : 0;
+  }
+  buildCost(base: number, towerType: number): number {
+    const result = this.buildCostBeforePrototype(base, towerType)
+      * (1 - this.prototypeTowerDiscount(towerType));
     return Math.max(1, Math.round(result));
   }
   upgradeCost(base: number): number {
