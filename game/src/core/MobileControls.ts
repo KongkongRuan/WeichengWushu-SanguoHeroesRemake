@@ -19,6 +19,7 @@ export interface MobileControlState {
   paused: boolean;
   waveReady: boolean;
   comboCountdownSeconds: number | null;
+  battleIntel: string;
   context: MobileControlContext;
 }
 
@@ -36,6 +37,7 @@ export class MobileControls {
   private readonly lives = document.getElementById('mobile-lives');
   private readonly level = document.getElementById('mobile-level');
   private readonly wave = document.getElementById('mobile-wave');
+  private readonly intel = document.getElementById('mobile-intel');
   private readonly hint = document.getElementById('mobile-hint');
   private readonly speedButton = this.button('speed');
   private readonly pauseButton = this.button('pause');
@@ -76,6 +78,7 @@ export class MobileControls {
     if (this.lives) this.lives.textContent = `防 ${state.lives}`;
     if (this.level) this.level.textContent = `关 ${state.level + 1}`;
     if (this.wave) this.wave.textContent = `波 ${state.wave}/${state.totalWaves}`;
+    if (this.intel) this.intel.textContent = state.battleIntel;
 
     if (this.speedButton) this.speedButton.textContent = `速度 ${state.speed}×`;
     if (this.pauseButton) this.pauseButton.textContent = state.paused ? '继续' : '暂停';

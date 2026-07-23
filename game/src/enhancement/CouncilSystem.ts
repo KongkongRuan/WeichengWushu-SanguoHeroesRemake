@@ -1,6 +1,10 @@
 import { COUNCIL_BY_ID, COUNCIL_DEFINITIONS, CouncilDefinition } from '../data/enhancement/councilData';
 import { SeededRng } from './SeededRng';
 
+export interface CouncilOfferContext {
+  builtTowerTypes?: readonly number[];
+}
+
 export interface CouncilRunState {
   triggeredWaves: number[];
   pendingWave: number | null;
@@ -34,14 +38,38 @@ export class CouncilSystem {
     this.state = createCouncilState(state);
   }
 
-  offerAfterWave(wave: number, totalWaves: number): readonly CouncilDefinition[] {
-    if (wave <= 0 || wave >= totalWaves || (wave & 1) !== 0) return [];
+  offerAfterWave(
+    wave: number,
+    totalWaves: number,
+    context: CouncilOfferContext = {},
+  ): readonly CouncilDefinition[] {
+    // 军议只在名将波结束后召开，让每四波形成“作战 → 斩将 → 整备”的完整节奏。
+    if (wave <= 0 || wave >= totalWaves || wave % 4 !== 0) return [];
     if (this.state.triggeredWaves.includes(wave)) return this.pendingDefinitions;
     const selected = new Set(this.state.selectedIds);
-    const candidates = COUNCIL_DEFINITIONS.filter(def => !selected.has(def.id));
+    const built = new Set(context.builtTowerTypes ?? []);
+    const candidates = COUNCIL_DEFINITIONS.filter(def => {
+      if (selected.has(def.id)) return false;
+      if (def.requiresBuiltAny?.length && !def.requiresBuiltAny.some(type => built.has(type))) return false;
+      if (def.requiresBuiltAll?.length && !def.requiresBuiltAll.every(type => built.has(type))) return false;
+      return true;
+    });
+    const offer: CouncilDefinition[] = [];
+    const addOne = (kind: CouncilDefinition['kind']) => {
+      const pool = this.rng.shuffle(candidates.filter(def => def.kind === kind && !offer.includes(def)));
+      if (pool[0]) offer.push(pool[0]);
+    };
+    // 三张牌保持功能差异，避免一次军议全是金币折扣或全是当前无法理解的状态强化。
+    addOne('combat');
+    addOne('survival');
+    addOne('economy');
+    for (const def of this.rng.shuffle(candidates)) {
+      if (offer.length >= 3) break;
+      if (!offer.includes(def)) offer.push(def);
+    }
     this.state.triggeredWaves.push(wave);
     this.state.pendingWave = wave;
-    this.state.pendingOffer = this.rng.shuffle(candidates).slice(0, 3).map(def => def.id);
+    this.state.pendingOffer = offer.slice(0, 3).map(def => def.id);
     return this.pendingDefinitions;
   }
 
@@ -56,7 +84,7 @@ export class CouncilSystem {
     if (id != null && this.state.pendingOffer.includes(id)) {
       selected = COUNCIL_BY_ID.get(id) ?? null;
       if (selected) {
-        this.state.selectedIds.push(selected.id);
+        if (!selected.immediate) this.state.selectedIds.push(selected.id);
         this.state.buildDiscountUses += selected.buildUses ?? 0;
         this.state.upgradeDiscountUses += selected.upgradeUses ?? 0;
       }

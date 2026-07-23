@@ -14,32 +14,40 @@ function modifiers(id: string, extra: Record<string, unknown> = {}) {
 test('相同种子与触发波次生成相同且不重复的三项军议', () => {
   const a = new CouncilSystem(new SeededRng(2026));
   const b = new CouncilSystem(new SeededRng(2026));
-  const idsA = a.offerAfterWave(2, 8).map(x => x.id);
-  const idsB = b.offerAfterWave(2, 8).map(x => x.id);
+  const idsA = a.offerAfterWave(4, 12, { builtTowerTypes: [1] }).map(x => x.id);
+  const idsB = b.offerAfterWave(4, 12, { builtTowerTypes: [1] }).map(x => x.id);
   assert.deepEqual(idsA, idsB);
   assert.equal(new Set(idsA).size, 3);
 });
 
-test('已选择军议不会再次进入后续内容池，最后一波不触发', () => {
+test('军议只在非最终名将波触发，已选择内容不会立即重复', () => {
   const council = new CouncilSystem(new SeededRng(7));
-  const first = council.offerAfterWave(2, 8);
+  assert.deepEqual(council.offerAfterWave(2, 12), []);
+  const first = council.offerAfterWave(4, 12);
   const selected = first[0].id;
   council.resolve(selected);
-  const second = council.offerAfterWave(4, 8);
+  const second = council.offerAfterWave(8, 12);
   assert.equal(second.some(item => item.id === selected), false);
-  assert.deepEqual(council.offerAfterWave(8, 8), []);
+  assert.deepEqual(council.offerAfterWave(12, 12), []);
 });
 
 test('军议跳过和存档恢复不会重复触发同一波', () => {
   const council = new CouncilSystem(new SeededRng(8));
-  council.offerAfterWave(2, 8);
+  council.offerAfterWave(4, 12);
   council.resolve(null);
   const restored = new CouncilSystem(new SeededRng(8), council.serialize());
-  assert.deepEqual(restored.offerAfterWave(2, 8), []);
-  assert.deepEqual(restored.state.skippedWaves, [2]);
+  assert.deepEqual(restored.offerAfterWave(4, 12), []);
+  assert.deepEqual(restored.state.skippedWaves, [4]);
 });
 
-test('稳固军饷：每波增加 6 金', () => assert.equal(modifiers('steady_income').resolver.waveIncome(), 6));
+test('军议候选按已建建筑过滤，并保持战斗、生存、经济三类选择', () => {
+  const council = new CouncilSystem(new SeededRng(2026));
+  const offer = council.offerAfterWave(4, 12, { builtTowerTypes: [1] });
+  assert.equal(offer.some(item => item.id === 'deep_freeze'), false);
+  assert.deepEqual(new Set(offer.map(item => item.kind)), new Set(['combat', 'survival', 'economy']));
+});
+
+test('稳固军饷：每波增加 4 金', () => assert.equal(modifiers('steady_income').resolver.waveIncome(), 4));
 
 test('急造工事：仅在有次数时提供 30% 建造折扣', () => {
   const { council, resolver } = modifiers('rapid_works', { buildDiscountUses: 1 });
@@ -77,8 +85,8 @@ test('深寒：碎冰伤害增加且冰冻时间缩短', () => {
 
 test('烈性石灰：毒伤增加且石灰瓶攻击间隔增长', () => {
   const { resolver } = modifiers('toxic_lime');
-  assert.equal(resolver.poisonDamage(4), 6);
-  assert.equal(resolver.fireRate(30, 1), 33);
+  assert.equal(resolver.poisonDamage(4), 5);
+  assert.equal(resolver.fireRate(30, 1), 35);
 });
 
 test('强弩过载：麻痹时间与麻痹矢间隔各增长 20%/10%', () => {
@@ -105,10 +113,11 @@ test('背水：仅在城防不高于 3 时增加 20% 伤害', () => {
   assert.equal(resolver.directDamage(100, 0, 4), 100);
 });
 
-test('催军：连战奖励翻倍并使普通敌军加速', () => {
+test('催军：连战奖励提高 50% 并使普通敌军生命增加 12%', () => {
   const { resolver } = modifiers('forced_march');
-  assert.equal(resolver.comboRewardMultiplier(), 2);
-  assert.equal(resolver.enemySpeed(20, false), 21);
+  assert.equal(resolver.comboRewardMultiplier(), 1.5);
+  assert.equal(resolver.enemyHealth(100, false), 112);
+  assert.equal(resolver.enemyHealth(100, true), 100);
   assert.equal(resolver.enemySpeed(20, true), 20);
 });
 

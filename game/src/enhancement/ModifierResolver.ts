@@ -12,8 +12,9 @@ export class ModifierResolver {
 
   waveIncome(): number { return Math.max(0, Math.floor(this.sum('waveIncome'))); }
   comboRewardMultiplier(): number { return Math.max(1, this.sum('comboReward') || 1); }
-  enemySpeed(base: number, elite: boolean): number {
-    return elite ? base : Math.max(1, Math.round(base * (1 + this.sum('normalEnemySpeed'))));
+  enemySpeed(base: number, _elite: boolean): number { return base; }
+  enemyHealth(base: number, elite: boolean): number {
+    return elite ? base : Math.max(1, Math.round(base * (1 + this.sum('normalEnemyHealth'))));
   }
   buildCost(base: number, towerType: number): number {
     let result = base;

@@ -56,7 +56,7 @@ test('未来存档版本会被安全拒绝', () => {
   assert.equal(migrateSaveData({ version: CURRENT_SAVE_VERSION + 1 }), null);
 });
 
-test('连战阈值、上限、延迟归零和单波只发一次奖励', () => {
+test('连战阈值、上限、延迟降级和单波只发一次奖励', () => {
   const tracker = new DeploymentTracker();
   tracker.deploy(1, 99999);
   tracker.deploy(2, 1999);
@@ -66,10 +66,10 @@ test('连战阈值、上限、延迟归零和单波只发一次奖励', () => {
   tracker.deploy(4, 100);
   tracker.deploy(5, 100);
   assert.equal(tracker.state.combo, 5);
-  assert.equal(tracker.rewardWave(5), 10);
+  assert.equal(tracker.rewardWave(5), 5);
   assert.equal(tracker.rewardWave(5), 0);
   tracker.deploy(6, 5001);
-  assert.equal(tracker.state.combo, 0);
+  assert.equal(tracker.state.combo, 4);
 });
 
 test('军令清场阻止本波连战金币', () => {
@@ -77,13 +77,22 @@ test('军令清场阻止本波连战金币', () => {
   assert.equal(tracker.rewardWave(2, true), 0);
 });
 
-test('连战准备倒计时耗尽时立即归零且只结算一次', () => {
+test('连战准备倒计时耗尽时只下降一级且只结算一次', () => {
   const tracker = new DeploymentTracker({ combo: 4 });
   assert.equal(tracker.expireCombo(5000), false);
   assert.equal(tracker.state.combo, 4);
   assert.equal(tracker.expireCombo(5001), true);
-  assert.equal(tracker.state.combo, 0);
+  assert.equal(tracker.state.combo, 3);
   assert.equal(tracker.expireCombo(9000), false);
+});
+
+test('名将波后的整备期保护连战且出兵后只消费一次', () => {
+  const tracker = new DeploymentTracker({ combo: 4 });
+  tracker.protectPreparationAfter(4);
+  assert.equal(tracker.isPreparationProtected(4), true);
+  assert.equal(tracker.consumeProtectedPreparation(4), true);
+  assert.equal(tracker.deploy(5, 60000, true).combo, 4);
+  assert.equal(tracker.consumeProtectedPreparation(4), false);
 });
 
 test('强化波次预告与正式开始共用同一计划，运行态可往返恢复', () => {

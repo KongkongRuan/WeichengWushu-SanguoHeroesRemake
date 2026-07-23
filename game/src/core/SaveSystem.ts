@@ -218,7 +218,7 @@ export class SaveSystem {
       sfxEnabled: true,
       showFps: false,
       scale: 2,
-      rulesetId: 'classic',
+      rulesetId: 'enhanced',
     };
 
     try {

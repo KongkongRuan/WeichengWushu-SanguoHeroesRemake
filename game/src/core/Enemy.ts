@@ -33,6 +33,7 @@ import { SeededRng } from '../enhancement/SeededRng';
 import type { WavePlan } from '../enhancement/WaveIntel';
 import type { CombatEvents, CombatStatusId, StatusRemovalReason } from '../enhancement/CombatEvents';
 import type { ModifierResolver } from '../enhancement/ModifierResolver';
+import { bossBreachDamage } from '../enhancement/BalanceRules';
 import {
   TILE_SIZE,
   MAP_TOP_BAR_H,
@@ -425,11 +426,13 @@ export class EnemySystem {
   private spawnEnemy(): void {
     const sp = this.mapData.getSpawnPixel();
     const elite = this.o1077;
+    const normalHp = this.modifiers?.enemyHealth(this.aW, false) ?? this.aW;
+    const spawnHp = elite ? this.aW * 10 : normalHp;
     const enemy: Enemy = {
       instanceId: this.nextEnemyInstanceId++,
       x: sp.x,                                // [0] = b1069[aN][0]
       y: sp.y,                                // [1] = b1069[aN][1]
-      hp: elite ? this.aW * 10 : this.aW,     // [2] 名将波10倍HP
+      hp: spawnHp,                            // [2] 名将波10倍HP；催军只强化普通敌军
       defense: this.aY,                       // [3] 原版 aY，攻击时从伤害中扣除
       goldReward: elite ? 50 : 5,             // 原版结算固定奖励，不是波次 aY
       speed: this.modifiers?.enemySpeed(this.aZ, elite) ?? this.aZ, // [4]
@@ -439,7 +442,7 @@ export class EnemySystem {
       variant: elite ? (this.aV << 1) + 1 : this.aV << 1, // [6]
       animFrame: 0,                           // [7]
       state: EnemyState.WALK,                 // [8]
-      maxHp: elite ? this.aW * 10 : this.aW,
+      maxHp: spawnHp,
       unitType: this.aV,
       elite,
       spawnIndex: this.aQ,                    // [24]
@@ -1169,14 +1172,21 @@ export class EnemySystem {
    * 血条 (保留现有样式)
    */
   private renderHealthBar(enemy: Enemy, px: number, py: number): void {
-    if (enemy.hp >= enemy.maxHp) return;
-    const barW = TILE_SIZE;
+    if (enemy.hp >= enemy.maxHp && !enemy.elite) return;
+    const enhancedBoss = enemy.elite && this.features.enhanced;
+    const barW = enhancedBoss ? 24 : TILE_SIZE;
     const barH = 2;
+    const barX = px - (barW >> 1);
+    const barY = py - 18;
     const hpRatio = Math.max(0, enemy.hp / enemy.maxHp);
     this.renderer.setColor(0x000000);
-    this.renderer.fillRect(px - 8, py - 18, barW, barH);
+    this.renderer.fillRect(barX, barY, barW, barH);
     this.renderer.setColor(0xFF0000);
-    this.renderer.fillRect(px - 8, py - 18, barW * hpRatio, barH);
+    this.renderer.fillRect(barX, barY, barW * hpRatio, barH);
+    if (enhancedBoss) {
+      const breach = bossBreachDamage(this.features.rulesetId, this.aS);
+      this.renderer.drawText(`破${breach}`, barX + barW + 2, barY - 3, 0xFF8C68, 7);
+    }
   }
 
   /** 原版 r(int)：冻结、减速、中毒、火焰、麻痹按固定顺序叠加绘制。 */

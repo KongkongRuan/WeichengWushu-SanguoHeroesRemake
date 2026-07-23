@@ -19,7 +19,7 @@
  */
 import { Renderer } from './Renderer';
 import { SpriteLoader } from './SpriteLoader';
-import type { Tower } from './Tower';
+import type { BuildCostDetail, Tower } from './Tower';
 import { HEROES, HERO_EFFECT_DESCRIPTIONS } from '../data/heroes';
 import {
   LOGICAL_WIDTH,
@@ -79,6 +79,8 @@ export interface BuildBarHost {
   getTowerCount(): number;
   /** 当前规则与军议修正后的建造费。 */
   getBuildCost?(origTowerId: number): number;
+  /** 最终价格和每一项修正，强化规则不能只显示扣费结果而不解释原因。 */
+  getBuildCostDetail?(origTowerId: number): BuildCostDetail;
   /** 选塔完成, 进入选位模式 (原版 aw=3 滑出收尾 → bF=1, K() case 3 行8204-8208) */
   enterPlacement(origTowerId: number): void;
   /** 升级选中塔 (动作16) */
@@ -386,7 +388,10 @@ export class BuildBarSystem {
           this.o = 2; // 现在还不能建造这个建筑,需要修建相关的城池 (b1015[115])
           return;
         }
-        if (this.host.getGold() < TOWER_COST_Q1100[item]) {
+        const buildCost = this.host.getBuildCostDetail?.(item).finalCost
+          ?? this.host.getBuildCost?.(item)
+          ?? TOWER_COST_Q1100[item];
+        if (this.host.getGold() < buildCost) {
           this.o = 0; // 金不足
           return;
         }
@@ -686,6 +691,9 @@ export class BuildBarSystem {
     const ui19 = this.spriteLoader?.getUISprite(19);
     const ui29 = this.spriteLoader?.getUISprite(29);
     const stripTextY = var8 + 3;
+    const buildCostDetail = this.aC === BAR_CAT_BUILD && item < 11
+      ? this.host?.getBuildCostDetail?.(item)
+      : undefined;
 
     // 大图标区中心 (左面板 0..57)
     const iconCX = 28;
@@ -702,7 +710,7 @@ export class BuildBarSystem {
       }
       // 价格: 金图标 + q1100 (J() 行8064-8078)
       if (ui19) r.drawImageRegion(ui19, UI19_GOLD_SX, 0, UI19_GOLD_W, 12, 210, var8 + 2, UI19_GOLD_W, 12);
-      r.drawText(`${this.host?.getBuildCost?.(item) ?? TOWER_COST_Q1100[item]}`, 224, stripTextY, COLOR_TEXT, 8);
+      r.drawText(`${buildCostDetail?.finalCost ?? this.host?.getBuildCost?.(item) ?? TOWER_COST_Q1100[item]}`, 224, stripTextY, COLOR_TEXT, 8);
       this.renderTowerPreview(item, 1, iconCX, iconCY, panelY);
     } else if (this.aC === BAR_CAT_TECH && item >= 11 && item <= 15) {
       // ===== 科技装置项 (J() 行8091-8131: aC==1 分支) =====
@@ -768,6 +776,10 @@ export class BuildBarSystem {
       desc = hero ? `${hero.name}：${effect}` : effect;
     } else if (this.aC === BAR_CAT_TOWER && item >= 16) {
       desc = ORIG_ACTION_DESC[item - 16] ?? '';
+    }
+    if (this.o < 0 && !this.actionNotice && buildCostDetail?.explanations.length) {
+      const priceNotice = `造价说明：${buildCostDetail.explanations.join('，')}`;
+      desc = desc ? `${priceNotice}。${desc}` : priceNotice;
     }
     const confirmationArmed = (this.touchOptimized && this.touchArmedIndex === this.aD)
       || this.demolishArmedIndex === this.aD;

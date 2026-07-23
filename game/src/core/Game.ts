@@ -70,6 +70,7 @@ import type { CouncilDefinition } from '../data/enhancement/councilData';
 import { ModifierResolver } from '../enhancement/ModifierResolver';
 import { ReactionSystem } from '../enhancement/ReactionSystem';
 import { BattleStats } from '../enhancement/BattleStats';
+import { bossBreachDamage, enemyBreachDamage } from '../enhancement/BalanceRules';
 import {
   BattleRecordProfile, MEDAL_LABELS, MedalEvaluation, MedalId,
   createBattleRecordKey, evaluateMedals, medalCount, mergeBattleRecord,
@@ -356,9 +357,13 @@ export class Game {
         this.totalGoldEarned += actualGold;
         this.syncGold(); // 击杀金同步到塔/科技树池 (修复旧版三池脱节)
       },
-      () => {
-        this.lives--;
+      (enemy) => {
+        const breachDamage = enemyBreachDamage(this.rulesetId, this.enemySystem.currentWave, enemy.elite);
+        this.lives -= breachDamage;
         this.battleLeaks++;
+        if (enemy.elite && this.features.enhanced) {
+          this.uiSystem.showMessage(`名将破城！城防 -${breachDamage}`, 90);
+        }
         if (this.lives <= 0) {
           this.recordCurrentBattleFailure();
           this.emitLevelEnded(false);
@@ -367,7 +372,10 @@ export class Game {
       },
       // 名将波首个敌人登场：恢复专属横幅、头像和 /8.mid 音乐。
       (_bossType, bossId) => {
-        this.uiSystem.showBossBanner(HEROES[bossId]?.name ?? `名将 ${bossId}`, bossId);
+        const breachDamage = this.features.enhanced
+          ? bossBreachDamage(this.rulesetId, this.enemySystem.currentWave)
+          : null;
+        this.uiSystem.showBossBanner(HEROES[bossId]?.name ?? `名将 ${bossId}`, bossId, breachDamage);
         this.playMusic('./mid/8.mid');
       },
     );
@@ -404,6 +412,7 @@ export class Game {
       },
       getTowerCount: () => this.towerSystem.getTowers().length,
       getBuildCost: (origTowerId) => this.towerSystem.getBuildCost(origTowerId),
+      getBuildCostDetail: (origTowerId) => this.towerSystem.getBuildCostDetail(origTowerId),
       // 选塔完成→选位 (原版 K() case 3: bF=1)
       enterPlacement: (origTowerId) => {
         // BuildBar 条目已经是原版塔 id，渲染和数值层统一使用同一编号。
@@ -411,6 +420,10 @@ export class Game {
         this.towerSystem.enterBuildMode();
         const bt = this.mapData.getBuildingBoxTile();
         this.towerSystem.setBuildPosition(bt.tx, bt.ty);
+        const detail = this.towerSystem.getBuildCostDetail(origTowerId);
+        if (detail.explanations.length > 0) {
+          this.uiSystem.showMessage(`造价 ${detail.finalCost}金：${detail.explanations.join('，')}`, 120);
+        }
       },
       upgradeTower: (tower) => {
         const upgraded = this.towerSystem.upgradeTower(tower);
@@ -594,6 +607,12 @@ export class Game {
       this.deployment.state.readyElapsedMs = 0;
       return;
     }
+    if (this.deployment.isPreparationProtected(this.enemySystem.currentWave)) {
+      this.waveWasReady = true;
+      this.waveReadyElapsedMs = 0;
+      this.deployment.state.readyElapsedMs = 0;
+      return;
+    }
     // 暂停只冻结准备窗口，不能把已经消耗的时间刷新为零。
     if (this.uiSystem.isPaused()) return;
     if (!this.waveWasReady) {
@@ -606,7 +625,7 @@ export class Game {
     this.deployment.state.readyElapsedMs = this.waveReadyElapsedMs;
     if (this.features.deploymentRewards && this.deployment.expireCombo(this.waveReadyElapsedMs)) {
       this.quickDeployEligible = false;
-      this.uiSystem.showMessage('连战中断', 45);
+      this.uiSystem.showMessage(`整备超时，连战降至 ${this.deployment.state.combo}`, 60);
     }
   }
 
@@ -620,6 +639,7 @@ export class Game {
     if (!this.features.deploymentRewards
       || this.state !== GameState.PLAYING
       || !this.enemySystem.canStartNextWave
+      || this.deployment.isPreparationProtected(this.enemySystem.currentWave)
       || this.enemySystem.currentWave < 1
       || this.deployment.state.combo <= 0) return null;
     const remaining = DEPLOYMENT_CONFIG.eligibleMs - this.waveReadyElapsedMs;
@@ -695,12 +715,18 @@ export class Game {
     this.combatEvents.emit('waveCompleted', { wave, bonusGold: reward });
     this.waveClearedByCommand = false;
 
-    const offer = this.council.offerAfterWave(wave, this.enemySystem.totalWaves);
+    const bossRest = wave % 4 === 0 && wave < this.enemySystem.totalWaves;
+    if (bossRest) this.deployment.protectPreparationAfter(wave);
+    const offer = this.council.offerAfterWave(wave, this.enemySystem.totalWaves, {
+      builtTowerTypes: this.towerSystem.getTowers().map(tower => tower.type),
+    });
     if (offer.length > 0 && this.council.state.pendingWave != null) {
       this.councilSelectionIndex = -1;
       this.councilTouchArmed = false;
       this.state = GameState.COUNCIL;
       this.autoSave();
+    } else if (bossRest) {
+      this.uiSystem.showMessage('斩将整备：可安心修建科技，连战已保护', 150);
     }
   }
 
@@ -1117,7 +1143,13 @@ export class Game {
     // 游戏中: 先检查UI按钮 (暂停菜单时也只能点UI按钮)
     if (this.uiSystem.handleTap(x, y)) return;
 
-    if (this.features.waveIntel && !this.uiSystem.isPaused() && x < 172 && y >= 20 && y <= 44) {
+    // 触屏端的军情已移到画布外状态区，不能继续让旧横幅热区吞掉地图点击。
+    if (!this.inputSystem.isTouchOptimized
+      && this.features.waveIntel
+      && !this.uiSystem.isPaused()
+      && x < 172
+      && y >= 20
+      && y <= 44) {
       this.waveIntelExpanded = !this.waveIntelExpanded;
       return;
     }
@@ -1233,9 +1265,18 @@ export class Game {
       this.towerSystem.exitBuildMode();
       return;
     }
+    const costDetail = this.towerSystem.getBuildCostDetail(type);
+    if (this.gold < costDetail.finalCost) {
+      const reason = costDetail.explanations.length ? `（${costDetail.explanations.join('，')}）` : '';
+      this.uiSystem.showMessage(`金币不足：需要 ${costDetail.finalCost} 金${reason}`, 120);
+      return;
+    }
     if (this.towerSystem.placeTower(cur.tx, cur.ty, type)) {
       this.syncGold();
       this.towerSystem.exitBuildMode();
+      if (costDetail.explanations.length > 0) {
+        this.uiSystem.showMessage(`建造完成：${costDetail.finalCost}金（${costDetail.explanations.join('，')}）`, 105);
+      }
       if (this.inputSystem.isTouchOptimized) navigator.vibrate?.(18);
     } else {
       this.uiSystem.showMessage('此处不可建造', 60);
@@ -2317,9 +2358,11 @@ export class Game {
   private requestNextWave(): void {
     const nextWave = this.enemySystem.currentWave + 1;
     if (this.enemySystem.requestNextWave()) {
+      const protectedPreparation = this.features.deploymentRewards
+        && this.deployment.consumeProtectedPreparation(this.enemySystem.currentWave);
       // 第一波允许玩家安心布防；从第二波开始，准备就绪后5秒内出兵才算“及时”。
       if (this.features.deploymentRewards) {
-        const deployment = this.deployment.deploy(nextWave, this.waveReadyElapsedMs);
+        const deployment = this.deployment.deploy(nextWave, this.waveReadyElapsedMs, protectedPreparation);
         if (!deployment.timely) this.quickDeployEligible = false;
       } else if (nextWave > 1 && this.waveReadyElapsedMs > 5000) {
         this.quickDeployEligible = false;
@@ -2827,12 +2870,35 @@ export class Game {
     this.state = GameState.PLAYING;
     this.councilTouchArmed = false;
     this.autoSave();
-    this.uiSystem.showMessage(selected ? `军议：${selected.name}` : '已跳过军议', 75);
+    const councilResult = selected ? `军议：${selected.name}` : '已跳过军议';
+    const preparation = this.deployment.isPreparationProtected(wave)
+      ? ' · 整备期：连战已保护'
+      : '';
+    this.uiSystem.showMessage(`${councilResult}${preparation}`, 120);
   }
 
   private syncMobileControls(): void {
     const playing = this.state === GameState.PLAYING;
     const countdownMs = this.comboCountdownRemainingMs();
+    const protectedRest = this.features.enhanced
+      && this.deployment.isPreparationProtected(this.enemySystem.currentWave);
+    const plan = this.features.waveIntel ? this.enemySystem.wavePlan : null;
+    const typeName = plan ? (ENEMY_TYPE_NAMES[plan.enemyType] ?? `兵种${plan.enemyType}`) : '';
+    const countdown = countdownMs == null
+      ? ''
+      : ` · 连战保持 ${(Math.ceil(countdownMs / 100) / 10).toFixed(1)}秒`;
+    const bossThreat = plan?.elite
+      ? ` · 名将破城-${bossBreachDamage(this.rulesetId, plan.wave)}`
+      : '';
+    let battleIntel = `[${rulesetLabel(this.rulesetId)}]`;
+    if (protectedRest) {
+      battleIntel += ' 斩将整备 · 连战已保护 · 可修科技';
+    } else if (this.features.waveIntel) {
+      battleIntel = plan
+        ? `${battleIntel} ${plan.wave}/${this.enemySystem.totalWaves} ${typeName}×${plan.count} 连战${this.deployment.state.combo}${countdown}`
+        : `${battleIntel} 等待军情…`;
+    }
+    const mobileIntel = protectedRest ? battleIntel : `${battleIntel}${bossThreat}`;
     this.mobileControls.update({
       visible: playing && this.inputSystem.isTouchOptimized,
       gold: this.gold,
@@ -2844,6 +2910,7 @@ export class Game {
       paused: this.uiSystem.isPaused(),
       waveReady: this.enemySystem.canStartNextWave,
       comboCountdownSeconds: countdownMs == null ? null : Math.ceil(countdownMs / 100) / 10,
+      battleIntel: mobileIntel,
       context: this.buildBar.isOpen
         ? 'bar'
         : this.towerSystem.isBuildMode ? 'placement' : 'normal',
@@ -3558,6 +3625,9 @@ export class Game {
   }
 
   private renderEnhancementHud(): void {
+    // 触屏端在画布外显示同一份军情，避免横幅遮住地图顶部的道路和建造落点。
+    if (this.inputSystem.isTouchOptimized) return;
+
     const r = this.renderer;
     const label = `[${rulesetLabel(this.rulesetId)}]`;
     if (!this.features.waveIntel) {
@@ -3566,12 +3636,16 @@ export class Game {
     }
     const plan = this.enemySystem.wavePlan;
     const countdownMs = this.comboCountdownRemainingMs();
+    const protectedRest = this.deployment.isPreparationProtected(this.enemySystem.currentWave);
     const typeName = plan ? (ENEMY_TYPE_NAMES[plan.enemyType] ?? `兵种${plan.enemyType}`) : '';
-    const summary = plan
+    const summary = protectedRest
+      ? `${label} 斩将整备 · 连战${this.deployment.state.combo}已保护`
+      : plan
       ? `${label} ${plan.wave}/${this.enemySystem.totalWaves} ${typeName}×${plan.count} 连战${this.deployment.state.combo}`
       : '';
     const panelWidth = this.waveIntelExpanded ? 212 : 168;
-    const height = (this.waveIntelExpanded ? 48 : 18) + (countdownMs == null ? 0 : 14);
+    const hasPreparationLine = countdownMs != null || protectedRest;
+    const height = (this.waveIntelExpanded ? 48 : 18) + (hasPreparationLine ? 14 : 0);
     const ctx = this.renderer.virtualContext;
     ctx.save();
     ctx.globalAlpha = 0.86;
@@ -3584,7 +3658,10 @@ export class Game {
       this.renderer.drawText(`${label} 等待军情…`, 6, 25, 0xFFD36A, 8);
       return;
     }
-    const comboReward = Math.min(10, this.deployment.state.combo * 2) * this.modifiers.comboRewardMultiplier();
+    const comboReward = Math.floor(
+      Math.min(DEPLOYMENT_CONFIG.maxWaveBonus, this.deployment.state.combo * DEPLOYMENT_CONFIG.goldPerCombo)
+      * this.modifiers.comboRewardMultiplier(),
+    );
     this.renderer.drawText(summary, 6, 25, 0xFFD36A, 8);
     if (countdownMs != null) {
       const timerColor = countdownMs <= 2000 ? 0xFF8C68 : 0xFFD36A;
@@ -3598,9 +3675,14 @@ export class Game {
       ctx.fillRect(barX, timerY + 3, barWidth, 3);
       ctx.fillStyle = countdownMs <= 2000 ? '#ff8c68' : '#ffd36a';
       ctx.fillRect(barX, timerY + 3, Math.max(1, Math.floor(barWidth * progress)), 3);
+    } else if (protectedRest) {
+      const preparationY = this.waveIntelExpanded ? 68 : 40;
+      this.renderer.drawText('整备不限时：可修科技或调整布防', 6, preparationY, 0x8FE0B5, 8);
     }
     if (this.waveIntelExpanded) {
-      const boss = plan.elite ? (HEROES[plan.bossId]?.name ?? '名将') : '无名将';
+      const boss = plan.elite
+        ? `${HEROES[plan.bossId]?.name ?? '名将'} · 破城-${bossBreachDamage(this.rulesetId, plan.wave)}`
+        : '无名将';
       this.renderer.drawText(`路线：主路 · ${boss}`, 6, 40, 0xFCFFCD, 8);
       this.renderer.drawText(`当前波额外金币：${comboReward} · 点击收起`, 6, 54, 0xA9D7C5, 8);
     }
@@ -3641,6 +3723,10 @@ export class Game {
 
     if (enemy) {
       this.renderer.drawText(this.enemySystem.getEnemyName(enemy), 2, y, 0xD5317A, 9);
+      if (enemy.elite && this.features.enhanced) {
+        const breach = bossBreachDamage(this.rulesetId, this.enemySystem.currentWave);
+        this.renderer.drawText(`破城-${breach}`, 48, y, 0xB23A48, 8);
+      }
       if (ui12) {
         this.renderer.drawImageRegion(ui12, 0, 0, 9, 10, 120, y, 9, 10);  // 血
         this.renderer.drawImageRegion(ui12, 9, 0, 9, 10, 180, y, 9, 10);  // 防
@@ -3658,6 +3744,14 @@ export class Game {
       : this.mapData.isBuildingBoxBuildable();
     this.renderer.drawText(canBuild ? '可造区域' : '不可造区域', 2, y,
       canBuild ? 0x2F7A5A : 0xB23A48, 9);
+    if (this.towerSystem.isBuildMode) {
+      const type = this.towerSystem.buildType;
+      const detail = this.towerSystem.getBuildCostDetail(type);
+      const notice = detail.explanations.length > 0
+        ? `${detail.finalCost}金 · ${detail.explanations.join('，')}`
+        : `${detail.finalCost}金`;
+      this.renderer.drawText(this.fitTextToWidth(notice, 142, 8), 78, y, 0x8A5D22, 8);
+    }
   }
 
   // ====== 存档面板渲染 (新流程无入口, 保留) ======
@@ -3847,9 +3941,9 @@ export class Game {
 
     this.renderCommonBackground(16, 0);
     this.renderPanelStrip(this.spr('ui', 3), 0, 0xCD3E7E);
-    centerText(`第 ${this.council.state.pendingWave ?? 0} 波 · 军议`, 2, paper, 8);
+    centerText(`第 ${this.council.state.pendingWave ?? 0} 波 · 名将已斩`, 2, paper, 8);
     centerText('军 帐 议 事', 18, blue, 14);
-    centerText('择一策施行，或跳过本次军议', 36, muted, 8);
+    centerText('所示军策均可用 · 议后进入不限时整备', 36, muted, 8);
 
     const offer = this.council.pendingDefinitions;
     offer.forEach((def: CouncilDefinition, index: number) => {

@@ -62,6 +62,7 @@ export class UISystem {
   private bossBannerName: string = '';
   private bossBannerPortrait: number = -1;
   private bossBannerTimer: number = 0;
+  private bossBannerBreachDamage: number | null = null;
 
   // 原版 # 键的触屏入口：只有清场且本波刷完时才显示。
   private waveReady: boolean = false;
@@ -183,9 +184,10 @@ export class UISystem {
     this.heroAwakenTimer = 3000;
   }
 
-  showBossBanner(name: string, portraitId: number): void {
+  showBossBanner(name: string, portraitId: number, breachDamage: number | null = null): void {
     this.bossBannerName = name;
     this.bossBannerPortrait = portraitId;
+    this.bossBannerBreachDamage = breachDamage;
     this.bossBannerTimer = 3000;
   }
 
@@ -556,7 +558,7 @@ export class UISystem {
       const x = 18;
       const y = 54;
       const w = LOGICAL_WIDTH - 36;
-      const h = 42;
+      const h = this.bossBannerBreachDamage == null ? 42 : 54;
       this.renderer.setColor(0x2A1410);
       this.renderer.fillRect(x, y, w, h);
       this.renderer.setColor(0xFFD36A);
@@ -568,13 +570,22 @@ export class UISystem {
       }
       this.renderer.drawText('名将来袭', x + 47, y + 7, 0xFFCC66, 12);
       this.renderer.drawText(this.bossBannerName, x + 47, y + 23, 0xFCFFCD, 11);
+      if (this.bossBannerBreachDamage != null) {
+        this.renderer.drawText(
+          `若突入我城：城防 -${this.bossBannerBreachDamage}`,
+          x + 47,
+          y + 39,
+          0xFF8C68,
+          8,
+        );
+      }
     }
 
     // 消息提示
     if (this.messageTimer > 0) {
       const tw = this.renderer.measureText(this.messageText, 10).width + 10;
       const mx = (LOGICAL_WIDTH - tw) / 2;
-      const my = 100;
+      const my = this.bossBannerTimer > 0 && this.bossBannerBreachDamage != null ? 112 : 100;
       this.renderer.setColor(0x000000);
       this.renderer.fillRect(mx, my, tw, 18);
       this.renderer.setColor(0x333333);

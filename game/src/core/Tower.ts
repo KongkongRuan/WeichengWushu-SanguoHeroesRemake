@@ -45,6 +45,7 @@ import type {
 } from '../enhancement/CombatEvents';
 import type { ModifierResolver } from '../enhancement/ModifierResolver';
 import type { ReactionResult, ReactionSystem } from '../enhancement/ReactionSystem';
+import { duplicateTowerSurcharge, formatPercent } from '../enhancement/BalanceRules';
 
 // 武将ID到武将对象的映射 (避免循环依赖, 在模块加载时构建)
 const HEROES_MAP: Record<number, Hero> = {};
@@ -66,6 +67,7 @@ export interface Tower {
   angle: number;      // 朝向角度
   heroId: number;     // 绑定武将ID (-1=无)
   effectType: number; // 特殊效果类型 (0=无 1=麻痹 2=冰冻 3=中毒 4=火焰 5=减速)
+  buildCostPaid?: number; // 强化规则的同类递增造价必须按实际投入保存，供战报和回收使用。
   // ====== 新增: 建筑血量 (对应原版 b1066 塔HP数据) ======
   hp: number;         // 当前血量
   maxHp: number;      // 最大血量
@@ -90,6 +92,15 @@ export interface Tower {
   gateState: number;     // 断龙闸 entity[10]：0待命 1释放中 2落闸
   gateTimer: number;     // 断龙闸动作计时，对应 entity[13]
   attackSequence?: number;
+}
+
+export interface BuildCostDetail {
+  baseCost: number;
+  councilAdjustedCost: number;
+  existingSameType: number;
+  duplicateSurcharge: number;
+  finalCost: number;
+  explanations: string[];
 }
 
 export class TowerSystem {
@@ -398,7 +409,8 @@ export class TowerSystem {
 
     // 原版建造费 (q1100) 优先, 否则用 towerConfigs。装填半价只影响断龙闸装填，
     // 不能把所有新建建筑的 q1100 都减半。
-    const actualCost = this.getBuildCost(type);
+    const costDetail = this.getBuildCostDetail(type);
+    const actualCost = costDetail.finalCost;
     if (this.gold < actualCost) return false;
 
     const stats = this.originalStats(type, 1);
@@ -416,6 +428,7 @@ export class TowerSystem {
       angle: 0,
       heroId: -1,
       effectType: config.effect,
+      buildCostPaid: actualCost,
       // 新增: 初始化建筑血量 (基于塔类型和费用)
       hp: 100 + config.cost,
       maxHp: 100 + config.cost,
@@ -454,8 +467,31 @@ export class TowerSystem {
 
   /** 原版动作16显示的逐级升级费用；塔升级不等于购买科技建筑。 */
   getBuildCost(type: number): number {
+    return this.getBuildCostDetail(type).finalCost;
+  }
+
+  getBuildCostDetail(type: number): BuildCostDetail {
     const base = this.buildCostProvider?.(type) ?? this.towerConfigs[type]?.cost ?? 0;
-    return this.modifiers?.buildCost(base, type) ?? base;
+    const councilAdjustedCost = this.modifiers?.buildCost(base, type) ?? base;
+    const existingSameType = this.towers.filter(tower => this.spriteType(tower.type) === this.spriteType(type)).length;
+    const duplicateSurcharge = this.features.enhanced ? duplicateTowerSurcharge(existingSameType) : 0;
+    const finalCost = Math.max(1, Math.round(councilAdjustedCost * (1 + duplicateSurcharge)));
+    const explanations: string[] = [];
+    if (councilAdjustedCost !== base && base > 0) {
+      const adjustment = councilAdjustedCost / base - 1;
+      explanations.push(`军议修正 ${adjustment >= 0 ? '+' : '-'}${formatPercent(Math.abs(adjustment))}`);
+    }
+    if (duplicateSurcharge > 0) {
+      explanations.push(`同类第${existingSameType + 1}座 +${formatPercent(duplicateSurcharge)}`);
+    }
+    return {
+      baseCost: base,
+      councilAdjustedCost,
+      existingSameType,
+      duplicateSurcharge,
+      finalCost,
+      explanations,
+    };
   }
 
   /** 原版动作16显示的逐级升级费用；塔升级不等于购买科技建筑。 */
@@ -551,7 +587,10 @@ export class TowerSystem {
   }
 
   private investedGold(tower: Tower): number {
-    let total = this.buildCostProvider?.(tower.type) ?? this.towerConfigs[tower.type]?.cost ?? 0;
+    let total = tower.buildCostPaid
+      ?? this.buildCostProvider?.(tower.type)
+      ?? this.towerConfigs[tower.type]?.cost
+      ?? 0;
     const [base, step] = TOWER_UPGRADE_COST_R1101[this.spriteType(tower.type)] ?? [0, 0];
     for (let level = 1; level < tower.level; level++) total += base + step * Math.max(0, level - 1);
     return total;
@@ -2811,6 +2850,7 @@ export class TowerSystem {
         angle: 0,
         heroId: td.heroId ?? -1,
         effectType: td.effectType ?? config.effect,
+        buildCostPaid: Number.isFinite(td.buildCostPaid) ? Math.max(0, Math.floor(td.buildCostPaid)) : undefined,
         // 新增: 恢复建筑血量
         hp: td.hp ?? maxHp,
         maxHp,
