@@ -28,8 +28,34 @@ function embeddedLevelMaps(): Plugin {
   };
 }
 
+function previewMetadata(): Plugin {
+  const preview = process.env.VITE_DEPLOY_CHANNEL === 'preview-build-input-viewport';
+  return {
+    name: 'preview-metadata',
+    transformIndexHtml() {
+      if (!preview) return [];
+      return [
+        {
+          tag: 'meta',
+          attrs: { name: 'robots', content: 'noindex, nofollow' },
+          injectTo: 'head',
+        },
+        {
+          tag: 'div',
+          attrs: { id: 'preview-channel', role: 'status' },
+          children: '建造、输入与宽屏优化预览版',
+          injectTo: 'body-prepend',
+        },
+      ];
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [embeddedLevelMaps()],
+  plugins: [embeddedLevelMaps(), previewMetadata()],
+  define: {
+    __DEPLOY_CHANNEL__: JSON.stringify(process.env.VITE_DEPLOY_CHANNEL ?? 'production'),
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

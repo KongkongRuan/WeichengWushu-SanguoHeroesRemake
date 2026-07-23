@@ -38,7 +38,6 @@ import {
   TILE_SIZE,
   MAP_TOP_BAR_H,
   MAP_VIEW_H,
-  MAP_VIEW_W,
   DIRECTIONS_K1081,
   UNIT_STATS_I1079,
   WAVE_PROB_J1080,
@@ -1007,20 +1006,22 @@ export class EnemySystem {
   render(): void {
     const camX = this.mapData.cameraX;
     const camY = this.mapData.cameraY;
+    const viewWidth = this.mapData.viewWidth;
+    const mapOriginX = this.mapData.screenMapOriginX;
 
     const vctx = this.renderer.virtualContext;
     vctx.save();
     vctx.beginPath();
-    vctx.rect(0, MAP_TOP_BAR_H, MAP_VIEW_W, MAP_VIEW_H);
+    vctx.rect(0, MAP_TOP_BAR_H, viewWidth, MAP_VIEW_H);
     vctx.clip();
     vctx.imageSmoothingEnabled = false;
 
     for (const enemy of this.enemies) {
       // 屏幕坐标 = 地图坐标 - 相机 + 顶栏偏移
-      const px = enemy.x - camX;
+      const px = enemy.x - camX + mapOriginX;
       const py = enemy.y - camY + MAP_TOP_BAR_H;
 
-      if (px < -24 || px > MAP_VIEW_W + 8 || py < MAP_TOP_BAR_H - 32 || py > MAP_TOP_BAR_H + MAP_VIEW_H + 8) continue;
+      if (px < -24 || px > viewWidth + 8 || py < MAP_TOP_BAR_H - 32 || py > MAP_TOP_BAR_H + MAP_VIEW_H + 8) continue;
 
       switch (enemy.state) {
         case EnemyState.SETTLE:

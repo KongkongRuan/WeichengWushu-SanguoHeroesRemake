@@ -11,6 +11,7 @@ import { TowerSystem } from './Tower';
 import { CastleRenderer } from './Castle';
 import { AudioSystem } from './AudioSystem';
 import { InputSystem } from './Input';
+import type { PointerSequenceEvent } from './Input';
 import { UISystem, Button } from './UI';
 import { SpriteLoader } from './SpriteLoader';
 import { TechTreeSystem } from './TechTree';
@@ -28,6 +29,7 @@ import {
 } from './CheatProgress';
 import type { CheatAction, CheatProfile } from './CheatProgress';
 import { BuildBarSystem, BAR_CAT_BUILD, BAR_CAT_TECH, BAR_CAT_TOWER } from './BuildBar';
+import type { TouchBuildCardHit } from './BuildBar';
 import { MobileControls } from './MobileControls';
 import type { MobileControlAction } from './MobileControls';
 import {
@@ -37,6 +39,13 @@ import {
   originalDemolishRefund,
 } from './Timing';
 import { animationCadenceForState, GameState } from './GameState';
+import { calculateUsableViewportArea } from './Viewport';
+import type { ViewportPreference } from './Viewport';
+import {
+  PLACEMENT_DRAG_THRESHOLD_CSS,
+  PLACEMENT_EDGE_DELAY_MS,
+  placementEdgeVelocity,
+} from './PlacementGesture';
 export { GameState } from './GameState';
 import {
   LOGICAL_WIDTH,
@@ -132,6 +141,20 @@ const SOFTKEY_MENU = 0;
 const TOUCH_BUILD_DRAG_LIFT = 24;
 const TOUCH_MAP_TOP = 20;
 
+type BuildGestureState = 'placement-pending' | 'placement-dragging' | 'card-pending';
+
+interface ActiveBuildGesture {
+  state: BuildGestureState;
+  pointerId: number;
+  lastX: number;
+  lastY: number;
+  canStartPlacementDrag: boolean;
+  cardHit: TouchBuildCardHit | null;
+  edgeKey: string;
+  edgeDwellMs: number;
+  committed: boolean;
+}
+
 // 标题菜单项 (back[25] 帧号): 0王者之路/1自由模式/2继续游戏/3设置/4帮助/5关于/6退出
 const MENU_ITEM_COUNT = 7;
 const MENU_ITEM_CONTINUE = 2;
@@ -152,6 +175,8 @@ export class Game {
   private mobileControls: MobileControls;
   private cheatProfile: CheatProfile = createDefaultCheatProfile();
   private rulesetId: RulesetId = 'classic';
+  private viewportPreference: ViewportPreference = 'wide';
+  private vibrationEnabled = true;
   private features = new FeatureContext('classic');
   private combatEvents = new CombatEvents();
   private seededRng = new SeededRng(1);
@@ -291,6 +316,7 @@ export class Game {
   // 地图拖动状态（逻辑坐标）
   private mapDragLastX: number = -1;
   private mapDragLastY: number = -1;
+  private buildGesture: ActiveBuildGesture | null = null;
 
   // 存档槽位 (0-3) — SAVE_PANEL 保留
   private saveSlot: number = 0;
@@ -419,10 +445,14 @@ export class Game {
         this.towerSystem.setBuildType(origTowerId);
         this.towerSystem.enterBuildMode();
         const bt = this.mapData.getBuildingBoxTile();
-        this.towerSystem.setBuildPosition(bt.tx, bt.ty);
+        const initial = this.clampPlacementTile(bt.tx, bt.ty, origTowerId);
+        this.mapData.setBuildingBox(initial.tx, initial.ty, false);
+        this.towerSystem.setBuildPosition(initial.tx, initial.ty);
         const detail = this.towerSystem.getBuildCostDetail(origTowerId);
         if (detail.explanations.length > 0) {
           this.uiSystem.showMessage(`造价 ${detail.finalCost}金：${detail.explanations.join('，')}`, 120);
+        } else if (this.inputSystem.isTouchOptimized) {
+          this.uiSystem.showMessage('拖动塔影，松手建造', 90);
         }
       },
       upgradeTower: (tower) => {
@@ -739,6 +769,7 @@ export class Game {
       this.buildBar.setTouchOptimized(touchOptimized);
       this.resize();
     });
+    this.inputSystem.onPointerSequence((event) => this.handleBuildPointerSequence(event));
     this.inputSystem.onTap((x, y) => this.handleTap(x, y));
     this.inputSystem.onMove((x, y) => {
       // 文本页 (帮助/关于/设置) 拖动滚动
@@ -747,13 +778,6 @@ export class Game {
           this.textScroll = Math.max(0, this.textScroll - (y - this.dragLastY));
         }
         this.dragLastY = y;
-      }
-
-      // 触屏建造模式优先拖动塔影；桌面端和普通触屏状态继续拖动地图。
-      if (this.moveTouchBuildPreview(x, y)) {
-        this.mapDragLastX = -1;
-        this.mapDragLastY = -1;
-        return;
       }
 
       // 战斗中允许鼠标/单指拖动地图。
@@ -774,11 +798,6 @@ export class Game {
         this.mapDragLastY = -1;
       }
     });
-    this.inputSystem.onDragEnd((x, y) => {
-      if (!this.canDragTouchBuildPreview(x, y)) return;
-      this.moveTouchBuildPreview(x, y);
-      this.tryPlacePendingTower();
-    });
     this.inputSystem.onRelease(() => {
       this.dragLastY = -1;
       this.mapDragLastX = -1;
@@ -791,30 +810,158 @@ export class Game {
     this.mobileControls.onAction((action) => this.handleMobileControl(action));
   }
 
-  private canDragTouchBuildPreview(x: number, y: number): boolean {
-    return this.inputSystem.isTouchOptimized
-      && this.state === GameState.PLAYING
-      && !this.uiSystem.isPaused()
-      && this.towerSystem.isBuildMode
-      && x >= 0
-      && x < LOGICAL_WIDTH
-      && y >= TOUCH_MAP_TOP
-      && y < MAP_TOP_BAR_H + MAP_VIEW_H;
+  private handleBuildPointerSequence(event: PointerSequenceEvent): boolean {
+    if (!this.inputSystem.isTouchOptimized) return false;
+
+    if (event.phase === 'down') {
+      if (this.state !== GameState.PLAYING || this.uiSystem.isPaused()) return false;
+      const cardHit = this.buildBar.hitTestTouchBuildCard(event.x, event.y);
+      if (cardHit) {
+        this.buildGesture = {
+          state: 'card-pending',
+          pointerId: event.pointerId,
+          lastX: event.x,
+          lastY: event.y,
+          canStartPlacementDrag: true,
+          cardHit,
+          edgeKey: '',
+          edgeDwellMs: 0,
+          committed: false,
+        };
+        return true;
+      }
+
+      if (this.towerSystem.isBuildMode) {
+        this.buildGesture = {
+          state: 'placement-pending',
+          pointerId: event.pointerId,
+          lastX: event.x,
+          lastY: event.y,
+          canStartPlacementDrag: this.isPointerOnBuildPreview(event.x, event.y),
+          cardHit: null,
+          edgeKey: '',
+          edgeDwellMs: 0,
+          committed: false,
+        };
+        // 选位期间触屏序列全部由建造状态机消费，不能落入拖图或二次点击建造。
+        return true;
+      }
+      return false;
+    }
+
+    const gesture = this.buildGesture;
+    if (!gesture || gesture.pointerId !== event.pointerId) return false;
+    gesture.lastX = event.x;
+    gesture.lastY = event.y;
+
+    if (event.phase === 'cancel') {
+      this.buildGesture = null;
+      return true;
+    }
+
+    if (event.phase === 'move') {
+      if (gesture.state === 'card-pending'
+        && event.cssDistance >= PLACEMENT_DRAG_THRESHOLD_CSS
+        && event.y < this.buildBar.topY
+        && gesture.cardHit
+        && this.buildBar.beginDirectPlacement(gesture.cardHit)) {
+        gesture.state = 'placement-dragging';
+        gesture.cardHit = null;
+        this.placementFromPointer(event.x, event.y);
+      } else if (gesture.state === 'placement-pending'
+        && gesture.canStartPlacementDrag
+        && event.cssDistance >= PLACEMENT_DRAG_THRESHOLD_CSS) {
+        gesture.state = 'placement-dragging';
+        this.placementFromPointer(event.x, event.y);
+      } else if (gesture.state === 'placement-dragging') {
+        this.placementFromPointer(event.x, event.y);
+      }
+      return true;
+    }
+
+    if (event.phase === 'up') {
+      if (gesture.state === 'card-pending') {
+        // 未达到直拖阈值仍是普通轻点：进入标准塔影预览，不产生建造结算。
+        this.buildBar.handleTap(event.startX, event.startY);
+      } else if (gesture.state === 'placement-dragging' && !gesture.committed) {
+        gesture.committed = true;
+        if (this.placementFromPointer(event.x, event.y)) this.tryPlacePendingTower();
+        else this.uiSystem.showMessage('请在战场内松手建造', 75);
+      } else if (gesture.state === 'placement-pending') {
+        this.uiSystem.showMessage('拖动塔影，松手建造', 75);
+      }
+      this.buildGesture = null;
+      return true;
+    }
+    return true;
   }
 
-  /** 把待建塔的中心抬到手指上方并吸附到地图格。 */
-  private moveTouchBuildPreview(x: number, y: number): boolean {
-    if (!this.canDragTouchBuildPreview(x, y)) return false;
+  private isPointerOnBuildPreview(x: number, y: number): boolean {
+    if (!this.towerSystem.isBuildMode || !this.mapData.isScreenInsideMap(x, y)) return false;
+    const position = this.towerSystem.getBuildPosition();
+    const screen = this.mapData.tileToScreen(position.tx, position.ty);
     const footprint = TOWER_FOOTPRINT_O1098[this.towerSystem.buildType] ?? 1;
+    const size = footprint * TILE_SIZE;
+    const margin = 8;
+    return x >= screen.x - margin
+      && x <= screen.x + size + margin
+      && y >= screen.y - margin
+      && y <= screen.y + size + margin;
+  }
+
+  private clampPlacementTile(tx: number, ty: number, type: number): { tx: number; ty: number } {
+    const footprint = TOWER_FOOTPRINT_O1098[type] ?? 1;
+    return {
+      tx: Math.max(0, Math.min(Math.max(0, this.mapData.width - footprint), tx)),
+      ty: Math.max(0, Math.min(Math.max(0, this.mapData.height - footprint), ty)),
+    };
+  }
+
+  /** 塔卡直拖、塔影拖动和边缘滚屏后的重算统一经过这里。 */
+  private placementFromPointer(x: number, y: number): boolean {
+    if (!this.towerSystem.isBuildMode
+      || x < 0
+      || x >= this.renderer.contentWidth
+      || y < TOUCH_MAP_TOP
+      || y >= MAP_TOP_BAR_H + MAP_VIEW_H
+      || !this.mapData.isScreenInsideMap(x, y)) return false;
+    const type = this.towerSystem.buildType;
+    const footprint = TOWER_FOOTPRINT_O1098[type] ?? 1;
     const halfFootprint = footprint * TILE_SIZE / 2;
-    const tile = this.mapData.screenToTile(
+    const raw = this.mapData.screenToTile(
       x - halfFootprint,
       y - TOUCH_BUILD_DRAG_LIFT - halfFootprint,
     );
+    const tile = this.clampPlacementTile(raw.tx, raw.ty, type);
     this.mapData.setBuildingBox(tile.tx, tile.ty, false);
-    const clamped = this.mapData.getBuildingBoxTile();
-    this.towerSystem.setBuildPosition(clamped.tx, clamped.ty);
+    this.towerSystem.setBuildPosition(tile.tx, tile.ty);
     return true;
+  }
+
+  private updatePlacementEdgeScroll(elapsedMs: number): void {
+    const gesture = this.buildGesture;
+    if (!gesture || gesture.state !== 'placement-dragging' || elapsedMs <= 0) return;
+    const velocity = placementEdgeVelocity(
+      gesture.lastX,
+      gesture.lastY,
+      this.renderer.contentWidth,
+      MAP_TOP_BAR_H,
+      MAP_TOP_BAR_H + MAP_VIEW_H,
+    );
+    const edgeKey = `${Math.sign(velocity.x)},${Math.sign(velocity.y)}`;
+    if (!velocity.active) {
+      gesture.edgeKey = '';
+      gesture.edgeDwellMs = 0;
+      return;
+    }
+    if (edgeKey !== gesture.edgeKey) {
+      gesture.edgeKey = edgeKey;
+      gesture.edgeDwellMs = 0;
+    }
+    gesture.edgeDwellMs += elapsedMs;
+    if (gesture.edgeDwellMs < PLACEMENT_EDGE_DELAY_MS) return;
+    this.mapData.panCameraBy(velocity.x * elapsedMs / 1000, velocity.y * elapsedMs / 1000);
+    this.placementFromPointer(gesture.lastX, gesture.lastY);
   }
 
   private handleMobileControl(action: MobileControlAction): void {
@@ -836,7 +983,7 @@ export class Game {
       case 'confirm':
         if (this.uiSystem.isPaused()) break;
         if (this.buildBar.isOpen) this.buildBar.confirm();
-        else if (this.towerSystem.isBuildMode) this.tryPlacePendingTower();
+        else if (this.towerSystem.isBuildMode) this.uiSystem.showMessage('拖动塔影，松手建造', 75);
         else this.openBarForBoxTile();
         break;
       case 'cancel':
@@ -1023,6 +1170,8 @@ export class Game {
         else if (k === 'ArrowUp') this.settingsAction('toggle');
         else if (k === 'ArrowDown' || k.toLowerCase() === 'g') this.settingsAction('toggle_graphics');
         else if (k.toLowerCase() === 'r') this.settingsAction('toggle_rules');
+        else if (k.toLowerCase() === 'w') this.settingsAction('toggle_viewport');
+        else if (k.toLowerCase() === 'v') this.settingsAction('toggle_vibration');
         else if (k === 'Enter' || k === ' ') this.settingsAction('ok');
         else if (k === 'Escape') this.settingsAction('cancel');
         else handled = false;
@@ -1183,11 +1332,16 @@ export class Game {
         this.towerSystem.exitBuildMode();
         return;
       }
-      if (y >= 305) {
+      if (y >= 305 && !this.inputSystem.isTouchOptimized) {
         // 左软键/中部=在幻影处放塔 (原版开火键 c(bN,bO,bw,aA) 行14680-14683)
         this.tryPlacePendingTower();
         return;
       }
+      if (this.inputSystem.isTouchOptimized) {
+        this.uiSystem.showMessage('拖动塔影，松手建造', 75);
+        return;
+      }
+      if (!this.mapData.isScreenInsideMap(x, y)) return;
       // 地图点击: 点幻影同格=放塔, 点其他格=移动幻影 (触屏适配)
       const tapTile = this.mapData.screenToTile(x, y);
       const cur = this.towerSystem.getBuildPosition();
@@ -1213,6 +1367,7 @@ export class Game {
       return;
     }
     if (y >= 305) return;
+    if (!this.mapData.isScreenInsideMap(x, y)) return;
 
     // 检查地图点击 (使用相机系统转换坐标)
     const tile = this.mapData.screenToTile(x, y);
@@ -1259,16 +1414,19 @@ export class Game {
   private tryPlacePendingTower(): void {
     const cur = this.towerSystem.getBuildPosition();
     const type = this.towerSystem.buildType;
-    // 原版科技建筑门禁 (e1105, M() case 0 行8386-8389; 正常流程在栏内已拦截, 此处双保险)
-    if (!this.buildBar.isTowerUnlocked(type)) {
-      this.uiSystem.showMessage(BAR_MESSAGES[2], 90); // b1015[115] 需要修建相关的城池
-      this.towerSystem.exitBuildMode();
+    const costDetail = this.towerSystem.getBuildCostDetail(type);
+    if (this.towerSystem.getTowers().length >= 30) {
+      this.uiSystem.showMessage('已经达到建筑数量上限', 90);
+      if (this.vibrationEnabled && this.inputSystem.isTouchOptimized) navigator.vibrate?.([24, 36, 24]);
       return;
     }
-    const costDetail = this.towerSystem.getBuildCostDetail(type);
-    if (this.gold < costDetail.finalCost) {
-      const reason = costDetail.explanations.length ? `（${costDetail.explanations.join('，')}）` : '';
-      this.uiSystem.showMessage(`金币不足：需要 ${costDetail.finalCost} 金${reason}`, 120);
+    const failure = this.towerSystem.getPlacementFailure(cur.tx, cur.ty, type);
+    if (failure) {
+      const detail = failure.code === 'insufficient-gold' && costDetail.explanations.length
+        ? `（${costDetail.explanations.join('，')}）`
+        : '';
+      this.uiSystem.showMessage(`${failure.message}${detail}`, 120);
+      if (this.vibrationEnabled && this.inputSystem.isTouchOptimized) navigator.vibrate?.([24, 36, 24]);
       return;
     }
     if (this.towerSystem.placeTower(cur.tx, cur.ty, type)) {
@@ -1277,10 +1435,10 @@ export class Game {
       if (costDetail.explanations.length > 0) {
         this.uiSystem.showMessage(`建造完成：${costDetail.finalCost}金（${costDetail.explanations.join('，')}）`, 105);
       }
-      if (this.inputSystem.isTouchOptimized) navigator.vibrate?.(18);
+      if (this.vibrationEnabled && this.inputSystem.isTouchOptimized) navigator.vibrate?.(18);
     } else {
-      this.uiSystem.showMessage('此处不可建造', 60);
-      if (this.inputSystem.isTouchOptimized) navigator.vibrate?.([24, 36, 24]);
+      this.uiSystem.showMessage('建造状态已变化，请重新拖动确认', 75);
+      if (this.vibrationEnabled && this.inputSystem.isTouchOptimized) navigator.vibrate?.([24, 36, 24]);
     }
   }
 
@@ -1599,8 +1757,11 @@ export class Game {
     settings.volume = this.volume;
     settings.scale = this.displayQuality;
     settings.rulesetId = this.rulesetId;
+    settings.viewportMode = this.viewportPreference;
+    settings.vibrationEnabled = this.vibrationEnabled;
     this.saveSystem.saveSettings(settings);
     this.uiSystem.setAudioSettings(this.soundEnabled, this.volume, this.displayQuality);
+    this.uiSystem.setInteractionPreferences(this.viewportPreference, this.vibrationEnabled);
   }
 
   private changeVolume(delta: number): void {
@@ -1951,19 +2112,42 @@ export class Game {
   private handleSettingsTap(x: number, y: number, softLeft: boolean, softRight: boolean): void {
     if (softLeft) { this.settingsAction('ok'); return; }
     if (softRight) { this.settingsAction('cancel'); return; }
+    if (y < 82 || y >= 262) return;
     // 声音行区域: 点击切换
-    if (y >= 110 && y <= 138) {
+    if (y >= 82 && y < 112) {
       this.settingsAction('toggle');
-    } else if (y >= 142 && y <= 174) {
+    } else if (y < 142) {
       this.settingsAction(x < LOGICAL_WIDTH / 2 ? 'volume_down' : 'volume_up');
-    } else if (y >= 176 && y <= 208) {
+    } else if (y < 172) {
       this.settingsAction('toggle_graphics');
-    } else if (y >= 210 && y <= 238) {
+    } else if (y < 202) {
       this.settingsAction('toggle_rules');
+    } else if (y < 232) {
+      this.settingsAction('toggle_viewport');
+    } else if (y < 262) {
+      this.settingsAction('toggle_vibration');
     }
   }
 
-  private settingsAction(act: 'toggle' | 'toggle_graphics' | 'toggle_rules' | 'volume_down' | 'volume_up' | 'ok' | 'cancel'): void {
+  private toggleViewportPreference(): void {
+    this.viewportPreference = this.viewportPreference === 'wide' ? 'classic' : 'wide';
+    this.resize();
+    // 视口宽度改变后再重建 UI 按钮，否则暂停菜单仍会保留旧宽度下的坐标。
+    this.persistSoundSetting();
+    this.uiSystem.showMessage(
+      this.viewportPreference === 'wide' ? '视野：宽屏' : '视野：经典 240×320',
+      60,
+    );
+  }
+
+  private toggleVibration(): void {
+    this.vibrationEnabled = !this.vibrationEnabled;
+    this.persistSoundSetting();
+    if (this.vibrationEnabled && this.inputSystem.isTouchOptimized) navigator.vibrate?.(12);
+    this.uiSystem.showMessage(this.vibrationEnabled ? '震动：开' : '震动：关', 60);
+  }
+
+  private settingsAction(act: 'toggle' | 'toggle_graphics' | 'toggle_rules' | 'toggle_viewport' | 'toggle_vibration' | 'volume_down' | 'volume_up' | 'ok' | 'cancel'): void {
     switch (act) {
       case 'toggle':
         this.soundEnabled = !this.soundEnabled;
@@ -1972,6 +2156,12 @@ export class Game {
         break;
       case 'toggle_graphics':
         this.toggleGraphicsQuality();
+        break;
+      case 'toggle_viewport':
+        this.toggleViewportPreference();
+        break;
+      case 'toggle_vibration':
+        this.toggleVibration();
         break;
       case 'toggle_rules':
         this.rulesetId = this.rulesetId === 'classic' ? 'enhanced' : 'classic';
@@ -2303,6 +2493,12 @@ export class Game {
       case 'toggle_graphics':
         this.toggleGraphicsQuality();
         break;
+      case 'toggle_viewport':
+        this.toggleViewportPreference();
+        break;
+      case 'toggle_vibration':
+        this.toggleVibration();
+        break;
       case 'cheat_clear_enemies':
         this.useCheat('cheat_clear_enemies');
         break;
@@ -2383,7 +2579,19 @@ export class Game {
    * 调整大小
    */
   resize(): void {
-    this.renderer.resize();
+    // 坐标系变化前终止当前 pointer；后续 stale pointerup 不具备建造资格。
+    this.inputSystem.cancelActivePointer('resize');
+    const visualViewport = window.visualViewport;
+    const width = visualViewport?.width ?? window.innerWidth;
+    const height = visualViewport?.height ?? window.innerHeight;
+    const touchPortrait = this.inputSystem.isTouchOptimized && height >= width;
+    const available = calculateUsableViewportArea(width, height, this.inputSystem.isTouchOptimized);
+    this.renderer.configureViewport(
+      this.viewportPreference === 'wide' && !touchPortrait,
+      available.width,
+      available.height,
+    );
+    this.mapData.setViewportWidth(this.renderer.contentWidth);
     this.updateMapOffset();
   }
 
@@ -2400,7 +2608,12 @@ export class Game {
 
   /** 后台标签页不推进战斗、动画或连战准备计时；恢复时从当前时刻重新计时。 */
   private handleVisibilityChange = (): void => {
-    this.frameClock.setVisible(document.visibilityState !== 'hidden', performance.now());
+    const visible = document.visibilityState !== 'hidden';
+    if (!visible) {
+      this.inputSystem.cancelActivePointer('visibility-hidden');
+      if (this.state === GameState.PLAYING) this.uiSystem.setPaused(true);
+    }
+    this.frameClock.setVisible(visible, performance.now());
   };
 
   /**
@@ -2517,6 +2730,7 @@ export class Game {
 
     // 镜头、底栏和提示层使用真实时间插值，确保高刷屏手感平滑且速度一致。
     if (this.state === GameState.PLAYING || this.state === GameState.LEVEL_INTRO) {
+      if (!this.uiSystem.isPaused()) this.updatePlacementEdgeScroll(elapsedMs);
       this.mapData.updateCamera(elapsedMs);
       this.buildBar.update(elapsedMs);
     }
@@ -2777,6 +2991,11 @@ export class Game {
    * 渲染
    */
   private render(): void {
+    const battleLayout = this.state === GameState.PLAYING
+      || this.state === GameState.PAUSED
+      || this.state === GameState.TECH_TREE_BROWSE;
+    this.renderer.setContentLayout(battleLayout ? 'battle' : 'legacy');
+    this.mapData.setViewportWidth(this.renderer.contentWidth);
     this.renderer.clear(COLORS.BACKGROUND);
 
     switch (this.state) {
@@ -2911,8 +3130,9 @@ export class Game {
       waveReady: this.enemySystem.canStartNextWave,
       comboCountdownSeconds: countdownMs == null ? null : Math.ceil(countdownMs / 100) / 10,
       battleIntel: mobileIntel,
+      vibrationEnabled: this.vibrationEnabled,
       context: this.buildBar.isOpen
-        ? 'bar'
+        ? this.buildBar.category === BAR_CAT_BUILD ? 'build-bar' : 'bar'
         : this.towerSystem.isBuildMode ? 'placement' : 'normal',
     });
   }
@@ -3392,24 +3612,29 @@ export class Game {
     this.renderCommonBackground(COUNTRY_PANEL_H, 13);
     this.renderPanelStrip(this.spr('ui', 3), 0, 0xCD3E7E);
     r.drawText('设置', 108, 32, 0x53678A, 14);
-    // 面板
     r.setColor(0xFCFFCD);
-    r.fillRect(20, 82, 200, 166);
+    r.fillRect(20, 64, 200, 208);
     r.setColor(0x53678A);
-    r.drawRect(20, 82, 200, 166);
-    // 声音开关 (b1015[101] 声音 / [102]开 / [103]关)
-    r.drawText('声音', 48, 112, 0x53678A, 12);
-    r.drawText(this.soundEnabled ? '开' : '关', 156, 112, this.soundEnabled ? 0xD5317A : 0x506E91, 12);
-    r.drawText('音量', 48, 148, 0x53678A, 12);
-    r.drawText(`${Math.round(this.volume * 100)}%`, 148, 148, 0xD5317A, 12);
-    this.renderArrows(126, 194, 150);
-    r.drawText('画面', 48, 184, 0x53678A, 12);
-    r.drawText(this.displayQuality === 2 ? '高清重制' : '原版像素', 126, 184, 0xD5317A, 11);
-    this.renderArrows(116, 204, 186);
-    r.drawText('规则', 48, 216, 0x53678A, 12);
-    r.drawText(rulesetLabel(this.rulesetId), 156, 216, this.features.enhanced ? 0xD5317A : 0x506E91, 12);
-    this.renderArrows(136, 186, 218);
-    r.drawText('点击箭头/整行切换 · 键盘 R 切规则', 34, 252, 0x506E91, 8);
+    r.drawRect(20, 64, 200, 208);
+    const rows: Array<[string, string, number]> = [
+      ['声音', this.soundEnabled ? '开' : '关', this.soundEnabled ? 0xD5317A : 0x506E91],
+      ['音量', `${Math.round(this.volume * 100)}%`, 0xD5317A],
+      ['画面', this.displayQuality === 2 ? '高清重制' : '原版像素', 0xD5317A],
+      ['规则', rulesetLabel(this.rulesetId), this.features.enhanced ? 0xD5317A : 0x506E91],
+      ['视野', this.viewportPreference === 'wide' ? '宽屏视野' : '经典视野', 0xD5317A],
+      ['震动', this.vibrationEnabled ? '开' : '关', this.vibrationEnabled ? 0xD5317A : 0x506E91],
+    ];
+    rows.forEach(([label, value, color], index) => {
+      const y = 84 + index * 30;
+      if (index > 0) {
+        r.setColor(0xEBD5AD);
+        r.fillRect(32, y - 8, 176, 1);
+      }
+      r.drawText(label, 44, y, 0x53678A, 11);
+      const valueW = r.measureText(value, 10).width;
+      r.drawText(value, 196 - valueW, y, color, 10);
+    });
+    r.drawText('←→音量 · G画面 · R规则 · W视野 · V震动', 27, 279, 0x506E91, 8);
     // 软键: 确定(左)+返回(右)
     this.uiSystem.renderSoftkeyBar(SOFTKEY_OK, SOFTKEY_BACK);
   }
@@ -3548,22 +3773,30 @@ export class Game {
    */
   private renderTopBar(): void {
     const vctx = this.renderer.virtualContext;
+    const width = this.renderer.contentWidth;
     vctx.fillStyle = '#0B1C19';
-    vctx.fillRect(0, 0, LOGICAL_WIDTH, MAP_TOP_BAR_H);
+    vctx.fillRect(0, 0, width, MAP_TOP_BAR_H);
     vctx.strokeStyle = '#3a5a3a';
     vctx.beginPath();
     vctx.moveTo(0, MAP_TOP_BAR_H);
-    vctx.lineTo(LOGICAL_WIDTH, MAP_TOP_BAR_H);
+    vctx.lineTo(width, MAP_TOP_BAR_H);
     vctx.stroke();
 
     // 金币
     this.renderer.drawText(`金:${this.gold}`, 4, 3, 0xFFD700, 10);
     // 生命
-    this.renderer.drawText(`命:${this.lives}`, 80, 3, 0xFF4444, 10);
+    this.renderer.drawText(`命:${this.lives}`, width >= 320 ? 72 : 56, 3, 0xFF4444, 10);
     // 关卡
-    this.renderer.drawText(`关:${this.currentLevel + 1}`, 140, 3, 0xFCFFCD, 10);
+    const levelX = width >= 320 ? width - 170 : 104;
+    this.renderer.drawText(`关:${this.currentLevel + 1}`, levelX, 3, 0xFCFFCD, 10);
     // 击杀
-    this.renderer.drawText(`杀:${this.totalKills}`, 190, 3, 0xAAAAFF, 10);
+    const killsX = width >= 320 ? width - 120 : 136;
+    this.renderer.drawText(`杀:${this.totalKills}`, killsX, 3, 0xAAAAFF, 10);
+    if (width >= 448) {
+      const wave = `波:${this.enemySystem.currentWave}/${this.enemySystem.totalWaves}`;
+      const waveW = this.renderer.measureText(wave, 10).width;
+      this.renderer.drawText(wave, (width - waveW) / 2, 3, 0x8FE0B5, 10);
+    }
   }
 
   /**
@@ -3583,8 +3816,8 @@ export class Game {
     }
 
     // 渲染塔 (应用相机偏移)
-    this.towerSystem.render(-this.mapData.cameraX, -this.mapData.cameraY + MAP_TOP_BAR_H);
-    this.towerSystem.renderEnhancementEffects(-this.mapData.cameraX, -this.mapData.cameraY + MAP_TOP_BAR_H);
+    this.towerSystem.render(this.mapData.worldScreenOffsetX, -this.mapData.cameraY + MAP_TOP_BAR_H);
+    this.towerSystem.renderEnhancementEffects(this.mapData.worldScreenOffsetX, -this.mapData.cameraY + MAP_TOP_BAR_H);
 
     // 渲染敌人 (EnemySystem 内部应用相机偏移)
     this.enemySystem.render();
@@ -3597,7 +3830,7 @@ export class Game {
       if (!this.towerSystem.renderBuildingCursor(
         box.tx,
         box.ty,
-        -this.mapData.cameraX,
+        this.mapData.worldScreenOffsetX,
         -this.mapData.cameraY + MAP_TOP_BAR_H,
         selected,
       )) {
@@ -4146,10 +4379,14 @@ export class Game {
     this.volume = settings.volume;
     this.displayQuality = settings.scale === 1 ? 1 : 2;
     this.rulesetId = normalizeRuleset(settings.rulesetId);
+    this.viewportPreference = settings.viewportMode;
+    this.vibrationEnabled = settings.vibrationEnabled;
     this.initializeEnhancementRuntime();
     this.renderer.setDisplayMode(this.displayQuality === 2 ? 'hd' : 'original');
+    this.resize();
     this.audioSystem.setVolume(this.volume);
     this.uiSystem.setAudioSettings(this.soundEnabled, this.volume, this.displayQuality);
+    this.uiSystem.setInteractionPreferences(this.viewportPreference, this.vibrationEnabled);
 
     // 不再播放原版厂商 LOGO 动画，直接加载地图图集。
     this.startLoadingScreen();

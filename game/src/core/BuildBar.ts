@@ -22,7 +22,6 @@ import { SpriteLoader } from './SpriteLoader';
 import type { BuildCostDetail, Tower } from './Tower';
 import { HEROES, HERO_EFFECT_DESCRIPTIONS } from '../data/heroes';
 import {
-  LOGICAL_WIDTH,
   BUILD_BAR_TOWER_ITEMS,
   BUILD_BAR_TECH_ITEMS,
   TOWER_COST_Q1100,
@@ -103,6 +102,11 @@ export interface BuildBarHost {
   onTechBuilt(techIndex: number): void;
 }
 
+export interface TouchBuildCardHit {
+  index: number;
+  type: number;
+}
+
 export class BuildBarSystem {
   private renderer: Renderer;
   private spriteLoader: SpriteLoader | null = null;
@@ -136,6 +140,10 @@ export class BuildBarSystem {
 
   constructor(renderer: Renderer) {
     this.renderer = renderer;
+  }
+
+  private get contentWidth(): number {
+    return this.renderer.contentWidth || 240;
   }
 
   setSpriteLoader(loader: SpriteLoader): void {
@@ -191,6 +199,52 @@ export class BuildBarSystem {
   /** 原版塔类型的建造费 (q1100) */
   towerCost(origType: number): number {
     return TOWER_COST_Q1100[origType] ?? 0;
+  }
+
+  /** 返回触屏建造卡片；翻页热区、取消项、锁定项都不伪装成可拖卡片。 */
+  hitTestTouchBuildCard(x: number, y: number): TouchBuildCardHit | null {
+    if (!this.touchOptimized || this.aw === 0 || this.aC !== BAR_CAT_BUILD) return null;
+    const stripY = BAR_BOTTOM - this.au - this.av + 8;
+    const iconHitHeight = TOUCH_AU_MAX;
+    if (y < stripY - 4 || y > stripY + iconHitHeight + 2) return null;
+    for (let i = 0; i < this.aF; i++) {
+      const ix = this.aG + i * TOUCH_ITEM_SPACING;
+      if (x < ix || x > ix + TOUCH_ITEM_SPACING) continue;
+      const index = this.aE + i;
+      if (index > this.aB) return null;
+      const type = this.items()[index];
+      if (type === ACTION_CANCEL || !this.isTowerUnlocked(type)) return null;
+      return { index, type };
+    }
+    return null;
+  }
+
+  /**
+   * 同一个 pointer 从塔卡越过阈值后立即接管预览，不等待底栏收起动画。
+   * 金币不足仍允许查看红色预览，最终松手由统一放置校验拦截。
+   */
+  beginDirectPlacement(hit: TouchBuildCardHit): boolean {
+    if (!this.host || this.aw === 0 || this.aC !== BAR_CAT_BUILD) return false;
+    if (this.host.getTowerCount() >= 30) {
+      this.o = 7;
+      return false;
+    }
+    if (!this.isTowerUnlocked(hit.type)) {
+      this.o = 2;
+      return false;
+    }
+    this.aD = hit.index;
+    this.bw = hit.type;
+    this.aw = 0;
+    this.au = 0;
+    this.av = 0;
+    this.ay = null;
+    this.touchArmedIndex = null;
+    this.demolishArmedIndex = null;
+    this.actionNotice = null;
+    this.host.deselectTower();
+    this.host.enterPlacement(hit.type);
+    return true;
   }
 
   // ============================================================
@@ -269,7 +323,7 @@ export class BuildBarSystem {
     this.aB = items.length - 1;
     this.aF = Math.min(this.touchOptimized ? TOUCH_VISIBLE_ITEMS : 8, items.length);
     const spacing = this.touchOptimized ? TOUCH_ITEM_SPACING : 18;
-    this.aG = (LOGICAL_WIDTH - this.aF * spacing) >> 1;
+    this.aG = (this.contentWidth - this.aF * spacing) >> 1;
     const maxStart = Math.max(0, items.length - this.aF);
     this.aE = Math.max(0, Math.min(this.aE, maxStart));
     if (this.aD < this.aE || this.aD >= this.aE + this.aF) this.aD = this.aE;
@@ -391,7 +445,7 @@ export class BuildBarSystem {
         const buildCost = this.host.getBuildCostDetail?.(item).finalCost
           ?? this.host.getBuildCost?.(item)
           ?? TOWER_COST_Q1100[item];
-        if (this.host.getGold() < buildCost) {
+        if (this.host.getGold() < buildCost && !this.touchOptimized) {
           this.o = 0; // 金不足
           return;
         }
@@ -557,25 +611,27 @@ export class BuildBarSystem {
     const r = this.renderer;
     const ui = (i: number) => this.spriteLoader?.getUISprite(i) ?? null;
     const vctx = r.virtualContext;
+    const width = r.contentWidth;
+    const legacyX = Math.floor((width - 240) / 2);
 
     const barTopY = BAR_BOTTOM - this.au - this.av; // 栏顶 (含图标条)
     // ---- 栏底米色底 (J() 行7866-7877: fillRect(0,289-au-av,240,au+21+av) 色16580557)
     // 原版 aw=0 时同样绘制 (底条常驻: au=av=0 → 289..310 米色条)
     r.setColor(COLOR_BAR_BG);
-    r.fillRect(0, barTopY, LOGICAL_WIDTH, this.au + 21 + this.av);
+    r.fillRect(0, barTopY, width, this.au + 21 + this.av);
 
     // ---- 顶边装饰: ui_6 居中 + ui_7 左端 (J() 行7878-7886, aw=0 也画)
     const ui6 = ui(6);
-    if (ui6) r.drawImage(ui6, 120 - ui6.width, barTopY + 1);
+    if (ui6) r.drawImage(ui6, width / 2 - ui6.width, barTopY + 1);
     const ui7 = ui(7);
-    if (ui7) r.drawImage(ui7, 0, barTopY + 1);
+    if (ui7) r.drawImage(ui7, legacyX, barTopY + 1);
 
     // ---- 名称条底板 (aw=0 时也画: J() 行7887-7908 在 aw 判断之外)
     const var8 = BAR_BOTTOM - this.av + 8; // 名称条行Y (J(): var8=289-av+ui_6高+1)
     const ui5 = ui(5);
-    if (ui5) r.drawImage(ui5, 0, var8);
+    if (ui5) r.drawImage(ui5, legacyX, var8);
     r.setColor(COLOR_PLATE);
-    r.fillRect(86, var8 + 2, LOGICAL_WIDTH - 172, 9);
+    r.fillRect(legacyX + 86, var8 + 2, 68, 9);
 
     if (this.aw === 0 || (this.au === 0 && this.av === 0)) return;
 
@@ -584,15 +640,15 @@ export class BuildBarSystem {
       const stripY = barTopY + 1 + 7; // var5+var166 (var166=ui_6高7)
       vctx.save();
       vctx.beginPath();
-      vctx.rect(0, stripY, LOGICAL_WIDTH, this.au);
+      vctx.rect(0, stripY, width, this.au);
       vctx.clip();
       r.setColor(COLOR_STRIP_BG);
-      r.fillRect(0, stripY, LOGICAL_WIDTH, this.touchOptimized ? TOUCH_AU_MAX : AU_MAX);
+      r.fillRect(0, stripY, width, this.touchOptimized ? TOUCH_AU_MAX : AU_MAX);
       const ui10 = ui(10);
       if (ui10) {
         // 原版 a(Image,int,int,int,boolean) 行11470: 左端 + 右端镜像
         r.drawImage(ui10, 0, stripY);
-        r.drawImageFlipped(ui10, LOGICAL_WIDTH - ui10.width, stripY, true);
+        r.drawImageFlipped(ui10, width - ui10.width, stripY, true);
       }
       this.renderIconRow(stripY);
       vctx.restore();
@@ -602,10 +658,13 @@ export class BuildBarSystem {
     if (this.av > 0) {
       // 左右面板 (J() 行7910-7922: c(57,y,183,av,0) 右面板 + c(0,y,57,av-3,1) 左面板)
       const panelY = var8 + 13;
+      vctx.save();
+      vctx.translate(legacyX, 0);
       this.renderPanel(57, panelY, 183, this.av);
       this.renderPanel(0, panelY, 57, Math.max(0, this.av - 3));
       // 选中项明细
       this.renderDetail(var8, panelY);
+      vctx.restore();
     }
   }
 
@@ -623,7 +682,7 @@ export class BuildBarSystem {
       const canPrev = this.aE > 0;
       const canNext = this.aE + this.aF <= this.aB;
       r.drawText('‹', 4, stripY + 4, canPrev ? COLOR_TEXT : 0x999999, 22);
-      r.drawText('›', LOGICAL_WIDTH - 14, stripY + 4, canNext ? COLOR_TEXT : 0x999999, 22);
+      r.drawText('›', this.contentWidth - 14, stripY + 4, canNext ? COLOR_TEXT : 0x999999, 22);
     }
 
     for (let i = 0; i < this.aF; i++) {

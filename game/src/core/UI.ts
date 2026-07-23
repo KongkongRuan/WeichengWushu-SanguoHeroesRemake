@@ -10,6 +10,7 @@ import type { TechTreeSystem, BranchState } from './TechTree';
 import type { SpriteLoader } from './SpriteLoader';
 import type { RulesetId } from '../enhancement/Ruleset';
 import { rulesetLabel } from '../enhancement/Ruleset';
+import type { ViewportPreference } from './Viewport';
 
 export interface Button {
   x: number;
@@ -80,6 +81,8 @@ export class UISystem {
   private audioEnabled: boolean = true;
   private audioVolume: number = 0.5;
   private graphicsQuality: 1 | 2 = 2;
+  private viewportPreference: ViewportPreference = 'wide';
+  private vibrationEnabled: boolean = true;
   private cheatCommandPoints: number = 0;
   private cheatCommandMax: number = 5;
   private cheatRescuePoints: number = 0;
@@ -123,6 +126,11 @@ export class UISystem {
     this.spriteLoader = loader;
   }
 
+  /** 测试桩和经典布局未提供动态宽度时回退到原版 240。 */
+  private get contentWidth(): number {
+    return this.renderer.contentWidth || LOGICAL_WIDTH;
+  }
+
   setTouchOptimized(enabled: boolean): void {
     if (this.touchOptimized === enabled) return;
     this.touchOptimized = enabled;
@@ -139,13 +147,13 @@ export class UISystem {
     const r = this.renderer;
     // 底部灰条 + 底色
     r.setColor(0x6199D2);
-    r.fillRect(0, 309, LOGICAL_WIDTH, 2);
-    r.fillRect(0, 311, LOGICAL_WIDTH, 9);
+    r.fillRect(0, 309, this.contentWidth, 2);
+    r.fillRect(0, 311, this.contentWidth, 9);
     // ui[4] 底图 (左18px处 + 右侧镜像)
     const ui4 = this.spriteLoader?.getUISprite(4);
     if (ui4) {
       r.drawImage(ui4, 18, 311);
-      r.drawImageFlipped(ui4, LOGICAL_WIDTH - 70 - 18, 311, true);
+      r.drawImageFlipped(ui4, this.contentWidth - 70 - 18, 311, true);
     }
     // ui[2] 软键文字帧
     const ui2 = this.spriteLoader?.getUISprite(2);
@@ -267,6 +275,12 @@ export class UISystem {
     if (this.pausePage === 'settings') this.updateButtons();
   }
 
+  setInteractionPreferences(viewportPreference: ViewportPreference, vibrationEnabled: boolean): void {
+    this.viewportPreference = viewportPreference;
+    this.vibrationEnabled = vibrationEnabled;
+    if (this.pausePage === 'settings') this.updateButtons();
+  }
+
   setCheatStatus(status: {
     commandPoints: number;
     maxCommandPoints: number;
@@ -353,7 +367,7 @@ export class UISystem {
     if (this.techPanelVisible) {
       // 科技树面板 - 显示关闭按钮 + 翻页按钮
       const panelW = 200;
-      const panelX = (LOGICAL_WIDTH - panelW) / 2;
+      const panelX = (this.contentWidth - panelW) / 2;
       const panelY = 30;
 
       // 关闭按钮 (右上角)
@@ -389,7 +403,7 @@ export class UISystem {
       const ctrlW = 22;
       const ctrlGap = 1;
       // 从右到左: 菜单 > 暂停 > 速度
-      let ctrlX = LOGICAL_WIDTH - ctrlW - 2;
+      let ctrlX = this.contentWidth - ctrlW - 2;
 
       // 菜单按钮
       this.buttons.push({
@@ -420,7 +434,7 @@ export class UISystem {
     // 浮在战场右上角的大触控按钮，恢复原版手动出兵节奏。
     if (!this.touchOptimized && this.waveReady && !this.paused) {
       this.buttons.push({
-        x: LOGICAL_WIDTH - 66, y: 23, w: 62, h: 24,
+        x: this.contentWidth - 66, y: 23, w: 62, h: 24,
         label: this.comboCountdownSeconds == null ? '出兵 ▶' : `${this.comboCountdownSeconds.toFixed(1)}s 出兵`,
         icon: '▶', color: 0x2F7A5A,
         action: 'start_wave', visible: true, enabled: true,
@@ -433,7 +447,7 @@ export class UISystem {
       if (this.pausePage === 'cheat_rules') {
         const menuW = 196;
         const menuH = 230;
-        const menuX = (LOGICAL_WIDTH - menuW) / 2;
+        const menuX = (this.contentWidth - menuW) / 2;
         const menuY = (LOGICAL_HEIGHT - menuH) / 2;
         this.buttons.push({
           x: menuX + 8, y: menuY + menuH - 30, w: menuW - 16, h: 22,
@@ -468,8 +482,10 @@ export class UISystem {
             [`声音：${this.audioEnabled ? '开' : '关'}`, 'toggle_sound'],
             [`音量：${Math.round(this.audioVolume * 100)}%`, 'volume_up'],
             ['降低音量', 'volume_down'],
-            [`画面：${this.graphicsQuality === 2 ? '高清重制' : '原版像素'}`, 'toggle_graphics'],
-            [`规则：${rulesetLabel(this.rulesetId)}（标题设置）`, 'noop', false],
+             [`画面：${this.graphicsQuality === 2 ? '高清重制' : '原版像素'}`, 'toggle_graphics'],
+            [`视野：${this.viewportPreference === 'wide' ? '宽屏' : '经典'}`, 'toggle_viewport'],
+            [`震动：${this.vibrationEnabled ? '开' : '关'}`, 'toggle_vibration'],
+             [`规则：${rulesetLabel(this.rulesetId)}（标题设置）`, 'noop', false],
             ['返回上级', 'cheat_back'],
           ] : (this.pausePage === 'council'
             ? [...(this.councilNames.length > 0
@@ -478,7 +494,7 @@ export class UISystem {
               ['返回上级', 'cheat_back']]
             : [['返回上级', 'cheat_back']])));
       const menuH = labels.length * itemH + 20;
-      const menuX = (LOGICAL_WIDTH - menuW) / 2;
+      const menuX = (this.contentWidth - menuW) / 2;
       const menuY = (LOGICAL_HEIGHT - menuH) / 2;
       labels.forEach(([label, action, enabled = true], index) => {
         this.buttons.push({
@@ -523,7 +539,7 @@ export class UISystem {
     if (!this.touchOptimized) {
       // 桌面端保留画布内紧凑信息栏；触屏端使用画布外的大号状态区。
       this.renderer.setColor(0x000000);
-      this.renderer.fillRect(0, 0, LOGICAL_WIDTH, 20);
+      this.renderer.fillRect(0, 0, this.contentWidth, 20);
       this.renderer.drawText(`金:${gold}`, 2, 4, 0xFFD700, 10);
       this.renderer.drawText(`防:${lives}`, 50, 4, 0xFF4444, 10);
       this.renderer.drawText(`关:${level + 1}`, 92, 4, 0xFCFFCD, 10);
@@ -557,7 +573,7 @@ export class UISystem {
     if (this.bossBannerTimer > 0) {
       const x = 18;
       const y = 54;
-      const w = LOGICAL_WIDTH - 36;
+      const w = this.contentWidth - 36;
       const h = this.bossBannerBreachDamage == null ? 42 : 54;
       this.renderer.setColor(0x2A1410);
       this.renderer.fillRect(x, y, w, h);
@@ -584,7 +600,7 @@ export class UISystem {
     // 消息提示
     if (this.messageTimer > 0) {
       const tw = this.renderer.measureText(this.messageText, 10).width + 10;
-      const mx = (LOGICAL_WIDTH - tw) / 2;
+      const mx = (this.contentWidth - tw) / 2;
       const my = this.bossBannerTimer > 0 && this.bossBannerBreachDamage != null ? 112 : 100;
       this.renderer.setColor(0x000000);
       this.renderer.fillRect(mx, my, tw, 18);
@@ -597,10 +613,10 @@ export class UISystem {
     if (this.heroAwakenTimer > 0) {
       const y = 60;
       this.renderer.setColor(0x000000);
-      this.renderer.fillRect(0, y, LOGICAL_WIDTH, 30);
+      this.renderer.fillRect(0, y, this.contentWidth, 30);
       this.renderer.setColor(0xFFD700);
       const tw = this.renderer.measureText(this.heroAwakenText, 14).width;
-      this.renderer.drawText(this.heroAwakenText, (LOGICAL_WIDTH - tw) / 2, y + 8, 0xFFD700, 14);
+      this.renderer.drawText(this.heroAwakenText, (this.contentWidth - tw) / 2, y + 8, 0xFFD700, 14);
     }
 
   }
@@ -635,7 +651,7 @@ export class UISystem {
 
     const panelW = 200;
     const panelH = 260;
-    const panelX = (LOGICAL_WIDTH - panelW) / 2;
+    const panelX = (this.contentWidth - panelW) / 2;
     const panelY = 30;
 
     // 面板背景
@@ -744,18 +760,18 @@ export class UISystem {
     // 半透明遮罩
     this.renderer.setColor(0x000000);
     this.renderer.virtualContext.globalAlpha = 0.72;
-    this.renderer.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    this.renderer.fillRect(0, 0, this.contentWidth, LOGICAL_HEIGHT);
     this.renderer.virtualContext.globalAlpha = 1;
 
     const rulesPage = this.pausePage === 'cheat_rules';
     const menuW = rulesPage ? 196 : 164;
     const itemH = 24;
     const count = this.pausePage === 'cheats' ? 7
-      : this.pausePage === 'settings' ? 6
+      : this.pausePage === 'settings' ? 8
       : this.pausePage === 'council' ? Math.max(2, this.councilNames.length + 1)
       : (this.pausePage === 'help' || this.pausePage === 'about' ? 1 : 7);
     const menuH = rulesPage ? 230 : count * itemH + 20;
-    const menuX = (LOGICAL_WIDTH - menuW) / 2;
+    const menuX = (this.contentWidth - menuW) / 2;
     const menuY = (LOGICAL_HEIGHT - menuH) / 2;
 
     this.renderer.setColor(0x1a1a2a);
@@ -773,7 +789,7 @@ export class UISystem {
       : this.pausePage === 'council' ? `军议 · ${rulesetLabel(this.rulesetId)}`
       : this.pausePage === 'settings' ? '设置'
       : this.pausePage === 'help' ? '游戏帮助' : '关于';
-    this.renderer.drawText(title, (LOGICAL_WIDTH - title.length * 6) / 2, menuY - 14, 0xFFD700, 12);
+    this.renderer.drawText(title, (this.contentWidth - title.length * 6) / 2, menuY - 14, 0xFFD700, 12);
     if (rulesPage) {
       this.renderer.setColor(0x11111D);
       this.renderer.fillRect(menuX + 6, menuY + 8, menuW - 12, menuH - 44);

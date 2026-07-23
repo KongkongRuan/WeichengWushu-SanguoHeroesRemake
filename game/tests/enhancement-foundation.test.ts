@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { SeededRng } from '../src/enhancement/SeededRng';
 import { FeatureContext, normalizeRuleset } from '../src/enhancement/Ruleset';
 import { DeploymentTracker } from '../src/enhancement/WaveIntel';
-import { CURRENT_SAVE_VERSION, migrateSaveData } from '../src/core/SaveSystem';
+import { createStorageKeys, CURRENT_SAVE_VERSION, migrateSaveData } from '../src/core/SaveSystem';
 import { EnemySystem } from '../src/core/Enemy';
 import { CombatEvents } from '../src/enhancement/CombatEvents';
 
@@ -54,6 +54,24 @@ test('v1 存档迁移到 v2 时保留原金币、城防、塔和战役进度', (
 
 test('未来存档版本会被安全拒绝', () => {
   assert.equal(migrateSaveData({ version: CURRENT_SAVE_VERSION + 1 }), null);
+});
+
+test('正式版保留旧存储键且输入视口预览使用完全隔离的键', () => {
+  const production = createStorageKeys('production');
+  const preview = createStorageKeys('preview-build-input-viewport');
+  assert.deepEqual(production, {
+    save: 'weicheng_save_v1',
+    settings: 'weicheng_settings_v1',
+    cheatProfile: 'weicheng_cheat_profile_v1',
+    enhancementProfile: 'weicheng_enhancement_profile_v1',
+  });
+  assert.deepEqual(preview, {
+    save: 'weicheng_preview_build_input_viewport_save_v1',
+    settings: 'weicheng_preview_build_input_viewport_settings_v1',
+    cheatProfile: 'weicheng_preview_build_input_viewport_cheat_profile_v1',
+    enhancementProfile: 'weicheng_preview_build_input_viewport_enhancement_profile_v1',
+  });
+  assert.equal(Object.values(production).some((key) => Object.values(preview).includes(key)), false);
 });
 
 test('连战阈值、上限、延迟降级和单波只发一次奖励', () => {

@@ -101,6 +101,8 @@ export class MapData {
   private camY: number = 0;     // 当前相机Y (像素)
   private targetCamX: number = 0; // 目标相机X (跟随建筑方框)
   private targetCamY: number = 0; // 目标相机Y
+  private viewportWidth: number = MAP_VIEW_W;
+  private mapOriginX: number = 0;
 
   // 建筑方框位置 (对应原版 bN/bO, 像素坐标)
   private boxX: number = 0;
@@ -190,6 +192,7 @@ export class MapData {
     this.boxY = this.getBuildingBoxInit(mapLevel, 1);
 
     // 初始化相机 (对应原版 y1155=true 时的全量重绘)
+    this.refreshMapOrigin();
     this.updateCameraTarget();
     this.camX = this.targetCamX;
     this.camY = this.targetCamY;
@@ -453,6 +456,31 @@ export class MapData {
   // ============================================================
 
   /**
+   * 更新战场视口宽度并尽量保持当前世界中心。地图窄于视口时不制造虚假
+   * 瓦片，而是把真实地图水平居中并锁定 X 相机。
+   */
+  setViewportWidth(width: number): void {
+    const nextWidth = Math.max(MAP_VIEW_W, Math.floor(width));
+    if (nextWidth === this.viewportWidth) return;
+    const oldWorldCenter = this.camX + this.viewportWidth / 2;
+    this.viewportWidth = nextWidth;
+    const mapWidth = this.mapWidthPx;
+    const maxX = Math.max(0, mapWidth - this.viewportWidth);
+    this.mapOriginX = mapWidth > 0 && mapWidth < this.viewportWidth
+      ? Math.floor((this.viewportWidth - mapWidth) / 2)
+      : 0;
+    this.camX = Math.max(0, Math.min(maxX, oldWorldCenter - this.viewportWidth / 2));
+    this.targetCamX = this.camX;
+  }
+
+  private refreshMapOrigin(): void {
+    const mapWidth = this.mapWidthPx;
+    this.mapOriginX = mapWidth > 0 && mapWidth < this.viewportWidth
+      ? Math.floor((this.viewportWidth - mapWidth) / 2)
+      : 0;
+  }
+
+  /**
    * 更新相机目标位置 (对应原版 an() 方法)
    * 建筑方框在地图中移动, 当方框接近屏幕边缘时相机跟随
    */
@@ -461,7 +489,7 @@ export class MapData {
 
     const mapWPx = this.mapData.width * TILE_SIZE;
     const mapHPx = this.mapData.height * TILE_SIZE;
-    const thresholdX = 112; // 原版: n5 = 112
+    const thresholdX = Math.max(0, this.viewportWidth / 2 - TILE_SIZE / 2); // 240宽时仍为原版112
     const thresholdY = 130; // 原版: n3 = 130
     const boxSize = TILE_SIZE; // 建筑方框大小 = 1瓦片
 
@@ -471,7 +499,7 @@ export class MapData {
     } else if (this.boxX < thresholdX) {
       this.targetCamX = 0;
     } else {
-      this.targetCamX = mapWPx - MAP_VIEW_W;
+      this.targetCamX = mapWPx - this.viewportWidth;
     }
 
     // Y轴: 同理
@@ -484,7 +512,7 @@ export class MapData {
     }
 
     // 边界限制
-    this.targetCamX = Math.max(0, Math.min(this.targetCamX, Math.max(0, mapWPx - MAP_VIEW_W)));
+    this.targetCamX = Math.max(0, Math.min(this.targetCamX, Math.max(0, mapWPx - this.viewportWidth)));
     this.targetCamY = Math.max(0, Math.min(this.targetCamY, Math.max(0, mapHPx - MAP_VIEW_H)));
   }
 
@@ -522,7 +550,7 @@ export class MapData {
     if (!this.mapData) return;
     const mapWPx = this.mapData.width * TILE_SIZE;
     const mapHPx = this.mapData.height * TILE_SIZE;
-    const maxX = Math.max(0, mapWPx - MAP_VIEW_W);
+    const maxX = Math.max(0, mapWPx - this.viewportWidth);
     const maxY = Math.max(0, mapHPx - MAP_VIEW_H);
     this.targetCamX = Math.max(0, Math.min(maxX, this.targetCamX + dx));
     this.targetCamY = Math.max(0, Math.min(maxY, this.targetCamY + dy));
@@ -572,6 +600,9 @@ export class MapData {
 
   get cameraX(): number { return this.camX; }
   get cameraY(): number { return this.camY; }
+  get viewWidth(): number { return this.viewportWidth; }
+  get screenMapOriginX(): number { return this.mapOriginX; }
+  get worldScreenOffsetX(): number { return this.mapOriginX - this.camX; }
   get buildingBoxX(): number { return this.boxX; }
   get buildingBoxY(): number { return this.boxY; }
 
@@ -607,7 +638,7 @@ export class MapData {
    * 将屏幕坐标转换为地图瓦片坐标
    */
   screenToTile(screenX: number, screenY: number): { tx: number; ty: number } {
-    const mapX = screenX + this.camX;
+    const mapX = screenX - this.mapOriginX + this.camX;
     const mapY = (screenY - MAP_TOP_BAR_H) + this.camY;
     return {
       tx: Math.floor(mapX / TILE_SIZE),
@@ -615,12 +646,20 @@ export class MapData {
     };
   }
 
+  isScreenInsideMap(screenX: number, screenY: number): boolean {
+    if (!this.mapData || screenY < MAP_TOP_BAR_H || screenY >= MAP_TOP_BAR_H + MAP_VIEW_H) return false;
+    const mapLeft = this.mapOriginX - this.camX;
+    const mapRight = mapLeft + this.mapWidthPx;
+    return screenX >= Math.max(0, mapLeft)
+      && screenX < Math.min(this.viewportWidth, mapRight);
+  }
+
   /**
    * 将地图瓦片坐标转换为屏幕坐标
    */
   tileToScreen(tx: number, ty: number): { x: number; y: number } {
     return {
-      x: tx * TILE_SIZE - this.camX,
+      x: tx * TILE_SIZE - this.camX + this.mapOriginX,
       y: ty * TILE_SIZE - this.camY + MAP_TOP_BAR_H,
     };
   }
@@ -643,15 +682,19 @@ export class MapData {
     // 计算可见瓦片范围
     const startCol = Math.floor(this.camX / TILE_SIZE);
     const startRow = Math.floor(this.camY / TILE_SIZE);
-    const endCol = Math.min(width, startCol + Math.ceil(MAP_VIEW_W / TILE_SIZE) + 1);
+    const endCol = Math.min(width, startCol + Math.ceil(this.viewportWidth / TILE_SIZE) + 1);
     const endRow = Math.min(height, startRow + Math.ceil(MAP_VIEW_H / TILE_SIZE) + 1);
 
     const vctx = this.renderer.virtualContext;
 
+    this.refreshMapOrigin();
+    vctx.fillStyle = '#071712';
+    vctx.fillRect(0, MAP_TOP_BAR_H, this.viewportWidth, MAP_VIEW_H);
+
     // 设置裁剪区域 (地图可视区域)
     vctx.save();
     vctx.beginPath();
-    vctx.rect(0, MAP_TOP_BAR_H, MAP_VIEW_W, MAP_VIEW_H);
+    vctx.rect(0, MAP_TOP_BAR_H, this.viewportWidth, MAP_VIEW_H);
     vctx.clip();
 
     vctx.imageSmoothingEnabled = false;
@@ -662,7 +705,7 @@ export class MapData {
         const idx = y * width + x;
         const tileIdx = tileLayer[idx] & 0xFF;
         const flipMode = flipLayer[idx] ?? 0;
-        const px = x * TILE_SIZE - this.camX;
+          const px = x * TILE_SIZE - this.camX + this.mapOriginX;
         const py = y * TILE_SIZE - this.camY + MAP_TOP_BAR_H;
 
         if (this.currentAtlas) {
@@ -685,7 +728,7 @@ export class MapData {
           if (overlayIdx === 0) continue; // 无装饰不绘制
 
           const overlayFlip = pathFlipLayer?.[idx] ?? 0;
-          const px = x * TILE_SIZE - this.camX;
+          const px = x * TILE_SIZE - this.camX + this.mapOriginX;
           const py = y * TILE_SIZE - this.camY + MAP_TOP_BAR_H;
 
           this.drawTileWithFlip(overlayAtlas, overlayIdx, overlayFlip, px, py, TILES_PER_ROW);
@@ -703,7 +746,7 @@ export class MapData {
     if (!stone) return;
     const { width, height } = this.mapData;
     const startCol = Math.max(0, Math.floor(this.camX / TILE_SIZE));
-    const endCol = Math.min(width, startCol + Math.ceil(MAP_VIEW_W / TILE_SIZE) + 1);
+    const endCol = Math.min(width, startCol + Math.ceil(this.viewportWidth / TILE_SIZE) + 1);
     const startRow = Math.max(0, Math.floor(this.camY / TILE_SIZE));
     const endRow = Math.min(height, startRow + Math.ceil(MAP_VIEW_H / TILE_SIZE) + 1);
     for (let ty = startRow; ty < endRow; ty++) {
@@ -712,7 +755,7 @@ export class MapData {
         this.renderer.drawSpriteTransform(
           stone,
           0, 0, 15, 16,
-          tx * TILE_SIZE - this.camX,
+          tx * TILE_SIZE - this.camX + this.mapOriginX,
           ty * TILE_SIZE - this.camY + MAP_TOP_BAR_H,
           0,
         );
@@ -725,11 +768,11 @@ export class MapData {
    * ui_0 是四个 7×7 粉白角框；ui_1 是框上方上下跳动的红色标记。
    */
   renderBuildingBox(): void {
-    const px = this.boxX - this.camX;
+    const px = this.boxX - this.camX + this.mapOriginX;
     const py = this.boxY - this.camY + MAP_TOP_BAR_H;
 
     // 只在可见范围内绘制
-    if (px < -TILE_SIZE || px > MAP_VIEW_W || py < MAP_TOP_BAR_H - TILE_SIZE || py > MAP_TOP_BAR_H + MAP_VIEW_H) return;
+    if (px < -TILE_SIZE || px > this.viewportWidth || py < MAP_TOP_BAR_H - TILE_SIZE || py > MAP_TOP_BAR_H + MAP_VIEW_H) return;
 
     const corner = this.spriteLoader?.getUISprite(0);
     if (corner) {
@@ -855,20 +898,20 @@ export class MapData {
 
     const startCol = Math.floor(this.camX / TILE_SIZE);
     const startRow = Math.floor(this.camY / TILE_SIZE);
-    const endCol = Math.min(width, startCol + Math.ceil(MAP_VIEW_W / TILE_SIZE) + 1);
+    const endCol = Math.min(width, startCol + Math.ceil(this.viewportWidth / TILE_SIZE) + 1);
     const endRow = Math.min(height, startRow + Math.ceil(MAP_VIEW_H / TILE_SIZE) + 1);
 
     const vctx = this.renderer.virtualContext;
     vctx.save();
     vctx.beginPath();
-    vctx.rect(0, MAP_TOP_BAR_H, MAP_VIEW_W, MAP_VIEW_H);
+    vctx.rect(0, MAP_TOP_BAR_H, this.viewportWidth, MAP_VIEW_H);
     vctx.clip();
 
     for (let y = startRow; y < endRow; y++) {
       for (let x = startCol; x < endCol; x++) {
         const val = this.terrain[y * width + x];
         if (val < 8) {
-          const px = x * TILE_SIZE - this.camX;
+        const px = x * TILE_SIZE - this.camX + this.mapOriginX;
           const py = y * TILE_SIZE - this.camY + MAP_TOP_BAR_H;
           vctx.strokeStyle = 'rgba(255, 255, 0, 0.3)';
           vctx.lineWidth = 1;

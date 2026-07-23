@@ -11,6 +11,7 @@ interface WaveIntelInputHarness {
     handleTap(x: number, y: number): boolean;
     isPaused(): boolean;
     isPauseMenuVisible(): boolean;
+    showMessage(text: string, duration: number): void;
   };
   buildBar: { isOpen: boolean };
   towerSystem: {
@@ -26,7 +27,7 @@ interface WaveIntelInputHarness {
   handleTap(x: number, y: number): void;
 }
 
-test('触屏端原军情横幅区域的道路格仍可用于建造选位', () => {
+test('触屏建造选位期间轻点地图不会移动塔影或产生经济行为', () => {
   let buildPosition = { tx: 0, ty: 0 };
   const game = Object.create(Game.prototype) as WaveIntelInputHarness;
   Object.assign(game, {
@@ -38,6 +39,7 @@ test('触屏端原军情横幅区域的道路格仍可用于建造选位', () =>
       handleTap: () => false,
       isPaused: () => false,
       isPauseMenuVisible: () => false,
+      showMessage: () => {},
     },
     buildBar: { isOpen: false },
     towerSystem: {
@@ -54,6 +56,6 @@ test('触屏端原军情横幅区域的道路格仍可用于建造选位', () =>
 
   game.handleTap(80, 30);
 
-  assert.deepEqual(buildPosition, { tx: 4, ty: 2 });
+  assert.deepEqual(buildPosition, { tx: 0, ty: 0 });
   assert.equal(game.waveIntelExpanded, false);
 });

@@ -19,11 +19,33 @@ import type { EnhancedRunStateV1 } from '../enhancement/RunState';
 import type { RulesetId } from '../enhancement/Ruleset';
 import { normalizeRuleset } from '../enhancement/Ruleset';
 import { BattleRecordProfile, createBattleRecordProfile } from '../enhancement/BattleRecords';
+import type { ViewportPreference } from './Viewport';
 
-const SAVE_KEY = 'weicheng_save_v1';
-const SETTINGS_KEY = 'weicheng_settings_v1';
-const CHEAT_PROFILE_KEY = 'weicheng_cheat_profile_v1';
-const ENHANCEMENT_PROFILE_KEY = 'weicheng_enhancement_profile_v1';
+export interface StorageKeys {
+  save: string;
+  settings: string;
+  cheatProfile: string;
+  enhancementProfile: string;
+}
+
+export function createStorageKeys(channel: string): StorageKeys {
+  const prefix = channel === 'preview-build-input-viewport'
+    ? 'weicheng_preview_build_input_viewport'
+    : 'weicheng';
+  return {
+    save: `${prefix}_save_v1`,
+    settings: `${prefix}_settings_v1`,
+    cheatProfile: `${prefix}_cheat_profile_v1`,
+    enhancementProfile: `${prefix}_enhancement_profile_v1`,
+  };
+}
+
+const DEPLOY_CHANNEL = typeof __DEPLOY_CHANNEL__ === 'string' ? __DEPLOY_CHANNEL__ : 'production';
+export const STORAGE_KEYS = createStorageKeys(DEPLOY_CHANNEL);
+const SAVE_KEY = STORAGE_KEYS.save;
+const SETTINGS_KEY = STORAGE_KEYS.settings;
+const CHEAT_PROFILE_KEY = STORAGE_KEYS.cheatProfile;
+const ENHANCEMENT_PROFILE_KEY = STORAGE_KEYS.enhancementProfile;
 export const CURRENT_SAVE_VERSION = 2;
 
 // ============================================================
@@ -95,6 +117,8 @@ export interface GameSettings {
   showFps: boolean;
   scale: number;
   rulesetId: RulesetId;
+  viewportMode: ViewportPreference;
+  vibrationEnabled: boolean;
 }
 
 /** 纯函数迁移入口，未知未来版本会安全拒绝，旧 v1 会逐字段保留。 */
@@ -219,6 +243,8 @@ export class SaveSystem {
       showFps: false,
       scale: 2,
       rulesetId: 'enhanced',
+      viewportMode: 'wide',
+      vibrationEnabled: true,
     };
 
     try {
@@ -226,6 +252,8 @@ export class SaveSystem {
       if (!json) return defaultSettings;
       const settings = { ...defaultSettings, ...JSON.parse(json) };
       settings.rulesetId = normalizeRuleset(settings.rulesetId);
+      settings.viewportMode = settings.viewportMode === 'classic' ? 'classic' : 'wide';
+      settings.vibrationEnabled = settings.vibrationEnabled !== false;
       return settings;
     } catch (e) {
       return defaultSettings;

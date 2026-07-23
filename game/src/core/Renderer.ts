@@ -1,9 +1,10 @@
 /**
- * 渲染器：游戏仍使用 240×320 逻辑坐标，但直接绘制到最终物理分辨率。
- * 高清模式会对原始位图执行 Scale2x，原版模式保持最近邻原像素。
+ * 渲染器：纵向保持 320 逻辑像素；战斗页可按屏幕比例扩展横向视野，
+ * 其余页面仍在居中的 240×320 经典内容区绘制。
  */
 import { LOGICAL_WIDTH, LOGICAL_HEIGHT, TILE_SIZE } from '../data/gameData';
 import { scale2x } from './Scale2x';
+import { calculateViewportMetrics, ViewportMetrics } from './Viewport';
 
 export type DisplayMode = 'original' | 'hd';
 type RenderImage = HTMLImageElement | HTMLCanvasElement;
@@ -17,6 +18,17 @@ export class Renderer {
   private windowScale: number = 1;
   private physicalScale: number = 1;
   private mode: DisplayMode = 'hd';
+  private wideViewport = false;
+  private legacyContent = true;
+  private availableCssWidth: number | null = null;
+  private availableCssHeight: number | null = null;
+  private viewport: ViewportMetrics = calculateViewportMetrics({
+    availableCssWidth: LOGICAL_WIDTH,
+    availableCssHeight: LOGICAL_HEIGHT,
+    dpr: 1,
+    wide: false,
+    integerPhysicalScale: false,
+  });
 
   private enhancedImages = new WeakMap<RenderImage, HTMLCanvasElement>();
   private enhancementFailures = new WeakSet<RenderImage>();
@@ -31,21 +43,20 @@ export class Renderer {
   /** 根据视口、DPR 与显示模式重建最终 backing canvas。 */
   resize(): void {
     this.dpr = Math.max(1, window.devicePixelRatio || 1);
-    const maxPhysicalScale = Math.min(
-      (window.innerWidth * this.dpr) / LOGICAL_WIDTH,
-      (window.innerHeight * this.dpr) / LOGICAL_HEIGHT,
-    );
+    const viewport = window.visualViewport;
+    const availableCssWidth = this.availableCssWidth ?? viewport?.width ?? window.innerWidth;
+    const availableCssHeight = this.availableCssHeight ?? viewport?.height ?? window.innerHeight;
+    this.viewport = calculateViewportMetrics({
+      availableCssWidth,
+      availableCssHeight,
+      dpr: this.dpr,
+      wide: this.wideViewport,
+      integerPhysicalScale: this.mode === 'original',
+    });
+    this.physicalScale = this.viewport.physicalScale;
 
-    if (this.mode === 'original' && maxPhysicalScale >= 1) {
-      // 整数物理倍率保证一个原始像素始终对应同样大小的像素块。
-      this.physicalScale = Math.max(1, Math.floor(maxPhysicalScale));
-    } else {
-      // 240×320 的最大公约数为 80；以 1/80 倍步进可保持 backing 尺寸和宽高比精确。
-      this.physicalScale = Math.max(1 / 80, Math.floor(maxPhysicalScale * 80) / 80);
-    }
-
-    this.canvas.width = Math.max(1, Math.round(LOGICAL_WIDTH * this.physicalScale));
-    this.canvas.height = Math.max(1, Math.round(LOGICAL_HEIGHT * this.physicalScale));
+    this.canvas.width = Math.max(1, Math.round(this.viewport.logicalWidth * this.physicalScale));
+    this.canvas.height = Math.max(1, Math.round(this.viewport.logicalHeight * this.physicalScale));
     this.canvas.style.width = `${this.canvas.width / this.dpr}px`;
     this.canvas.style.height = `${this.canvas.height / this.dpr}px`;
     this.canvas.style.imageRendering = this.mode === 'original' ? 'pixelated' : 'auto';
@@ -60,12 +71,49 @@ export class Renderer {
     this.resize();
   }
 
+  setWideViewport(enabled: boolean): void {
+    if (this.wideViewport === enabled) return;
+    this.wideViewport = enabled;
+    this.resize();
+  }
+
+  /** 同步输入布局实际留给 Canvas 的区域，并一次性重算宽屏模式。 */
+  configureViewport(wide: boolean, availableCssWidth: number, availableCssHeight: number): void {
+    this.wideViewport = wide;
+    this.availableCssWidth = Math.max(1, availableCssWidth);
+    this.availableCssHeight = Math.max(1, availableCssHeight);
+    this.resize();
+  }
+
+  setContentLayout(layout: 'legacy' | 'battle'): void {
+    const legacy = layout === 'legacy';
+    if (this.legacyContent === legacy) return;
+    this.legacyContent = legacy;
+    this.prepareContext();
+  }
+
   get displayMode(): DisplayMode {
     return this.mode;
   }
 
   get totalScale(): number {
     return this.physicalScale;
+  }
+
+  get metrics(): Readonly<ViewportMetrics> {
+    return this.viewport;
+  }
+
+  get logicalWidth(): number {
+    return this.viewport.logicalWidth;
+  }
+
+  get contentWidth(): number {
+    return this.legacyContent ? LOGICAL_WIDTH : this.viewport.logicalWidth;
+  }
+
+  get isLegacyContent(): boolean {
+    return this.legacyContent;
   }
 
   /** 兼容旧系统命名：该 context 现在就是最终高 DPI context。 */
@@ -79,16 +127,18 @@ export class Renderer {
 
   private prepareContext(): void {
     this.ctx.setTransform(this.physicalScale, 0, 0, this.physicalScale, 0, 0);
+    if (this.legacyContent) this.ctx.translate(this.viewport.legacyRect.x, this.viewport.legacyRect.y);
     this.ctx.imageSmoothingEnabled = false;
     this.ctx.globalAlpha = 1;
     this.ctx.textBaseline = 'top';
   }
 
   clear(color: number = 0): void {
-    // 每帧恢复逻辑坐标变换，避免外部临时 transform 污染下一帧。
-    this.prepareContext();
+    // 先清理整个动态画布，再恢复当前内容区变换。
+    this.ctx.setTransform(this.physicalScale, 0, 0, this.physicalScale, 0, 0);
     this.setColor(color);
-    this.ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    this.ctx.fillRect(0, 0, this.viewport.logicalWidth, this.viewport.logicalHeight);
+    this.prepareContext();
   }
 
   private dimensions(img: RenderImage): { width: number; height: number } {
@@ -276,8 +326,10 @@ export class Renderer {
 
   screenToLogical(screenX: number, screenY: number): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
-    const x = ((screenX - rect.left) / rect.width) * LOGICAL_WIDTH;
-    const y = ((screenY - rect.top) / rect.height) * LOGICAL_HEIGHT;
+    const rawX = ((screenX - rect.left) / rect.width) * this.viewport.logicalWidth;
+    const rawY = ((screenY - rect.top) / rect.height) * this.viewport.logicalHeight;
+    const x = this.legacyContent ? rawX - this.viewport.legacyRect.x : rawX;
+    const y = this.legacyContent ? rawY - this.viewport.legacyRect.y : rawY;
     return { x, y };
   }
 

@@ -6,7 +6,7 @@ export type MobileControlAction =
   | 'confirm'
   | 'cancel';
 
-export type MobileControlContext = 'normal' | 'bar' | 'placement';
+export type MobileControlContext = 'normal' | 'build-bar' | 'bar' | 'placement';
 
 export interface MobileControlState {
   visible: boolean;
@@ -21,6 +21,7 @@ export interface MobileControlState {
   comboCountdownSeconds: number | null;
   battleIntel: string;
   context: MobileControlContext;
+  vibrationEnabled: boolean;
 }
 
 /**
@@ -45,13 +46,14 @@ export class MobileControls {
   private readonly confirmButton = this.button('confirm');
   private readonly cancelButton = this.button('cancel');
   private lastStateKey = '';
+  private vibrationEnabled = true;
 
   constructor() {
     this.controls?.querySelectorAll<HTMLButtonElement>('[data-mobile-action]').forEach((button) => {
       button.addEventListener('click', () => {
         const action = button.dataset.mobileAction as MobileControlAction | undefined;
         if (!action || button.disabled) return;
-        navigator.vibrate?.(8);
+        if (this.vibrationEnabled) navigator.vibrate?.(8);
         this.callback?.(action);
       });
     });
@@ -66,6 +68,7 @@ export class MobileControls {
   }
 
   update(state: MobileControlState): void {
+    this.vibrationEnabled = state.vibrationEnabled;
     const stateKey = JSON.stringify(state);
     if (stateKey === this.lastStateKey) return;
     this.lastStateKey = stateKey;
@@ -89,11 +92,10 @@ export class MobileControls {
         : '波次进行中';
     }
 
-    // 操作栏直接在画面内二次点击确认；大按钮只保留给需要移动塔影的建造选位。
+    // 触屏建造只允许明确拖动后的真实 pointerup 提交，不提供第二条确认路径。
     const contextual = state.context === 'placement' && !state.paused;
     if (this.confirmButton) {
-      this.confirmButton.hidden = !contextual;
-      this.confirmButton.textContent = '建造';
+      this.confirmButton.hidden = true;
     }
     if (this.cancelButton) this.cancelButton.hidden = !contextual;
 
@@ -101,7 +103,9 @@ export class MobileControls {
       this.hint.textContent = state.paused
         ? '战斗已暂停'
         : state.context === 'placement'
-          ? '拖动塔影，松手建造 · 也可轻点选位'
+          ? '拖动塔影，松手建造 · 轻点不会扣费'
+          : state.context === 'build-bar'
+            ? '轻点塔卡进入预览 · 按住可直接拖入战场'
           : state.context === 'bar'
             ? '点项目选择，再点同一项目确认 · 点栏外取消'
             : '单指拖动地图 · 轻点地块或防御塔';

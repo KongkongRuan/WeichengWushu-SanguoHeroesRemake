@@ -20,7 +20,6 @@ import { SpriteLoader } from './SpriteLoader';
 import {
   MAP_TOP_BAR_H,
   MAP_VIEW_H,
-  MAP_VIEW_W,
   CASTLE_RECTS_E1058,
   CASTLE_PARTS_F1063,
   CASTLE_PART_COUNT_J1064,
@@ -104,7 +103,7 @@ export class CastleRenderer {
     const vctx = this.renderer.virtualContext;
     vctx.save();
     vctx.beginPath();
-    vctx.rect(0, MAP_TOP_BAR_H, MAP_VIEW_W, MAP_VIEW_H);
+    vctx.rect(0, MAP_TOP_BAR_H, this.mapData.viewWidth, MAP_VIEW_H);
     vctx.clip();
     vctx.imageSmoothingEnabled = false;
 
@@ -116,7 +115,7 @@ export class CastleRenderer {
       if (!rect) continue;
       // 原版: dx = f1063[which][i*3+1] + var1 - bP
       //       dy = f1063[which][i*3+2] + var2 + 13 - bQ
-      const dx = parts[i * 3 + 1] + anchorX - camX;
+      const dx = parts[i * 3 + 1] + anchorX - camX + this.mapData.screenMapOriginX;
       const dy = parts[i * 3 + 2] + anchorY + MAP_TOP_BAR_H - camY;
 
       if (atlas) {
@@ -160,7 +159,7 @@ export class CastleRenderer {
       const shift = frame === 0 ? 0 : 4;
       for (const [ox, oy] of CastleRenderer.BUILD_EFFECT_OFFSETS) {
         this.renderer.drawImageRegion(effect, frame * 27, 0, 27, effect.height,
-          centerX + ox - this.mapData.cameraX - shift,
+          centerX + ox - this.mapData.cameraX + this.mapData.screenMapOriginX - shift,
           centerY + oy - this.mapData.cameraY,
           27, effect.height);
       }
@@ -170,7 +169,7 @@ export class CastleRenderer {
       const flourish = this.spriteLoader?.getUISprite(21) ?? null;
       if (flourish) {
         this.renderer.drawImage(flourish,
-          centerX - this.mapData.cameraX - (flourish.width >> 1),
+          centerX - this.mapData.cameraX + this.mapData.screenMapOriginX - (flourish.width >> 1),
           centerY - this.mapData.cameraY - (this.animationFrame << 1));
       }
     }
