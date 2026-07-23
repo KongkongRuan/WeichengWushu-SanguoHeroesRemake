@@ -13,6 +13,22 @@ export interface CouncilRunState {
   skippedWaves: number[];
   buildDiscountUses: number;
   upgradeDiscountUses: number;
+  /** 尚未使用的军议科技折扣，按科技装置下标保存。 */
+  techDiscounts: number[];
+  /** 尚未使用的军议样机折扣，按建筑类型保存。 */
+  prototypeDiscounts: number[];
+}
+
+const TECH_COUNT = 5;
+const TOWER_TYPE_COUNT = 11;
+const MAX_DISCOUNT = 0.95;
+
+function normalizeDiscounts(source: unknown, length: number): number[] {
+  const values = Array.isArray(source) ? source : [];
+  return Array.from({ length }, (_, index) => {
+    const value = Number(values[index]);
+    return Number.isFinite(value) ? Math.max(0, Math.min(MAX_DISCOUNT, value)) : 0;
+  });
 }
 
 export function createCouncilState(source?: Partial<CouncilRunState>): CouncilRunState {
@@ -28,6 +44,8 @@ export function createCouncilState(source?: Partial<CouncilRunState>): CouncilRu
     skippedWaves: Array.isArray(source?.skippedWaves) ? [...new Set(source.skippedWaves.map(Number))] : [],
     buildDiscountUses: Math.max(0, Math.floor(source?.buildDiscountUses ?? 0)),
     upgradeDiscountUses: Math.max(0, Math.floor(source?.upgradeDiscountUses ?? 0)),
+    techDiscounts: normalizeDiscounts(source?.techDiscounts, TECH_COUNT),
+    prototypeDiscounts: normalizeDiscounts(source?.prototypeDiscounts, TOWER_TYPE_COUNT),
   };
 }
 
@@ -87,6 +105,17 @@ export class CouncilSystem {
         if (!selected.immediate) this.state.selectedIds.push(selected.id);
         this.state.buildDiscountUses += selected.buildUses ?? 0;
         this.state.upgradeDiscountUses += selected.upgradeUses ?? 0;
+        if (selected.prototype) {
+          const grant = selected.prototype;
+          this.state.techDiscounts[grant.techIndex] = Math.max(
+            this.techDiscount(grant.techIndex),
+            grant.techDiscount,
+          );
+          this.state.prototypeDiscounts[grant.towerType] = Math.max(
+            this.prototypeDiscount(grant.towerType),
+            grant.towerDiscount,
+          );
+        }
       }
     } else {
       this.state.skippedWaves.push(wave);
@@ -109,6 +138,26 @@ export class CouncilSystem {
   consumeUpgradeDiscount(): boolean {
     if (this.state.upgradeDiscountUses <= 0) return false;
     this.state.upgradeDiscountUses--;
+    return true;
+  }
+
+  techDiscount(techIndex: number): number {
+    return this.state.techDiscounts[techIndex] ?? 0;
+  }
+
+  prototypeDiscount(towerType: number): number {
+    return this.state.prototypeDiscounts[towerType] ?? 0;
+  }
+
+  consumeTechDiscount(techIndex: number): boolean {
+    if (this.techDiscount(techIndex) <= 0) return false;
+    this.state.techDiscounts[techIndex] = 0;
+    return true;
+  }
+
+  consumePrototypeDiscount(towerType: number): boolean {
+    if (this.prototypeDiscount(towerType) <= 0) return false;
+    this.state.prototypeDiscounts[towerType] = 0;
     return true;
   }
 

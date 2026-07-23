@@ -111,6 +111,7 @@ export interface Tower {
 export interface BuildCostDetail {
   baseCost: number;
   councilAdjustedCost: number;
+  prototypeDiscount: number;
   existingSameType: number;
   duplicateSurcharge: number;
   finalCost: number;
@@ -486,14 +487,19 @@ export class TowerSystem {
 
   getBuildCostDetail(type: number): BuildCostDetail {
     const base = this.buildCostProvider?.(type) ?? this.towerConfigs[type]?.cost ?? 0;
-    const councilAdjustedCost = this.modifiers?.buildCost(base, type) ?? base;
+    const councilAdjustedCost = this.modifiers?.buildCostBeforePrototype(base, type) ?? base;
+    const prototypeDiscount = this.modifiers?.prototypeTowerDiscount(type) ?? 0;
+    const prototypeAdjustedCost = councilAdjustedCost * (1 - prototypeDiscount);
     const existingSameType = this.towers.filter(tower => this.spriteType(tower.type) === this.spriteType(type)).length;
     const duplicateSurcharge = this.features.enhanced ? duplicateTowerSurcharge(existingSameType) : 0;
-    const finalCost = Math.max(1, Math.round(councilAdjustedCost * (1 + duplicateSurcharge)));
+    const finalCost = Math.max(1, Math.round(prototypeAdjustedCost * (1 + duplicateSurcharge)));
     const explanations: string[] = [];
     if (councilAdjustedCost !== base && base > 0) {
       const adjustment = councilAdjustedCost / base - 1;
       explanations.push(`军议修正 ${adjustment >= 0 ? '+' : '-'}${formatPercent(Math.abs(adjustment))}`);
+    }
+    if (prototypeDiscount > 0) {
+      explanations.push(`首座样机 -${formatPercent(prototypeDiscount)}`);
     }
     if (duplicateSurcharge > 0) {
       explanations.push(`同类第${existingSameType + 1}座 +${formatPercent(duplicateSurcharge)}`);
@@ -501,6 +507,7 @@ export class TowerSystem {
     return {
       baseCost: base,
       councilAdjustedCost,
+      prototypeDiscount,
       existingSameType,
       duplicateSurcharge,
       finalCost,

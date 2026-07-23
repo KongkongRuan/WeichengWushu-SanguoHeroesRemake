@@ -5,6 +5,17 @@ export type CouncilModifierKey =
   | 'burningZoneDuration' | 'oilBuildCost' | 'lowDefenseDamage'
   | 'comboReward' | 'normalEnemyHealth';
 
+export interface CouncilPrototypeGrant {
+  /** 对应城池科技装置下标（0..4）。 */
+  techIndex: number;
+  /** 获得一次样机优惠的原版建筑类型（0..10）。 */
+  towerType: number;
+  /** 对应科技装置的一次性折扣。 */
+  techDiscount: number;
+  /** 对应建筑下一座样机的一次性折扣。 */
+  towerDiscount: number;
+}
+
 export interface CouncilDefinition {
   id: string;
   name: string;
@@ -17,11 +28,13 @@ export interface CouncilDefinition {
   requiresBuiltAll?: readonly number[];
   buildUses?: number;
   upgradeUses?: number;
+  /** 状态类军议附带的科技扶持与低价样机，均在实际购买后才消费。 */
+  prototype?: CouncilPrototypeGrant;
   immediate?: 'reinforce_city';
   resetCombo?: boolean;
 }
 
-export const COUNCIL_CONTENT_VERSION = 2;
+export const COUNCIL_CONTENT_VERSION = 3;
 
 export const COUNCIL_DEFINITIONS: readonly CouncilDefinition[] = [
   {
@@ -48,31 +61,32 @@ export const COUNCIL_DEFINITIONS: readonly CouncilDefinition[] = [
     id: 'long_burn', name: '延烧之策',
     benefit: '火焰持续时间 +25%', cost: '烟火初次伤害 -10%',
     modifiers: { fireDuration: 0.25, fireInitialDamage: -0.1 }, kind: 'combat',
-    requiresBuiltAny: [3, 9],
+    prototype: { techIndex: 2, towerType: 3, techDiscount: 0.4, towerDiscount: 0.5 },
   },
   {
     id: 'deep_freeze', name: '深寒',
     benefit: '碎冰伤害 +10', cost: '冰冻持续时间 -10%',
     modifiers: { freezeShatterDamage: 10, freezeDuration: -0.1 }, kind: 'combat',
-    requiresBuiltAny: [5],
+    prototype: { techIndex: 4, towerType: 5, techDiscount: 0.4, towerDiscount: 0.5 },
   },
   {
     id: 'toxic_lime', name: '烈性石灰',
     benefit: '中毒每跳伤害 +1', cost: '石灰瓶攻击间隔 +15%',
     modifiers: { poisonTickDamage: 1, limeFireRate: 0.15 }, kind: 'combat',
-    requiresBuiltAny: [1],
+    prototype: { techIndex: 0, towerType: 1, techDiscount: 0.4, towerDiscount: 0.5 },
   },
   {
     id: 'overcharge', name: '强弩过载',
     benefit: '麻痹持续时间 +20%', cost: '麻痹矢攻击间隔 +10%',
     modifiers: { paralyzeDuration: 0.2, paralyzeFireRate: 0.1 }, kind: 'combat',
-    requiresBuiltAny: [4],
+    prototype: { techIndex: 3, towerType: 4, techDiscount: 0.4, towerDiscount: 0.5 },
   },
   {
     id: 'oil_reserve', name: '油料充足',
     benefit: '油火燃烧地带持续时间 +50%', cost: '滚油建造费用 +10%',
     modifiers: { burningZoneDuration: 0.5, oilBuildCost: 0.1 }, kind: 'combat',
-    requiresBuiltAll: [3, 9],
+    requiresBuiltAny: [3],
+    prototype: { techIndex: 4, towerType: 9, techDiscount: 0.4, towerDiscount: 0.5 },
   },
   {
     id: 'reinforce_city', name: '临时加固',
