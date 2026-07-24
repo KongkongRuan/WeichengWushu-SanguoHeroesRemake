@@ -615,6 +615,15 @@ export class MapData {
     };
   }
 
+  isScreenInsideMap(screenX: number, screenY: number): boolean {
+    if (!this.mapData) return false;
+    if (screenX < 0 || screenX >= MAP_VIEW_W) return false;
+    if (screenY < MAP_TOP_BAR_H || screenY >= MAP_TOP_BAR_H + MAP_VIEW_H) return false;
+    const worldX = screenX + this.camX;
+    const worldY = screenY - MAP_TOP_BAR_H + this.camY;
+    return worldX >= 0 && worldX < this.mapWidthPx && worldY >= 0 && worldY < this.mapHeightPx;
+  }
+
   /**
    * 将地图瓦片坐标转换为屏幕坐标
    */

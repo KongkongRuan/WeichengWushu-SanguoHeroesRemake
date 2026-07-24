@@ -95,6 +95,7 @@ export interface GameSettings {
   showFps: boolean;
   scale: number;
   rulesetId: RulesetId;
+  dragBuildTutorialCompleted: boolean;
 }
 
 /** 纯函数迁移入口，未知未来版本会安全拒绝，旧 v1 会逐字段保留。 */
@@ -219,6 +220,7 @@ export class SaveSystem {
       showFps: false,
       scale: 2,
       rulesetId: 'enhanced',
+      dragBuildTutorialCompleted: false,
     };
 
     try {

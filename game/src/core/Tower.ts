@@ -47,6 +47,20 @@ import type { ModifierResolver } from '../enhancement/ModifierResolver';
 import type { ReactionResult, ReactionSystem } from '../enhancement/ReactionSystem';
 import { duplicateTowerSurcharge, formatPercent } from '../enhancement/BalanceRules';
 
+export type PlacementFailureCode =
+  | 'unknown-tower'
+  | 'locked'
+  | 'out-of-bounds'
+  | 'occupied'
+  | 'terrain'
+  | 'road-facing'
+  | 'insufficient-gold';
+
+export interface PlacementFailure {
+  code: PlacementFailureCode;
+  message: string;
+}
+
 // 武将ID到武将对象的映射 (避免循环依赖, 在模块加载时构建)
 const HEROES_MAP: Record<number, Hero> = {};
 HEROES.forEach(h => { HEROES_MAP[h.id] = h; });
@@ -400,7 +414,7 @@ export class TowerSystem {
   placeTower(tileX: number, tileY: number, type: number): boolean {
     const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(type)] ?? 1;
     // 原版塔按 2x2/3x3 占地，不能只检查锚点一格。
-    if (!this.isPlacementAreaClear(tileX, tileY, type)) return false;
+    if (this.getPlacementFailure(tileX, tileY, type)) return false;
 
     const config = this.towerConfigs[type];
     if (!config) return false;
@@ -617,18 +631,42 @@ export class TowerSystem {
     return tx >= tower.x && tx < tower.x + fp && ty >= tower.y && ty < tower.y + fp;
   }
 
-  /** 检查一个塔的完整占地区域，供实际建造和移动预览共用。 */
-  private isPlacementAreaClear(tileX: number, tileY: number, type: number): boolean {
+  /** 返回放置失败的精确原因；预览、松手结算与实际建造共用同一入口。 */
+  getPlacementFailure(tileX: number, tileY: number, type: number): PlacementFailure | null {
+    const config = this.towerConfigs[type];
+    if (!config) return { code: 'unknown-tower', message: '未知建筑类型' };
+    if (this.buildUnlockCheck && !this.buildUnlockCheck(type)) {
+      return { code: 'locked', message: '建筑尚未解锁，需要先修建相关城池' };
+    }
     const footprint = TOWER_FOOTPRINT_O1098[this.spriteType(type)] ?? 1;
+    if (tileX < 0 || tileY < 0 || tileX + footprint > this.mapData.width || tileY + footprint > this.mapData.height) {
+      return { code: 'out-of-bounds', message: '空间不足：建筑超出地图边界' };
+    }
     for (let dx = 0; dx < footprint; dx++) {
       for (let dy = 0; dy < footprint; dy++) {
         const tx = tileX + dx;
         const ty = tileY + dy;
-        if (!this.mapData.isBuildableAt(tx, ty)) return false;
-        if (this.towers.some(t => this.occupiesTile(t, tx, ty))) return false;
+        if (this.towers.some(t => this.occupiesTile(t, tx, ty))) {
+          return { code: 'occupied', message: '与已有建筑重叠' };
+        }
+        if (!this.mapData.isBuildableAt(tx, ty)) {
+          return { code: 'terrain', message: '此处地形不可建造' };
+        }
       }
     }
-    return this.hasPathFacing(tileX, tileY, type);
+    if (!this.hasPathFacing(tileX, tileY, type)) {
+      return { code: 'road-facing', message: '建筑必须朝向道路' };
+    }
+    const cost = this.getBuildCostDetail(type).finalCost;
+    if (this.gold < cost) {
+      return { code: 'insufficient-gold', message: `金币不足：需要 ${cost} 金` };
+    }
+    return null;
+  }
+
+  /** 检查一个塔的完整占地区域，供实际建造和移动预览共用。 */
+  private isPlacementAreaClear(tileX: number, tileY: number, type: number): boolean {
+    return this.getPlacementFailure(tileX, tileY, type) === null;
   }
 
   /** 断龙闸装填费用与当前等级的升级费用相同；装填减半科技生效时取一半。 */

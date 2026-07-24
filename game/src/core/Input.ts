@@ -17,6 +17,33 @@ export interface TouchPoint {
 type InputCallback = (x: number, y: number) => void;
 type InputModeCallback = (touchOptimized: boolean) => void;
 
+export type PointerSequencePhase = 'down' | 'move' | 'up' | 'cancel';
+export type PointerCancelReason =
+  | 'pointercancel'
+  | 'lost-capture'
+  | 'second-pointer'
+  | 'resize'
+  | 'visibility-hidden'
+  | 'external';
+
+export interface PointerSequenceEvent {
+  phase: PointerSequencePhase;
+  pointerId: number;
+  pointerType: string;
+  x: number;
+  y: number;
+  startX: number;
+  startY: number;
+  clientX: number;
+  clientY: number;
+  cssDistance: number;
+  durationMs: number;
+  cancelReason?: PointerCancelReason;
+}
+
+/** 返回 true 会认领整个 pointer 序列，并抑制旧的 tap/drag 回调。 */
+type PointerSequenceCallback = (event: PointerSequenceEvent) => boolean | void;
+
 export class InputSystem {
   private renderer: Renderer;
   private canvas: HTMLCanvasElement;
@@ -26,6 +53,7 @@ export class InputSystem {
   private dragEndCallback: InputCallback | null = null;
   private releaseCallback: InputCallback | null = null;
   private inputModeCallback: InputModeCallback | null = null;
+  private pointerSequenceCallback: PointerSequenceCallback | null = null;
 
   private pressStartTime = 0;
   private pressStartX = 0;
@@ -37,6 +65,8 @@ export class InputSystem {
   private isPressed = false;
   private isDragging = false;
   private activePointerId: number | null = null;
+  private activePointerType = '';
+  private sequenceClaimed = false;
   private longPressTimer: number | null = null;
 
   private readonly longPressThreshold = 500;
@@ -77,44 +107,48 @@ export class InputSystem {
 
   private setupListeners(): void {
     this.canvas.addEventListener('pointerdown', (event) => {
+      if (this.activePointerId !== null && event.pointerId !== this.activePointerId) {
+        event.preventDefault();
+        this.cancelActivePointer('second-pointer');
+        return;
+      }
       if (!event.isPrimary || this.activePointerId !== null) return;
       if (event.pointerType === 'mouse' && event.button !== 0) return;
 
       event.preventDefault();
       this.activateTouchLayout(event.pointerType);
       this.activePointerId = event.pointerId;
+      this.activePointerType = event.pointerType;
       try {
         this.canvas.setPointerCapture(event.pointerId);
       } catch {
         // 某些旧 WebView 不支持 capture；后续 cancel 仍能安全清理状态。
       }
-      this.handleDown(event.clientX, event.clientY);
+      this.handleDown(event.pointerId, event.clientX, event.clientY);
     });
 
     this.canvas.addEventListener('pointermove', (event) => {
       if (event.pointerId !== this.activePointerId || !this.isPressed) return;
       event.preventDefault();
-      this.handleMove(event.clientX, event.clientY);
+      this.handleMove(event.pointerId, event.clientX, event.clientY);
     });
 
     this.canvas.addEventListener('pointerup', (event) => {
       if (event.pointerId !== this.activePointerId) return;
       event.preventDefault();
-      this.handleUp(event.clientX, event.clientY);
+      this.handleUp(event.pointerId, event.clientX, event.clientY);
       this.finishPointer(event.pointerId);
     });
 
     this.canvas.addEventListener('pointercancel', (event) => {
       if (event.pointerId !== this.activePointerId) return;
       event.preventDefault();
-      this.cancelGesture();
-      this.finishPointer(event.pointerId);
+      this.cancelActivePointer('pointercancel');
     });
 
     this.canvas.addEventListener('lostpointercapture', (event) => {
       if (event.pointerId !== this.activePointerId) return;
-      this.cancelGesture();
-      this.activePointerId = null;
+      this.cancelActivePointer('lost-capture', false);
     });
 
     this.canvas.addEventListener('contextmenu', (event) => event.preventDefault());
@@ -122,6 +156,8 @@ export class InputSystem {
 
   private finishPointer(pointerId: number): void {
     this.activePointerId = null;
+    this.activePointerType = '';
+    this.sequenceClaimed = false;
     try {
       if (this.canvas.hasPointerCapture(pointerId)) this.canvas.releasePointerCapture(pointerId);
     } catch {
@@ -136,7 +172,37 @@ export class InputSystem {
     }
   }
 
-  private handleDown(clientX: number, clientY: number): void {
+  private pointerEvent(
+    phase: PointerSequencePhase,
+    pointerId: number,
+    clientX: number,
+    clientY: number,
+    cancelReason?: PointerCancelReason,
+  ): PointerSequenceEvent {
+    const pos = this.renderer.screenToLogical(clientX, clientY);
+    return {
+      phase,
+      pointerId,
+      pointerType: this.activePointerType,
+      x: pos.x,
+      y: pos.y,
+      startX: this.pressStartX,
+      startY: this.pressStartY,
+      clientX,
+      clientY,
+      cssDistance: Math.hypot(clientX - this.pressStartClientX, clientY - this.pressStartClientY),
+      durationMs: Math.max(0, performance.now() - this.pressStartTime),
+      cancelReason,
+    };
+  }
+
+  private emitPointerSequence(event: PointerSequenceEvent): boolean {
+    const claimedNow = this.pointerSequenceCallback?.(event) === true;
+    this.sequenceClaimed = this.sequenceClaimed || claimedNow;
+    return this.sequenceClaimed;
+  }
+
+  private handleDown(pointerId: number, clientX: number, clientY: number): void {
     const pos = this.renderer.screenToLogical(clientX, clientY);
     this.pressStartTime = performance.now();
     this.pressStartX = pos.x;
@@ -147,8 +213,12 @@ export class InputSystem {
     this.lastY = pos.y;
     this.isPressed = true;
     this.isDragging = false;
+    this.sequenceClaimed = false;
+
+    const claimed = this.emitPointerSequence(this.pointerEvent('down', pointerId, clientX, clientY));
 
     this.clearLongPressTimer();
+    if (claimed) return;
     this.longPressTimer = window.setTimeout(() => {
       this.longPressTimer = null;
       if (!this.isPressed || this.isDragging) return;
@@ -157,10 +227,14 @@ export class InputSystem {
     }, this.longPressThreshold);
   }
 
-  private handleMove(clientX: number, clientY: number): void {
+  private handleMove(pointerId: number, clientX: number, clientY: number): void {
     const pos = this.renderer.screenToLogical(clientX, clientY);
     this.lastX = pos.x;
     this.lastY = pos.y;
+    if (this.emitPointerSequence(this.pointerEvent('move', pointerId, clientX, clientY))) {
+      this.clearLongPressTimer();
+      return;
+    }
     if (!this.isDragging) {
       const cssDistance = Math.hypot(
         clientX - this.pressStartClientX,
@@ -173,7 +247,7 @@ export class InputSystem {
     this.moveCallback?.(pos.x, pos.y);
   }
 
-  private handleUp(clientX: number, clientY: number): void {
+  private handleUp(pointerId: number, clientX: number, clientY: number): void {
     if (!this.isPressed) return;
     this.isPressed = false;
     this.clearLongPressTimer();
@@ -185,6 +259,11 @@ export class InputSystem {
     );
     const duration = performance.now() - this.pressStartTime;
 
+    if (this.emitPointerSequence(this.pointerEvent('up', pointerId, clientX, clientY))) {
+      this.isDragging = false;
+      return;
+    }
+
     const wasDragging = this.isDragging;
     if (!wasDragging && cssDistance < this.tapThresholdCss && duration < this.longPressThreshold) {
       this.tapCallback?.(pos.x, pos.y);
@@ -195,12 +274,29 @@ export class InputSystem {
     this.isDragging = false;
   }
 
-  private cancelGesture(): void {
-    if (!this.isPressed) return;
+  cancelActivePointer(reason: PointerCancelReason = 'external', releaseCapture: boolean = true): void {
+    if (!this.isPressed || this.activePointerId === null) return;
+    const pointerId = this.activePointerId;
     this.isPressed = false;
     this.clearLongPressTimer();
-    this.releaseCallback?.(this.lastX, this.lastY);
+    const event = this.pointerEvent(
+      'cancel',
+      pointerId,
+      this.pressStartClientX,
+      this.pressStartClientY,
+      reason,
+    );
+    event.x = this.lastX;
+    event.y = this.lastY;
+    const claimed = this.emitPointerSequence(event);
+    if (!claimed) this.releaseCallback?.(this.lastX, this.lastY);
     this.isDragging = false;
+    if (releaseCapture) this.finishPointer(pointerId);
+    else {
+      this.activePointerId = null;
+      this.activePointerType = '';
+      this.sequenceClaimed = false;
+    }
   }
 
   get isTouchOptimized(): boolean {
@@ -210,6 +306,10 @@ export class InputSystem {
   onInputModeChange(callback: InputModeCallback): void {
     this.inputModeCallback = callback;
     callback(this.touchLayoutActive);
+  }
+
+  onPointerSequence(callback: PointerSequenceCallback): void {
+    this.pointerSequenceCallback = callback;
   }
 
   onTap(callback: InputCallback): void {

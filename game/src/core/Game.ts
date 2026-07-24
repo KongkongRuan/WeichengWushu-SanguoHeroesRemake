@@ -11,6 +11,7 @@ import { TowerSystem } from './Tower';
 import { CastleRenderer } from './Castle';
 import { AudioSystem } from './AudioSystem';
 import { InputSystem } from './Input';
+import type { PointerSequenceEvent } from './Input';
 import { UISystem, Button } from './UI';
 import { SpriteLoader } from './SpriteLoader';
 import { TechTreeSystem } from './TechTree';
@@ -28,6 +29,7 @@ import {
 } from './CheatProgress';
 import type { CheatAction, CheatProfile } from './CheatProgress';
 import { BuildBarSystem, BAR_CAT_BUILD, BAR_CAT_TECH, BAR_CAT_TOWER } from './BuildBar';
+import type { BuildCardHit } from './BuildBar';
 import { MobileControls } from './MobileControls';
 import type { MobileControlAction } from './MobileControls';
 import {
@@ -37,6 +39,13 @@ import {
   originalDemolishRefund,
 } from './Timing';
 import { animationCadenceForState, GameState } from './GameState';
+import {
+  PLACEMENT_DRAG_THRESHOLD_CSS,
+  PLACEMENT_EDGE_DELAY_MS,
+  POINTER_SCROLL_THRESHOLD_CSS,
+  isHorizontalStripGesture,
+  placementEdgeVelocity,
+} from './PlacementGesture';
 export { GameState } from './GameState';
 import {
   LOGICAL_WIDTH,
@@ -134,6 +143,26 @@ const SOFTKEY_MENU = 0;
 const TOUCH_BUILD_DRAG_LIFT = 24;
 const TOUCH_MAP_TOP = 20;
 
+type BuildGestureState =
+  | 'strip-pending'
+  | 'strip-scrolling'
+  | 'strip-cancelled'
+  | 'placement-pending'
+  | 'placement-dragging';
+
+interface ActiveBuildGesture {
+  state: BuildGestureState;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  lastX: number;
+  lastY: number;
+  cardHit: BuildCardHit | null;
+  edgeKey: string;
+  edgeDwellMs: number;
+  committed: boolean;
+}
+
 // 标题菜单项 (back[25] 帧号): 0王者之路/1自由模式/2继续游戏/3设置/4帮助/5关于/6退出
 const MENU_ITEM_COUNT = 7;
 const MENU_ITEM_CONTINUE = 2;
@@ -209,6 +238,8 @@ export class Game {
   private battleFailureRecorded: boolean = false;
   private battleEndEmitted: boolean = false;
   private failureGrantedRescue: boolean = false;
+  private gameOverSelection = 0;
+  private gameOverRestarting = false;
   private lastVictoryKind: '正攻取胜' | '奇谋取胜' | '沙盒胜利' = '正攻取胜';
   private lastVictoryRewardLabels: string[] = [];
   private lastVictoryPointsAdded: number = 0;
@@ -293,6 +324,8 @@ export class Game {
   // 地图拖动状态（逻辑坐标）
   private mapDragLastX: number = -1;
   private mapDragLastY: number = -1;
+  private buildGesture: ActiveBuildGesture | null = null;
+  private dragBuildTutorialCompleted = false;
 
   // 存档槽位 (0-3) — SAVE_PANEL 保留
   private saveSlot: number = 0;
@@ -316,6 +349,7 @@ export class Game {
     this.spriteLoader = new SpriteLoader();
     this.techTree = new TechTreeSystem();
     this.saveSystem = SaveSystem.getInstance();
+    this.dragBuildTutorialCompleted = this.saveSystem.loadSettings().dragBuildTutorialCompleted;
     this.cheatProfile = this.saveSystem.loadCheatProfile();
     this.enhancementProfile = this.saveSystem.loadEnhancementProfile();
     // 兼容升级前已经通关的旧存档，避免老玩家必须重新打一遍才能进入沙盒。
@@ -369,6 +403,8 @@ export class Game {
         if (this.lives <= 0) {
           this.recordCurrentBattleFailure();
           this.emitLevelEnded(false);
+          this.gameOverSelection = 0;
+          this.gameOverRestarting = false;
           this.state = GameState.GAME_OVER;
         }
       },
@@ -434,10 +470,14 @@ export class Game {
         this.towerSystem.setBuildType(origTowerId);
         this.towerSystem.enterBuildMode();
         const bt = this.mapData.getBuildingBoxTile();
-        this.towerSystem.setBuildPosition(bt.tx, bt.ty);
+        const initial = this.clampPlacementTile(bt.tx, bt.ty, origTowerId);
+        this.mapData.setBuildingBox(initial.tx, initial.ty, false);
+        this.towerSystem.setBuildPosition(initial.tx, initial.ty);
         const detail = this.towerSystem.getBuildCostDetail(origTowerId);
         if (detail.explanations.length > 0) {
           this.uiSystem.showMessage(`造价 ${detail.finalCost}金：${detail.explanations.join('，')}`, 120);
+        } else if (this.inputSystem.isTouchOptimized) {
+          this.uiSystem.showMessage('拖动塔影，松手建造', 90);
         }
       },
       upgradeTower: (tower) => {
@@ -478,7 +518,13 @@ export class Game {
         // 原版: 装置建成即 e1105 解锁两塔 + b1059 城堡部件长出
         if (this.features.enhanced) this.council.consumeTechDiscount(techIndex);
         this.castleRenderer.startPartAnimation(TECH_CASTLE_PART_H1060[techIndex] ?? 0);
-        this.uiSystem.showMessage(`装置建成: ${ORIG_TECH_DESC[techIndex]}`, 120);
+        const grant = this.council.selectedDefinitions()
+          .map(def => def.prototype)
+          .find(item => item?.techIndex === techIndex && this.council.prototypeDiscount(item.towerType) > 0);
+        const next = grant
+          ? ` · 下一步：首座${TOWER_NAMES[grant.towerType] ?? '对应建筑'}样机-${formatPercent(this.council.prototypeDiscount(grant.towerType))}`
+          : '';
+        this.uiSystem.showMessage(`装置建成：${ORIG_TECH_DESC[techIndex]}${next}`, 150);
         this.autoSave();
       },
     });
@@ -758,6 +804,7 @@ export class Game {
       this.buildBar.setTouchOptimized(touchOptimized);
       this.resize();
     });
+    this.inputSystem.onPointerSequence((event) => this.handleBuildPointerSequence(event));
     this.inputSystem.onTap((x, y) => this.handleTap(x, y));
     this.inputSystem.onMove((x, y) => {
       // 文本页 (帮助/关于/设置) 拖动滚动
@@ -766,13 +813,6 @@ export class Game {
           this.textScroll = Math.max(0, this.textScroll - (y - this.dragLastY));
         }
         this.dragLastY = y;
-      }
-
-      // 触屏建造模式优先拖动塔影；桌面端和普通触屏状态继续拖动地图。
-      if (this.moveTouchBuildPreview(x, y)) {
-        this.mapDragLastX = -1;
-        this.mapDragLastY = -1;
-        return;
       }
 
       // 战斗中允许鼠标/单指拖动地图。
@@ -793,11 +833,6 @@ export class Game {
         this.mapDragLastY = -1;
       }
     });
-    this.inputSystem.onDragEnd((x, y) => {
-      if (!this.canDragTouchBuildPreview(x, y)) return;
-      this.moveTouchBuildPreview(x, y);
-      this.tryPlacePendingTower();
-    });
     this.inputSystem.onRelease(() => {
       this.dragLastY = -1;
       this.mapDragLastX = -1;
@@ -810,30 +845,202 @@ export class Game {
     this.mobileControls.onAction((action) => this.handleMobileControl(action));
   }
 
-  private canDragTouchBuildPreview(x: number, y: number): boolean {
-    return this.inputSystem.isTouchOptimized
-      && this.state === GameState.PLAYING
-      && !this.uiSystem.isPaused()
-      && this.towerSystem.isBuildMode
-      && x >= 0
-      && x < LOGICAL_WIDTH
-      && y >= TOUCH_MAP_TOP
-      && y < MAP_TOP_BAR_H + MAP_VIEW_H;
+  private handleBuildPointerSequence(event: PointerSequenceEvent): boolean {
+    if (event.phase === 'down') {
+      if (this.state !== GameState.PLAYING || this.uiSystem.isPaused()) return false;
+      if (this.buildBar.hitTestItemStrip(event.x, event.y)) {
+        this.buildGesture = {
+          state: 'strip-pending',
+          pointerId: event.pointerId,
+          startX: event.x,
+          startY: event.y,
+          lastX: event.x,
+          lastY: event.y,
+          cardHit: this.buildBar.hitTestBuildCard(event.x, event.y),
+          edgeKey: '',
+          edgeDwellMs: 0,
+          committed: false,
+        };
+        return true;
+      }
+      if (this.towerSystem.isBuildMode && this.isPointerOnBuildPreview(event.x, event.y)) {
+        this.buildGesture = {
+          state: 'placement-pending',
+          pointerId: event.pointerId,
+          startX: event.x,
+          startY: event.y,
+          lastX: event.x,
+          lastY: event.y,
+          cardHit: null,
+          edgeKey: '',
+          edgeDwellMs: 0,
+          committed: false,
+        };
+        return true;
+      }
+      return false;
+    }
+
+    const gesture = this.buildGesture;
+    if (!gesture || gesture.pointerId !== event.pointerId) return false;
+    gesture.lastX = event.x;
+    gesture.lastY = event.y;
+
+    if (event.phase === 'cancel') {
+      if (gesture.state === 'strip-scrolling') this.buildBar.endItemScroll();
+      this.buildGesture = null;
+      return true;
+    }
+
+    if (event.phase === 'move') {
+      const dx = event.x - gesture.startX;
+      const dy = event.y - gesture.startY;
+      if (gesture.state === 'strip-pending') {
+        if (event.cssDistance >= POINTER_SCROLL_THRESHOLD_CSS
+          && this.buildBar.isItemStripScrollable
+          && isHorizontalStripGesture(dx, dy)
+          && this.buildBar.beginItemScroll()) {
+          gesture.state = 'strip-scrolling';
+          gesture.cardHit = null;
+          this.buildBar.updateItemScroll(dx);
+        } else if (gesture.cardHit
+          && event.cssDistance >= PLACEMENT_DRAG_THRESHOLD_CSS
+          && dy < 0
+          && event.y < this.buildBar.topY
+          && !isHorizontalStripGesture(dx, dy)
+          && this.buildBar.beginDirectPlacement(gesture.cardHit)) {
+          gesture.state = 'placement-dragging';
+          gesture.cardHit = null;
+          this.placementFromPointer(event.x, event.y);
+        } else if (event.cssDistance >= PLACEMENT_DRAG_THRESHOLD_CSS
+          && !(gesture.cardHit && dy < 0 && !isHorizontalStripGesture(dx, dy))) {
+          // 已明显离开轻点范围、又不属于横向滚动或向上直拖时，取消本次卡片操作，
+          // 防止向下/斜向滑动后松手误触购买或升级。
+          gesture.state = 'strip-cancelled';
+          gesture.cardHit = null;
+        }
+      } else if (gesture.state === 'strip-scrolling') {
+        this.buildBar.updateItemScroll(dx);
+      } else if (gesture.state === 'placement-pending'
+        && event.cssDistance >= PLACEMENT_DRAG_THRESHOLD_CSS) {
+        gesture.state = 'placement-dragging';
+        this.placementFromPointer(event.x, event.y);
+      } else if (gesture.state === 'placement-dragging') {
+        this.placementFromPointer(event.x, event.y);
+      }
+      return true;
+    }
+
+    if (event.phase === 'up') {
+      if (gesture.state === 'strip-pending') {
+        this.buildBar.handleTap(event.startX, event.startY);
+      } else if (gesture.state === 'strip-scrolling') {
+        this.buildBar.endItemScroll();
+      } else if (gesture.state === 'placement-dragging' && !gesture.committed) {
+        gesture.committed = true;
+        if (this.placementFromPointer(event.x, event.y)) this.tryPlacePendingTower(true);
+        else this.uiSystem.showMessage('请在战场内松手建造', 75);
+      } else if (gesture.state === 'placement-pending') {
+        // 保留原有的“轻点塔影确认建造”；只有超过阈值才转成拖动放置。
+        this.tryPlacePendingTower();
+      }
+      this.buildGesture = null;
+      return true;
+    }
+    return true;
   }
 
-  /** 把待建塔的中心抬到手指上方并吸附到地图格。 */
-  private moveTouchBuildPreview(x: number, y: number): boolean {
-    if (!this.canDragTouchBuildPreview(x, y)) return false;
+  private isPointerOnBuildPreview(x: number, y: number): boolean {
+    if (!this.towerSystem.isBuildMode || !this.mapData.isScreenInsideMap(x, y)) return false;
+    const position = this.towerSystem.getBuildPosition();
+    const screen = this.mapData.tileToScreen(position.tx, position.ty);
     const footprint = TOWER_FOOTPRINT_O1098[this.towerSystem.buildType] ?? 1;
+    const size = footprint * TILE_SIZE;
+    const margin = 8;
+    return x >= screen.x - margin && x <= screen.x + size + margin
+      && y >= screen.y - margin && y <= screen.y + size + margin;
+  }
+
+  private clampPlacementTile(tx: number, ty: number, type: number): { tx: number; ty: number } {
+    const footprint = TOWER_FOOTPRINT_O1098[type] ?? 1;
+    return {
+      tx: Math.max(0, Math.min(Math.max(0, this.mapData.width - footprint), tx)),
+      ty: Math.max(0, Math.min(Math.max(0, this.mapData.height - footprint), ty)),
+    };
+  }
+
+  private placementFromPointer(x: number, y: number): boolean {
+    if (!this.towerSystem.isBuildMode
+      || x < 0 || x >= LOGICAL_WIDTH
+      || y < TOUCH_MAP_TOP || y >= MAP_TOP_BAR_H + MAP_VIEW_H
+      || !this.mapData.isScreenInsideMap(x, y)) return false;
+    const type = this.towerSystem.buildType;
+    const footprint = TOWER_FOOTPRINT_O1098[type] ?? 1;
     const halfFootprint = footprint * TILE_SIZE / 2;
-    const tile = this.mapData.screenToTile(
+    const raw = this.mapData.screenToTile(
       x - halfFootprint,
       y - TOUCH_BUILD_DRAG_LIFT - halfFootprint,
     );
+    const tile = this.clampPlacementTile(raw.tx, raw.ty, type);
     this.mapData.setBuildingBox(tile.tx, tile.ty, false);
-    const clamped = this.mapData.getBuildingBoxTile();
-    this.towerSystem.setBuildPosition(clamped.tx, clamped.ty);
+    this.towerSystem.setBuildPosition(tile.tx, tile.ty);
     return true;
+  }
+
+  private updatePlacementEdgeScroll(elapsedMs: number): void {
+    const gesture = this.buildGesture;
+    if (!gesture || gesture.state !== 'placement-dragging' || elapsedMs <= 0) return;
+    const velocity = placementEdgeVelocity(
+      gesture.lastX,
+      gesture.lastY,
+      LOGICAL_WIDTH,
+      MAP_TOP_BAR_H,
+      MAP_TOP_BAR_H + MAP_VIEW_H,
+    );
+    const edgeKey = `${Math.sign(velocity.x)},${Math.sign(velocity.y)}`;
+    if (!velocity.active) {
+      gesture.edgeKey = '';
+      gesture.edgeDwellMs = 0;
+      return;
+    }
+    if (edgeKey !== gesture.edgeKey) {
+      gesture.edgeKey = edgeKey;
+      gesture.edgeDwellMs = 0;
+    }
+    gesture.edgeDwellMs += elapsedMs;
+    if (gesture.edgeDwellMs < PLACEMENT_EDGE_DELAY_MS) return;
+    this.mapData.panCameraBy(velocity.x * elapsedMs / 1000, velocity.y * elapsedMs / 1000);
+    this.placementFromPointer(gesture.lastX, gesture.lastY);
+  }
+
+  private dragBuildTutorialBounds(): { x: number; y: number; w: number; h: number } | null {
+    if (this.dragBuildTutorialCompleted
+      || !this.buildBar.isOpen
+      || this.buildBar.category !== BAR_CAT_BUILD) return null;
+    return { x: 16, y: Math.max(24, this.buildBar.topY - 34), w: 208, h: 30 };
+  }
+
+  private completeDragBuildTutorial(): void {
+    if (this.dragBuildTutorialCompleted) return;
+    this.dragBuildTutorialCompleted = true;
+    const settings = this.saveSystem.loadSettings();
+    settings.dragBuildTutorialCompleted = true;
+    this.saveSystem.saveSettings(settings);
+  }
+
+  private renderDragBuildTutorial(): void {
+    const box = this.dragBuildTutorialBounds();
+    if (!box) return;
+    const r = this.renderer;
+    r.setColor(0xA94A6F);
+    r.fillRect(box.x + 2, box.y + 2, box.w, box.h);
+    r.setColor(0xFFFBE8);
+    r.fillRect(box.x, box.y, box.w, box.h);
+    r.setColor(0x53678A);
+    r.drawRect(box.x, box.y, box.w, box.h);
+    r.drawText('按住建筑图标，向上拖到地图', box.x + 18, box.y + 5, 0x53678A, 8);
+    r.drawText('松手建造 · 点击此提示关闭', box.x + 23, box.y + 17, 0xA94A6F, 7);
+    r.drawText('↑', box.x + 5, box.y + 5, 0xD5317A, 12);
   }
 
   private handleMobileControl(action: MobileControlAction): void {
@@ -1057,6 +1264,13 @@ export class Game {
         if (k === 'Enter' || k === ' ') this.handleLevelCompleteTap();
         else handled = false;
         break;
+      case GameState.GAME_OVER:
+        if (this.gameOverRestarting) break;
+        if (k === 'ArrowLeft' || k === 'ArrowRight') this.gameOverSelection = this.gameOverSelection === 0 ? 1 : 0;
+        else if (k === 'Enter' || k === ' ') this.activateGameOverSelection();
+        else if (k === 'Escape') this.gotoTitle();
+        else handled = false;
+        break;
       default:
         handled = false;
         break;
@@ -1146,8 +1360,7 @@ export class Game {
         this.advanceEndingPhase();
         return;
       case GameState.GAME_OVER:
-        // 原版 V(): 失败 → B() 回标题
-        this.gotoTitle();
+        this.handleGameOverTap(x, y);
         return;
       case GameState.VICTORY:
         this.gotoTitle();
@@ -1182,6 +1395,14 @@ export class Game {
     // ====== 原版底部建造栏打开时: 点击全部由栏处理 (任务A) ======
     // (点图标=选中/确认, 点明细=确认, 点栏外地图=关栏; 原版 M() 行8273)
     if (this.buildBar.isOpen) {
+      const tutorial = this.dragBuildTutorialBounds();
+      if (tutorial
+        && x >= tutorial.x && x <= tutorial.x + tutorial.w
+        && y >= tutorial.y && y <= tutorial.y + tutorial.h) {
+        this.completeDragBuildTutorial();
+        this.uiSystem.showMessage('仍可轻点图标后再拖动塔影', 75);
+        return;
+      }
       // 软键优先: 左=确定 (原版左功能键), 右=取消关栏 (原版 -7 键)
       if (softLeft) {
         this.buildBar.confirm();
@@ -1264,10 +1485,10 @@ export class Game {
     const tower = this.towerSystem.selectTower(boxTile.tx, boxTile.ty);
     if (tower) {
       this.buildBar.open(BAR_CAT_TOWER, tower);
+    } else if (this.castleRenderer.isOurCastleFocusTile(boxTile.tx, boxTile.ty)) {
+      this.buildBar.open(BAR_CAT_TECH);
     } else if (this.mapData.isBuildableAt(boxTile.tx, boxTile.ty)) {
       this.buildBar.open(BAR_CAT_BUILD);
-    } else if (this.mapData.isOurCastle(boxTile.tx, boxTile.ty)) {
-      this.buildBar.open(BAR_CAT_TECH);
     }
   }
 
@@ -1275,19 +1496,22 @@ export class Game {
    * 在选位幻影处放塔 (原版 c(int,int,int,int) 行17252: 扣q1100, bt++, bF=0)
    * 放塔失败(位置不可建/金不足)时留在选位模式
    */
-  private tryPlacePendingTower(): void {
+  private tryPlacePendingTower(fromDirectDrag: boolean = false): void {
     const cur = this.towerSystem.getBuildPosition();
     const type = this.towerSystem.buildType;
-    // 原版科技建筑门禁 (e1105, M() case 0 行8386-8389; 正常流程在栏内已拦截, 此处双保险)
-    if (!this.buildBar.isTowerUnlocked(type)) {
-      this.uiSystem.showMessage(BAR_MESSAGES[2], 90); // b1015[115] 需要修建相关的城池
-      this.towerSystem.exitBuildMode();
+    const costDetail = this.towerSystem.getBuildCostDetail(type);
+    if (this.towerSystem.getTowers().length >= 30) {
+      this.uiSystem.showMessage('已经达到建筑数量上限', 90);
+      if (this.inputSystem.isTouchOptimized) navigator.vibrate?.([24, 36, 24]);
       return;
     }
-    const costDetail = this.towerSystem.getBuildCostDetail(type);
-    if (this.gold < costDetail.finalCost) {
-      const reason = costDetail.explanations.length ? `（${costDetail.explanations.join('，')}）` : '';
-      this.uiSystem.showMessage(`金币不足：需要 ${costDetail.finalCost} 金${reason}`, 120);
+    const failure = this.towerSystem.getPlacementFailure(cur.tx, cur.ty, type);
+    if (failure) {
+      const detail = failure.code === 'insufficient-gold' && costDetail.explanations.length
+        ? `（${costDetail.explanations.join('，')}）`
+        : '';
+      this.uiSystem.showMessage(`${failure.message}${detail}`, 120);
+      if (this.inputSystem.isTouchOptimized) navigator.vibrate?.([24, 36, 24]);
       return;
     }
     if (this.towerSystem.placeTower(cur.tx, cur.ty, type)) {
@@ -1296,9 +1520,10 @@ export class Game {
       if (costDetail.explanations.length > 0) {
         this.uiSystem.showMessage(`建造完成：${costDetail.finalCost}金（${costDetail.explanations.join('，')}）`, 105);
       }
+      if (fromDirectDrag) this.completeDragBuildTutorial();
       if (this.inputSystem.isTouchOptimized) navigator.vibrate?.(18);
     } else {
-      this.uiSystem.showMessage('此处不可建造', 60);
+      this.uiSystem.showMessage('建造状态已变化，请重新拖动确认', 75);
       if (this.inputSystem.isTouchOptimized) navigator.vibrate?.([24, 36, 24]);
     }
   }
@@ -2402,6 +2627,7 @@ export class Game {
    * 调整大小
    */
   resize(): void {
+    this.inputSystem.cancelActivePointer('resize');
     this.renderer.resize();
     this.updateMapOffset();
   }
@@ -2419,6 +2645,7 @@ export class Game {
 
   /** 后台标签页不推进战斗、动画或连战准备计时；恢复时从当前时刻重新计时。 */
   private handleVisibilityChange = (): void => {
+    if (document.visibilityState === 'hidden') this.inputSystem.cancelActivePointer('visibility-hidden');
     this.frameClock.setVisible(document.visibilityState !== 'hidden', performance.now());
   };
 
@@ -2542,6 +2769,7 @@ export class Game {
     this.uiSystem.update(elapsedMs);
 
     const playingActive = this.state === GameState.PLAYING && !this.uiSystem.isPaused();
+    if (playingActive) this.updatePlacementEdgeScroll(elapsedMs);
     const animationCadence = animationCadenceForState(this.state);
     if (playingActive) {
       this.originalUiClock.reset();
@@ -2612,6 +2840,8 @@ export class Game {
     } else if (this.state === GameState.COUNCIL) {
       this.updateMenuBackground();
     } else if (this.state === GameState.LEVEL_COMPLETE) {
+      this.updateMenuBackground();
+    } else if (this.state === GameState.GAME_OVER) {
       this.updateMenuBackground();
     } else if (this.state === GameState.SETTINGS) {
       this.updateMenuBackground();
@@ -2890,13 +3120,55 @@ export class Game {
     this.councilTouchArmed = false;
     this.autoSave();
     const prototypeNotice = selected?.prototype
-      ? ` · 已备${TOWER_NAMES[selected.prototype.towerType] ?? '对应建筑'}样机优惠`
+      ? ` · 下一步：选中我方城墙建${TOWER_NAMES[11 + selected.prototype.techIndex] ?? '对应装置'}-${formatPercent(selected.prototype.techDiscount)}`
       : '';
     const councilResult = selected ? `军议：${selected.name}${prototypeNotice}` : '已跳过军议';
     const preparation = this.deployment.isPreparationProtected(wave)
       ? ' · 整备期：连战已保护'
       : '';
     this.uiSystem.showMessage(`${councilResult}${preparation}`, 120);
+  }
+
+  private handleGameOverTap(x: number, y: number): void {
+    if (this.gameOverRestarting || y < 276 || y > 301) return;
+    if (x >= 10 && x <= 114) this.gameOverSelection = 0;
+    else if (x >= 126 && x <= 230) this.gameOverSelection = 1;
+    else return;
+    this.activateGameOverSelection();
+  }
+
+  private activateGameOverSelection(): void {
+    if (this.gameOverRestarting) return;
+    if (this.gameOverSelection === 0) this.retryFailedBattle();
+    else this.gotoTitle();
+  }
+
+  private retryFailedBattle(): void {
+    if (this.gameOverRestarting) return;
+    this.gameOverRestarting = true;
+    void this.loadLevel(this.currentLevel).then(() => {
+      // 失败页的“再战”跳过已经阅读过的四页剧情，直接回到首波整备。
+      this.endLevelIntro();
+      this.gameOverRestarting = false;
+    }).catch(() => {
+      this.gameOverRestarting = false;
+      this.state = GameState.GAME_OVER;
+      this.uiSystem.showMessage('重新载入失败，请返回标题再试', 120);
+    });
+  }
+
+  private pendingCouncilTask(): string {
+    if (!this.features.enhanced) return '';
+    const techIndex = this.council.state.techDiscounts.findIndex(value => value > 0);
+    if (techIndex >= 0) {
+      const name = TOWER_NAMES[11 + techIndex] ?? '对应装置';
+      return `待办：选中我方城墙建${name}-${formatPercent(this.council.techDiscount(techIndex))}`;
+    }
+    const towerType = this.council.state.prototypeDiscounts.findIndex(value => value > 0);
+    if (towerType >= 0) {
+      return `样机待用：首座${TOWER_NAMES[towerType] ?? '对应建筑'}-${formatPercent(this.council.prototypeDiscount(towerType))}`;
+    }
+    return '';
   }
 
   private syncMobileControls(): void {
@@ -2920,7 +3192,8 @@ export class Game {
         ? `${battleIntel} ${plan.wave}/${this.enemySystem.totalWaves} ${typeName}×${plan.count} 连战${this.deployment.state.combo}${countdown}`
         : `${battleIntel} 等待军情…`;
     }
-    const mobileIntel = protectedRest ? battleIntel : `${battleIntel}${bossThreat}`;
+    const task = this.pendingCouncilTask();
+    const mobileIntel = `${protectedRest ? battleIntel : `${battleIntel}${bossThreat}`}${task ? ` · ${task}` : ''}`;
     this.mobileControls.update({
       visible: playing && this.inputSystem.isTouchOptimized,
       gold: this.gold,
@@ -3623,7 +3896,13 @@ export class Game {
         -this.mapData.cameraY + MAP_TOP_BAR_H,
         selected,
       )) {
-        this.mapData.renderBuildingBox();
+        if (this.castleRenderer.isOurCastleFocusTile(box.tx, box.ty)) {
+          this.castleRenderer.renderOurCastleCursor(
+            this.buildBar.isOpen && this.buildBar.category === BAR_CAT_TECH,
+          );
+        } else {
+          this.mapData.renderBuildingBox();
+        }
       }
     }
 
@@ -3644,6 +3923,7 @@ export class Game {
     this.uiSystem.render(this.gold, this.lives, this.currentLevel,
       this.enemySystem.currentWave, this.enemySystem.totalWaves);
     this.renderEnhancementHud();
+    this.renderDragBuildTutorial();
   }
 
   private renderEnhancementHud(): void {
@@ -3652,8 +3932,10 @@ export class Game {
 
     const r = this.renderer;
     const label = `[${rulesetLabel(this.rulesetId)}]`;
+    const councilTask = this.pendingCouncilTask();
     if (!this.features.waveIntel) {
       this.renderer.drawText(label, 2, 22, 0x9AA7B8, 8);
+      if (councilTask) this.renderer.drawText(this.fitTextToWidth(councilTask, 232, 8), 4, 34, 0xFFD36A, 8);
       return;
     }
     const plan = this.enemySystem.wavePlan;
@@ -3665,9 +3947,9 @@ export class Game {
       : plan
       ? `${label} ${plan.wave}/${this.enemySystem.totalWaves} ${typeName}×${plan.count} 连战${this.deployment.state.combo}`
       : '';
-    const panelWidth = this.waveIntelExpanded ? 212 : 168;
+    const panelWidth = councilTask ? 224 : this.waveIntelExpanded ? 212 : 168;
     const hasPreparationLine = countdownMs != null || protectedRest;
-    const height = (this.waveIntelExpanded ? 48 : 18) + (hasPreparationLine ? 14 : 0);
+    const height = (this.waveIntelExpanded ? 48 : 18) + (hasPreparationLine ? 14 : 0) + (councilTask ? 12 : 0);
     const ctx = this.renderer.virtualContext;
     ctx.save();
     ctx.globalAlpha = 0.86;
@@ -3676,6 +3958,9 @@ export class Game {
     ctx.strokeStyle = '#d5a33e';
     ctx.strokeRect(2, 21, panelWidth, height);
     ctx.restore();
+    if (councilTask) {
+      this.renderer.drawText(this.fitTextToWidth(councilTask, panelWidth - 12, 8), 6, 21 + height - 10, 0xFFD36A, 8);
+    }
     if (!plan) {
       this.renderer.drawText(`${label} 等待军情…`, 6, 25, 0xFFD36A, 8);
       return;
@@ -3715,7 +4000,9 @@ export class Game {
     const tower = !this.towerSystem.isBuildMode
       ? this.towerSystem.getTowerAt(box.tx, box.ty)
       : null;
-    const enemy = !tower && !this.towerSystem.isBuildMode
+    const castleFocused = !tower && !this.towerSystem.isBuildMode
+      && this.castleRenderer.isOurCastleFocusTile(box.tx, box.ty);
+    const enemy = !tower && !castleFocused && !this.towerSystem.isBuildMode
       ? this.enemySystem.getEnemyAtTile(box.tx, box.ty)
       : null;
     const ui12 = this.spr('ui', 12);
@@ -3740,6 +4027,16 @@ export class Game {
           this.renderer.drawText(`伤${this.battleStats.totalDamage(stat)} 杀${stat.kills} 联${stat.reactions}`, 40, y, 0x2F7A5A, 8);
         }
       }
+      return;
+    }
+
+    if (castleFocused) {
+      this.renderer.drawText('我方城墙', 2, y, 0xD5317A, 9);
+      const task = this.pendingCouncilTask();
+      const hint = task || (this.buildBar.hasAllTechBuildings()
+        ? '科技已完备'
+        : '点击或确认查看科技装置');
+      this.renderer.drawText(this.fitTextToWidth(hint, 170, 8), 64, y, task ? 0xB97818 : 0x53678A, 8);
       return;
     }
 
@@ -3810,14 +4107,100 @@ export class Game {
   }
 
   private renderGameOver(): void {
-    this.renderer.setColor(COLORS.TEXT);
-    this.renderer.drawText('游戏结束', LOGICAL_WIDTH / 2 - 30, 130, 0xFF0000, 14);
-    if (this.failureGrantedRescue) {
-      this.renderer.drawText('连续失败：获得本关救援军令×1', 28, 158, 0xFFD700, 9);
-    } else if (!this.isSandboxMode()) {
-      this.renderer.drawText('同一关连续失败两次可获救援军令', 24, 158, 0xAAAAFF, 8);
-    }
-    this.renderer.drawText('点击返回标题', LOGICAL_WIDTH / 2 - 40, 190, 0xFCFFCD, 10);
+    const r = this.renderer;
+    const blue = 0x53678A;
+    const red = 0x9B3D55;
+    const pink = 0xD5317A;
+    const gold = 0xB97818;
+    const paper = 0xFFFBE8;
+    const muted = 0x7E8CA2;
+    const centerText = (text: string, y: number, color: number, size: number): void => {
+      const w = r.measureText(text, size).width;
+      r.drawText(text, (LOGICAL_WIDTH - w) / 2, y, color, size);
+    };
+
+    this.renderCommonBackground(16, 0);
+    this.renderPanelStrip(this.spr('ui', 3), 0, 0x9B3D55);
+    const battleName = BATTLE_NAMES[this.battleAN] ?? `第 ${this.currentLevel + 1} 关`;
+    centerText(`败报 · ${battleName}`, 2, paper, 8);
+    centerText('城 防 战 报', 20, blue, 8);
+    centerText('城 防 失 守', 32, red, 19);
+
+    r.setColor(0x7D3A50);
+    r.fillRect(13, 68, 220, 194);
+    r.setColor(paper);
+    r.fillRect(9, 64, 220, 194);
+    r.setColor(blue);
+    r.drawRect(9, 64, 220, 194);
+    r.setColor(0xE7C56A);
+    r.drawRect(12, 67, 214, 188);
+
+    r.setColor(0xF1DFA9);
+    r.fillRect(18, 75, 30, 13);
+    r.drawText('战况', 23, 77, red, 8);
+    r.drawText(`坚守至第 ${this.enemySystem.currentWave}/${this.enemySystem.totalWaves} 波`, 56, 77, blue, 8);
+
+    const stats = [
+      ['歼敌', this.totalKills],
+      ['漏兵', this.battleLeaks],
+      ['余金', this.gold],
+    ] as const;
+    stats.forEach(([label, value], index) => {
+      const x = 18 + index * 68;
+      if (index > 0) {
+        r.setColor(0xD7CDAF);
+        r.fillRect(x - 4, 96, 1, 42);
+      }
+      r.drawText(label, x, 99, muted, 7);
+      const text = `${value}`;
+      r.drawText(text, x + (62 - r.measureText(text, 12).width) / 2, 115, index === 1 ? red : blue, 12);
+    });
+
+    r.setColor(0xD7CDAF);
+    r.fillRect(17, 145, 204, 1);
+    r.setColor(0xF1DFA9);
+    r.fillRect(18, 153, 30, 13);
+    r.drawText('主力', 23, 155, pink, 8);
+    const top = this.battleStats.topDamage(1)[0];
+    const topText = top
+      ? `${top.name} · 伤害 ${this.battleStats.totalDamage(top)} · 击杀 ${top.kills}`
+      : '暂无建筑伤害记录';
+    r.drawText(this.fitTextToWidth(topText, 164, 8), 55, 155, blue, 8);
+    r.drawText(`最高连战 ${this.deployment.state.maxCombo} · 联动 ${this.battleStats.reactionCount}`,
+      20, 174, muted, 8);
+
+    r.setColor(0xD7CDAF);
+    r.fillRect(17, 190, 204, 1);
+    r.setColor(0xF1DFA9);
+    r.fillRect(18, 198, 30, 13);
+    r.drawText('援军', 23, 200, gold, 8);
+    const battleKey = this.currentBattleRecordKey();
+    const rescueReady = hasRescueCommand(this.cheatProfile, battleKey);
+    const streak = this.cheatProfile.lastFailureKey === battleKey
+      ? Math.min(2, this.cheatProfile.consecutiveFailures)
+      : 0;
+    const rescueTitle = this.failureGrantedRescue
+      ? '援军令 ×1 已入账'
+      : rescueReady ? '本关援军令已备' : `连续失利 ${streak}/2`;
+    r.drawText(rescueTitle, 55, 200, rescueReady ? gold : blue, 8);
+    const rescueNote = rescueReady
+      ? '再战后可从菜单主动使用，不会自动消耗'
+      : '同关连续失利两次可获得一枚援军令';
+    r.drawText(this.fitTextToWidth(rescueNote, 194, 8), 20, 221, rescueReady ? 0x8A5D22 : muted, 8);
+
+    const drawButton = (index: number, x: number, label: string): void => {
+      const selected = this.gameOverSelection === index;
+      r.setColor(selected ? 0x7D3A50 : 0xA9A18B);
+      r.fillRect(x + 2, 278, 104, 25);
+      r.setColor(selected ? 0xFFF4C7 : paper);
+      r.fillRect(x, 276, 104, 25);
+      r.setColor(selected ? red : blue);
+      r.drawRect(x, 276, 104, 25);
+      const text = this.gameOverRestarting && index === 0 ? '载入中…' : label;
+      r.drawText(text, x + (104 - r.measureText(text, 9).width) / 2, 282, selected ? red : blue, 9);
+    };
+    drawButton(0, 10, '再战本关');
+    drawButton(1, 126, '返回标题');
   }
 
   private renderVictory(): void {
@@ -3965,7 +4348,7 @@ export class Game {
     this.renderPanelStrip(this.spr('ui', 3), 0, 0xCD3E7E);
     centerText(`第 ${this.council.state.pendingWave ?? 0} 波 · 名将已斩`, 2, paper, 8);
     centerText('军 帐 议 事', 18, blue, 14);
-    centerText('所示军策均可用 · 议后进入不限时整备', 36, muted, 8);
+    centerText('装置在我方城墙建 · 样机是首座建筑优惠', 36, muted, 8);
 
     const offer = this.council.pendingDefinitions;
     offer.forEach((def: CouncilDefinition, index: number) => {
@@ -4006,7 +4389,7 @@ export class Game {
       if (def.prototype) {
         const techName = TOWER_NAMES[11 + def.prototype.techIndex] ?? '对应装置';
         const towerName = TOWER_NAMES[def.prototype.towerType] ?? '对应建筑';
-        const pairing = `配套：${techName}-${formatPercent(def.prototype.techDiscount)} · ${towerName}样机-${formatPercent(def.prototype.towerDiscount)}`;
+        const pairing = `我城${techName}-${formatPercent(def.prototype.techDiscount)} → 首座${towerName}-${formatPercent(def.prototype.towerDiscount)}`;
         r.setColor(0xE8E3C7);
         r.fillRect(19, y + 52, 14, 11);
         r.drawText('配', 22, y + 53, gold, 7);
@@ -4179,6 +4562,7 @@ export class Game {
     this.volume = settings.volume;
     this.displayQuality = settings.scale === 1 ? 1 : 2;
     this.rulesetId = normalizeRuleset(settings.rulesetId);
+    this.dragBuildTutorialCompleted = settings.dragBuildTutorialCompleted;
     this.initializeEnhancementRuntime();
     this.renderer.setDisplayMode(this.displayQuality === 2 ? 'hd' : 'original');
     this.audioSystem.setVolume(this.volume);

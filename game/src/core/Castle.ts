@@ -21,10 +21,19 @@ import {
   MAP_TOP_BAR_H,
   MAP_VIEW_H,
   MAP_VIEW_W,
+  TILE_SIZE,
+  CURSOR_CORNER_O1156,
   CASTLE_RECTS_E1058,
   CASTLE_PARTS_F1063,
   CASTLE_PART_COUNT_J1064,
 } from '../data/gameData';
+
+export interface CastleBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 export class CastleRenderer {
   private renderer: Renderer;
@@ -52,6 +61,68 @@ export class CastleRenderer {
    */
   setOurPartFilter(filter: boolean[] | null): void {
     this.ourPartFilter = filter;
+  }
+
+  /** 当前我城所有可见拼装部件的世界坐标包围盒。 */
+  getOurCastleWorldBounds(): CastleBounds {
+    const anchor = this.mapData.ourCastlePos;
+    const parts = CASTLE_PARTS_F1063[0];
+    const count = CASTLE_PART_COUNT_J1064[0] ?? 0;
+    let minX = Number.POSITIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < count; i++) {
+      const spriteId = parts[i * 3];
+      if (this.ourPartFilter && !this.ourPartFilter[spriteId]) continue;
+      const rect = CASTLE_RECTS_E1058[spriteId];
+      if (!rect) continue;
+      const x = anchor.x + parts[i * 3 + 1];
+      const y = anchor.y + parts[i * 3 + 2];
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x + rect[2]);
+      maxY = Math.max(maxY, y + rect[3]);
+    }
+    if (!Number.isFinite(minX)) return { x: anchor.x, y: anchor.y, width: TILE_SIZE, height: TILE_SIZE };
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+
+  /** 光标所在格与当前城墙可见范围相交，即视为聚焦我城。 */
+  isOurCastleFocusTile(tx: number, ty: number): boolean {
+    if (this.mapData.isOurCastle(tx, ty)) return true;
+    const bounds = this.getOurCastleWorldBounds();
+    const x = tx * TILE_SIZE;
+    const y = ty * TILE_SIZE;
+    return x < bounds.x + bounds.width && x + TILE_SIZE > bounds.x
+      && y < bounds.y + bounds.height && y + TILE_SIZE > bounds.y;
+  }
+
+  /** 使用城墙真实可见范围绘制专用定位框；科技栏打开时增加内框。 */
+  renderOurCastleCursor(selected: boolean): void {
+    const bounds = this.getOurCastleWorldBounds();
+    const px = Math.floor(bounds.x - this.mapData.cameraX);
+    const py = Math.floor(bounds.y - this.mapData.cameraY + MAP_TOP_BAR_H);
+    const w = Math.max(TILE_SIZE, Math.ceil(bounds.width));
+    const h = Math.max(TILE_SIZE, Math.ceil(bounds.height));
+    if (px + w < 0 || px > MAP_VIEW_W || py + h < MAP_TOP_BAR_H || py > MAP_TOP_BAR_H + MAP_VIEW_H) return;
+    const corner = this.spriteLoader?.getUISprite(0) ?? null;
+    if (corner) {
+      for (let k = 0; k < 4; k++) {
+        const cx = px + (w - 7) * CURSOR_CORNER_O1156[k][0];
+        const cy = py + (h - 7) * CURSOR_CORNER_O1156[k][1];
+        this.renderer.drawSpriteTransform(corner, k * 7, 0, 7, 7, cx, cy, 0);
+      }
+    } else {
+      this.renderer.setColor(0xFF6FAE);
+      this.renderer.drawRect(px, py, w, h);
+    }
+    if (selected) {
+      this.renderer.setColor(0xE7C56A);
+      this.renderer.drawRect(px + 2, py + 2, Math.max(1, w - 4), Math.max(1, h - 4));
+    }
+    const marker = this.spriteLoader?.getUISprite(1) ?? null;
+    if (marker) this.renderer.drawImage(marker, px + (w >> 1) - (marker.width >> 1), py - TILE_SIZE);
   }
 
   /** 科技建成后播放原版 w1111/bv 城池部件展开特效。 */

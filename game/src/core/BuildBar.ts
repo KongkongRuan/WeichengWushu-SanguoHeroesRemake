@@ -112,6 +112,15 @@ export interface BuildBarHost {
   onTechBuilt(techIndex: number): void;
 }
 
+export interface BuildBarItemHit {
+  index: number;
+  item: number;
+}
+
+export interface BuildCardHit extends BuildBarItemHit {
+  type: number;
+}
+
 export class BuildBarSystem {
   private renderer: Renderer;
   private spriteLoader: SpriteLoader | null = null;
@@ -137,6 +146,10 @@ export class BuildBarSystem {
   private demolishArmedIndex: number | null = null;
   /** 非原版错误码能表达的临时动作状态。 */
   private actionNotice: string | null = null;
+  /** 连续横向滚动位置；只影响图标轨道，不改变原版条目顺序。 */
+  private itemScrollOffset = 0;
+  private itemScrollStartOffset = 0;
+  private itemScrollActive = false;
 
   // ===== 科技层状态 (原版 a1056/b1059/e1105) =====
   private techBuilt: boolean[] = new Array(5).fill(false);   // a1056: 装置已建
@@ -161,6 +174,14 @@ export class BuildBarSystem {
     this.touchArmedIndex = null;
     this.demolishArmedIndex = null;
     if (this.aw !== 0) this.configureVisibleItems();
+  }
+
+  private get itemSpacing(): number {
+    return this.touchOptimized ? TOUCH_ITEM_SPACING : 20;
+  }
+
+  private get maxItemScrollOffset(): number {
+    return Math.max(0, this.items().length - this.aF) * this.itemSpacing;
   }
 
   // ============================================================
@@ -202,6 +223,100 @@ export class BuildBarSystem {
     return TOWER_COST_Q1100[origType] ?? 0;
   }
 
+  get isItemStripScrollable(): boolean {
+    return this.aw !== 0 && this.items().length > this.aF;
+  }
+
+  get itemStripScrollOffset(): number {
+    return this.itemScrollOffset;
+  }
+
+  /** 建造/科技图标轨道热区；桌面鼠标和触屏共用。 */
+  hitTestItemStrip(x: number, y: number): boolean {
+    if (this.aw === 0 || this.au <= 0) return false;
+    const stripY = BAR_BOTTOM - this.au - this.av + 8;
+    const hitTop = stripY - (this.touchOptimized ? 4 : 1);
+    const hitHeight = this.touchOptimized ? TOUCH_AU_MAX + 6 : Math.max(this.au, 18) + 3;
+    return x >= 0 && x < LOGICAL_WIDTH && y >= hitTop && y <= hitTop + hitHeight;
+  }
+
+  private itemHitAt(x: number, y: number): BuildBarItemHit | null {
+    if (!this.hitTestItemStrip(x, y)) return null;
+    if (x < this.aG || x >= this.aG + this.aF * this.itemSpacing) return null;
+    const index = Math.floor((x - this.aG + this.itemScrollOffset) / this.itemSpacing);
+    const item = this.items()[index];
+    return item == null ? null : { index, item };
+  }
+
+  /** 只有已解锁的真实建筑卡片可以从栏内直接拖到地图。 */
+  hitTestBuildCard(x: number, y: number): BuildCardHit | null {
+    if (this.aC !== BAR_CAT_BUILD) return null;
+    const hit = this.itemHitAt(x, y);
+    if (!hit || hit.item < 0 || hit.item >= 11 || !this.isTowerUnlocked(hit.item)) return null;
+    return { ...hit, type: hit.item };
+  }
+
+  beginItemScroll(): boolean {
+    if (!this.isItemStripScrollable) return false;
+    this.itemScrollStartOffset = this.itemScrollOffset;
+    this.itemScrollActive = true;
+    this.touchArmedIndex = null;
+    this.demolishArmedIndex = null;
+    this.actionNotice = null;
+    this.o = -1;
+    return true;
+  }
+
+  updateItemScroll(deltaX: number): void {
+    if (!this.itemScrollActive) return;
+    this.itemScrollOffset = Math.max(
+      0,
+      Math.min(this.maxItemScrollOffset, this.itemScrollStartOffset - deltaX),
+    );
+    this.aE = Math.max(0, Math.min(this.aB, Math.floor(this.itemScrollOffset / this.itemSpacing)));
+  }
+
+  endItemScroll(): void {
+    if (!this.itemScrollActive) return;
+    this.itemScrollActive = false;
+    const start = Math.max(0, Math.min(
+      Math.max(0, this.items().length - this.aF),
+      Math.round(this.itemScrollOffset / this.itemSpacing),
+    ));
+    this.aE = start;
+    this.itemScrollOffset = start * this.itemSpacing;
+    const lastVisible = Math.min(this.aB, start + this.aF - 1);
+    if (this.aD < start || this.aD > lastVisible) {
+      this.aD = Math.max(start, Math.min(lastVisible, this.aD));
+    }
+  }
+
+  /** 同一个 pointer 从建筑卡片跨过阈值后立即接管塔影，不等待底栏收起动画。 */
+  beginDirectPlacement(hit: BuildCardHit): boolean {
+    if (!this.host || this.aw === 0 || this.aC !== BAR_CAT_BUILD) return false;
+    if (this.host.getTowerCount() >= 30) {
+      this.o = 7;
+      return false;
+    }
+    if (!this.isTowerUnlocked(hit.type)) {
+      this.o = 2;
+      return false;
+    }
+    this.aD = hit.index;
+    this.bw = hit.type;
+    this.aw = 0;
+    this.au = 0;
+    this.av = 0;
+    this.ay = null;
+    this.touchArmedIndex = null;
+    this.demolishArmedIndex = null;
+    this.actionNotice = null;
+    this.itemScrollActive = false;
+    this.host.deselectTower();
+    this.host.enterPlacement(hit.type);
+    return true;
+  }
+
   // ============================================================
   // 存档 (任务B-4: b1059/装置/塔解锁纳入存档)
   // ============================================================
@@ -239,6 +354,9 @@ export class BuildBarSystem {
     this.touchArmedIndex = null;
     this.demolishArmedIndex = null;
     this.actionNotice = null;
+    this.itemScrollOffset = 0;
+    this.itemScrollStartOffset = 0;
+    this.itemScrollActive = false;
   }
 
   /**
@@ -269,6 +387,9 @@ export class BuildBarSystem {
     this.touchArmedIndex = null;
     this.demolishArmedIndex = null;
     this.actionNotice = null;
+    this.itemScrollOffset = 0;
+    this.itemScrollStartOffset = 0;
+    this.itemScrollActive = false;
     this.configureVisibleItems();
     this.aw = 1;
   }
@@ -277,11 +398,12 @@ export class BuildBarSystem {
     const items = this.items();
     this.aB = items.length - 1;
     this.aF = Math.min(this.touchOptimized ? TOUCH_VISIBLE_ITEMS : 8, items.length);
-    const spacing = this.touchOptimized ? TOUCH_ITEM_SPACING : 18;
+    const spacing = this.itemSpacing;
     this.aG = (LOGICAL_WIDTH - this.aF * spacing) >> 1;
     const maxStart = Math.max(0, items.length - this.aF);
     this.aE = Math.max(0, Math.min(this.aE, maxStart));
     if (this.aD < this.aE || this.aD >= this.aE + this.aF) this.aD = this.aE;
+    this.itemScrollOffset = Math.max(0, Math.min(this.maxItemScrollOffset, this.aE * spacing));
   }
 
   /** 请求关闭 (原版 aw=2 滑出) */
@@ -289,6 +411,7 @@ export class BuildBarSystem {
     this.touchArmedIndex = null;
     this.demolishArmedIndex = null;
     this.actionNotice = null;
+    this.itemScrollActive = false;
     if (this.aw !== 0) this.aw = 2;
   }
 
@@ -371,6 +494,7 @@ export class BuildBarSystem {
         this.aE--;
       }
     }
+    this.itemScrollOffset = Math.max(0, Math.min(this.maxItemScrollOffset, this.aE * this.itemSpacing));
   }
 
   /** 确认选中 (原版 M() 开火键处理 行8353-8466) */
@@ -400,7 +524,7 @@ export class BuildBarSystem {
         const buildCost = this.host.getBuildCostDetail?.(item).finalCost
           ?? this.host.getBuildCost?.(item)
           ?? TOWER_COST_Q1100[item];
-        if (this.host.getGold() < buildCost) {
+        if (this.host.getGold() < buildCost && !this.touchOptimized) {
           this.o = 0; // 金不足
           return;
         }
@@ -497,52 +621,48 @@ export class BuildBarSystem {
       // 图标条区域
       const iconHitHeight = this.touchOptimized ? TOUCH_AU_MAX : Math.max(this.au, 16);
       if (y >= stripY - (this.touchOptimized ? 4 : 0) && y <= stripY + iconHitHeight + 2) {
-        if (this.touchOptimized && x < this.aG) {
+        if (x < this.aG) {
           this.pageTouchItems(-1);
           return true;
         }
-        if (this.touchOptimized && x >= this.aG + this.aF * TOUCH_ITEM_SPACING) {
+        if (x >= this.aG + this.aF * this.itemSpacing) {
           this.pageTouchItems(1);
           return true;
         }
-        const spacing = this.touchOptimized ? TOUCH_ITEM_SPACING : 20;
-        for (let i = 0; i < this.aF; i++) {
-          const ix = this.aG + i * spacing - (this.touchOptimized ? 0 : 4);
-          const hitWidth = this.touchOptimized ? TOUCH_ITEM_SPACING : 24;
-          if (x >= ix && x <= ix + hitWidth) {
-            const idx = this.aE + i;
-            if (idx > this.aB) return true;
-            if (this.touchOptimized) {
-              const item = this.items()[idx];
-              const alreadyArmed = this.touchArmedIndex === idx;
-              this.aD = idx;
-              this.o = -1;
-              this.actionNotice = null;
-              this.demolishArmedIndex = null;
+        const hit = this.itemHitAt(x, y);
+        if (hit) {
+          const idx = hit.index;
+          if (idx > this.aB) return true;
+          if (this.touchOptimized) {
+            const item = hit.item;
+            const alreadyArmed = this.touchArmedIndex === idx;
+            this.aD = idx;
+            this.o = -1;
+            this.actionNotice = null;
+            this.demolishArmedIndex = null;
 
-              if (item === ACTION_CANCEL) {
-                // 取消没有付费或破坏性，单击立即关闭。
-                this.close();
-              } else if (this.aC === BAR_CAT_BUILD) {
-                // 建造卡片采用快速流程：点卡片后立即进入放置预览。
-                this.touchArmedIndex = null;
-                this.confirm();
-              } else if (alreadyArmed) {
-                // 升级、科技与塔操作：第一次点选，第二次点击同一项才执行。
-                this.confirm();
-              } else {
-                this.touchArmedIndex = idx;
-              }
-            } else if (idx === this.aD) {
-              this.confirm(); // 再点同一图标=确认
+            if (item === ACTION_CANCEL) {
+              // 取消没有付费或破坏性，单击立即关闭。
+              this.close();
+            } else if (this.aC === BAR_CAT_BUILD) {
+              // 建造卡片采用快速流程：点卡片后立即进入放置预览。
+              this.touchArmedIndex = null;
+              this.confirm();
+            } else if (alreadyArmed) {
+              // 升级、科技与塔操作：第一次点选，第二次点击同一项才执行。
+              this.confirm();
             } else {
-              this.aD = idx;
-              this.o = -1;
-              this.actionNotice = null;
-              this.demolishArmedIndex = null;
+              this.touchArmedIndex = idx;
             }
-            return true;
+          } else if (idx === this.aD) {
+            this.confirm(); // 再点同一图标=确认
+          } else {
+            this.aD = idx;
+            this.o = -1;
+            this.actionNotice = null;
+            this.demolishArmedIndex = null;
           }
+          return true;
         }
         return true;
       }
@@ -557,12 +677,13 @@ export class BuildBarSystem {
   }
 
   private pageTouchItems(direction: number): void {
-    if (!this.touchOptimized || this.aF <= 0) return;
+    if (this.aF <= 0) return;
     const maxStart = Math.max(0, this.aB - this.aF + 1);
     const next = Math.max(0, Math.min(maxStart, this.aE + direction * this.aF));
     if (next === this.aE) return;
     this.aE = next;
     this.aD = next;
+    this.itemScrollOffset = next * this.itemSpacing;
     this.touchArmedIndex = null;
     this.demolishArmedIndex = null;
     this.actionNotice = null;
@@ -636,21 +757,22 @@ export class BuildBarSystem {
     if (!ui15) return;
     const items = this.items();
     const iconSize = this.touchOptimized ? 24 : 16;
-    const spacing = this.touchOptimized ? TOUCH_ITEM_SPACING : 20;
+    const spacing = this.itemSpacing;
     const iconY = stripY + (this.touchOptimized ? 5 : 1);
 
-    if (this.touchOptimized) {
-      const canPrev = this.aE > 0;
-      const canNext = this.aE + this.aF <= this.aB;
-      r.drawText('‹', 4, stripY + 4, canPrev ? COLOR_TEXT : 0x999999, 22);
-      r.drawText('›', LOGICAL_WIDTH - 14, stripY + 4, canNext ? COLOR_TEXT : 0x999999, 22);
+    if (this.isItemStripScrollable) {
+      const canPrev = this.itemScrollOffset > 0;
+      const canNext = this.itemScrollOffset < this.maxItemScrollOffset;
+      const arrowSize = this.touchOptimized ? 22 : 15;
+      r.drawText('‹', 4, stripY + (this.touchOptimized ? 4 : 1), canPrev ? COLOR_TEXT : 0x999999, arrowSize);
+      r.drawText('›', LOGICAL_WIDTH - (this.touchOptimized ? 14 : 11),
+        stripY + (this.touchOptimized ? 4 : 1), canNext ? COLOR_TEXT : 0x999999, arrowSize);
     }
 
-    for (let i = 0; i < this.aF; i++) {
-      const idx = this.aE + i;
-      if (idx > this.aB) break;
+    for (let idx = 0; idx <= this.aB; idx++) {
       const item = items[idx];
-      const cellX = this.aG + i * spacing;
+      const cellX = Math.round(this.aG + idx * spacing - this.itemScrollOffset);
+      if (cellX + spacing <= this.aG || cellX >= this.aG + this.aF * spacing) continue;
       const x = cellX + (this.touchOptimized ? 8 : 0);
 
       // 选中双框高亮 (原版行10589-10607: 色16580557 双drawRect)

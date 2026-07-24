@@ -35,6 +35,7 @@ const NON_PLAYING_ANIMATION_CADENCE: Readonly<Partial<Record<GameState, NonPlayi
   [GameState.SETTINGS]: 'original-ui',
   [GameState.COUNCIL]: 'original-ui',
   [GameState.LEVEL_COMPLETE]: 'original-ui',
+  [GameState.GAME_OVER]: 'original-ui',
   [GameState.LOADING_SCREEN]: 'cinematic',
   [GameState.LEVEL_INTRO]: 'cinematic',
   [GameState.ENDING_ANIM]: 'cinematic',
