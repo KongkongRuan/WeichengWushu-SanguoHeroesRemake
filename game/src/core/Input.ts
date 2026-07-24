@@ -44,6 +44,11 @@ export interface PointerSequenceEvent {
 /** 返回 true 会认领整个 pointer 序列，并抑制旧的 tap/drag 回调。 */
 type PointerSequenceCallback = (event: PointerSequenceEvent) => boolean | void;
 
+/** 轻点与长按共用同一个时间边界，避免两种手势之间出现无响应区间。 */
+export const LONG_PRESS_THRESHOLD_MS = 650;
+/** 使用 CSS 像素，避免画布缩放或 DPR 改变手势容差。 */
+export const TAP_MOVE_THRESHOLD_CSS = 10;
+
 export class InputSystem {
   private renderer: Renderer;
   private canvas: HTMLCanvasElement;
@@ -69,9 +74,9 @@ export class InputSystem {
   private sequenceClaimed = false;
   private longPressTimer: number | null = null;
 
-  private readonly longPressThreshold = 500;
+  private readonly longPressThreshold = LONG_PRESS_THRESHOLD_MS;
   /** 使用 CSS 像素，避免画布缩放后拖动阈值忽大忽小。 */
-  private readonly tapThresholdCss = 10;
+  private readonly tapThresholdCss = TAP_MOVE_THRESHOLD_CSS;
   private readonly touchLayoutOverride: boolean | null;
   private touchLayoutActive: boolean;
 

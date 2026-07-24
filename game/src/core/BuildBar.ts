@@ -12,7 +12,7 @@
  *   打开入口 战斗确认键处理 行14538-14607 (塔→j(2..7), 可建格→j(0), 我城格→j(1))
  *
  * H5触屏适配 (注释标注的简化点):
- *   - 触屏建筑/升级/科技/塔操作第一次点选、第二次确认；建筑卡片可上拖快速建造；点地图关栏
+ *   - 触屏升级单击执行，建筑/科技/其他塔操作先预览再确认；建筑卡片可上拖快速建造；点地图关栏
  *   - 未解锁塔图标置灰 (原版不置灰, 仅选中时提示 b1015[115]; 按任务要求置灰)
  *   - 科技面板保留原版的建筑解锁和城堡部件状态
  *   - 明细区通过 TowerSystem 合成完整塔模型，与原版 a(type,level,...) 一致
@@ -140,7 +140,7 @@ export class BuildBarSystem {
   private ay: Tower | null = null; // 选中的已建塔 (类别2)
   private o = -1;   // 提示消息id (-1=无, 原版 o 字段)
   private touchOptimized = false;
-  /** 触屏端必须由用户明确点过一次，不能把打开栏时的默认高亮当成确认。 */
+  /** 需要二次确认的触屏动作必须由用户明确点过一次，不能把默认高亮当成确认。 */
   private touchArmedIndex: number | null = null;
   /** 键盘/软键拆除必须二次确认，避免动态状态或误触直接破坏建筑。 */
   private demolishArmedIndex: number | null = null;
@@ -608,7 +608,7 @@ export class BuildBarSystem {
 
   /**
    * 触屏点击 (H5适配; 返回是否消费了该点击)
-   * 升级/科技/塔操作点图标=选中(再次点击=确认); 点栏外地图=关栏
+   * 升级单击执行；建筑/科技/其他塔操作再次点击确认；点栏外地图关栏。
    */
   handleTap(x: number, y: number): boolean {
     if (this.aw === 0) return false;
@@ -644,8 +644,13 @@ export class BuildBarSystem {
             if (item === ACTION_CANCEL) {
               // 取消没有付费或破坏性，单击立即关闭。
               this.close();
+            } else if (this.aC === BAR_CAT_TOWER && item === ACTION_UPGRADE) {
+              // 建筑已经由地图轻点明确选中，升级属于低风险动作：单击升级一次。
+              // 拆除和其他仍需要预览/确认的动作继续沿用武装状态。
+              this.touchArmedIndex = null;
+              this.confirm();
             } else if (alreadyArmed) {
-              // 建筑、升级、科技与塔操作：第一次点选看详情，第二次点击同一项才执行。
+              // 建筑、科技与其他塔操作：第一次点选看详情，第二次点击同一项才执行。
               this.confirm();
             } else {
               this.touchArmedIndex = idx;
@@ -917,6 +922,10 @@ export class BuildBarSystem {
       desc = hero ? `${hero.name}：${effect}` : effect;
     } else if (this.aC === BAR_CAT_TOWER && item >= 16) {
       desc = ORIG_ACTION_DESC[item - 16] ?? '';
+    }
+    if (this.touchOptimized && this.aC === BAR_CAT_TOWER && item === ACTION_UPGRADE) {
+      const shortcut = '长按建筑可快速升级';
+      desc = desc ? `${shortcut} · ${desc}` : shortcut;
     }
     if (this.o < 0 && !this.actionNotice && buildCostDetail?.explanations.length) {
       const priceNotice = `造价说明：${buildCostDetail.explanations.join('，')}`;

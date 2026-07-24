@@ -8,9 +8,10 @@ import { Renderer } from './Renderer';
 import { MapData } from './MapData';
 import { EnemySystem } from './Enemy';
 import { TowerSystem } from './Tower';
+import type { Tower } from './Tower';
 import { CastleRenderer } from './Castle';
 import { AudioSystem } from './AudioSystem';
-import { InputSystem } from './Input';
+import { InputSystem, LONG_PRESS_THRESHOLD_MS, TAP_MOVE_THRESHOLD_CSS } from './Input';
 import type { PointerSequenceEvent } from './Input';
 import { UISystem, Button } from './UI';
 import { SpriteLoader } from './SpriteLoader';
@@ -142,6 +143,7 @@ const SOFTKEY_MENU = 0;
 /** 拖塔时让塔影位于拇指上方，避免手指遮住可建/不可建提示。 */
 const TOUCH_BUILD_DRAG_LIFT = 24;
 const TOUCH_MAP_TOP = 20;
+const UPGRADE_HOLD_REVEAL_MS = 100;
 
 type BuildGestureState =
   | 'strip-pending'
@@ -161,6 +163,16 @@ interface ActiveBuildGesture {
   edgeKey: string;
   edgeDwellMs: number;
   committed: boolean;
+}
+
+type UpgradeHoldResult = 'charging' | 'success' | 'failure';
+
+interface ActiveUpgradeHold {
+  pointerId: number;
+  tower: Tower;
+  elapsedMs: number;
+  cost: number | null;
+  result: UpgradeHoldResult;
 }
 
 // 标题菜单项 (back[25] 帧号): 0王者之路/1自由模式/2继续游戏/3设置/4帮助/5关于/6退出
@@ -325,6 +337,7 @@ export class Game {
   private mapDragLastX: number = -1;
   private mapDragLastY: number = -1;
   private buildGesture: ActiveBuildGesture | null = null;
+  private upgradeHold: ActiveUpgradeHold | null = null;
   private dragBuildTutorialCompleted = false;
 
   // 存档槽位 (0-3) — SAVE_PANEL 保留
@@ -480,15 +493,7 @@ export class Game {
           this.uiSystem.showMessage('拖动塔影，松手建造', 90);
         }
       },
-      upgradeTower: (tower) => {
-        const upgraded = this.towerSystem.upgradeTower(tower);
-        if (!upgraded) {
-          this.uiSystem.showMessage(this.towerSystem.getUpgradeFailureMessage() || BAR_MESSAGES[0], 90);
-        } else {
-          this.syncGold();
-        }
-        return upgraded;
-      },
+      upgradeTower: (tower) => this.tryUpgradeTower(tower),
       demolishTower: (tower) => {
         this.towerSystem.sellTower(tower); // 返还公式经 demolishRefundProvider = 原版 b(int)
         this.syncGold();
@@ -531,6 +536,21 @@ export class Game {
 
     this.uiSystem.setButtonCallback((btn) => this.handleButton(btn));
     this.uiSystem.setTechTree(this.techTree);
+  }
+
+  /** 所有升级入口共用同一套门禁、失败提示和金币同步。 */
+  private tryUpgradeTower(tower: Tower): boolean {
+    if (tower.type === 10 && tower.gateState !== 0) {
+      this.uiSystem.showMessage('断龙闸动作尚未结束', 90);
+      return false;
+    }
+    const upgraded = this.towerSystem.upgradeTower(tower);
+    if (!upgraded) {
+      this.uiSystem.showMessage(this.towerSystem.getUpgradeFailureMessage() || BAR_MESSAGES[0], 90);
+    } else {
+      this.syncGold();
+    }
+    return upgraded;
   }
 
   private setupEnhancementEvents(): void {
@@ -878,11 +898,14 @@ export class Game {
         };
         return true;
       }
+      this.startUpgradeHold(event);
       return false;
     }
 
     const gesture = this.buildGesture;
-    if (!gesture || gesture.pointerId !== event.pointerId) return false;
+    if (!gesture || gesture.pointerId !== event.pointerId) {
+      return this.handleUpgradeHoldPointer(event);
+    }
     gesture.lastX = event.x;
     gesture.lastY = event.y;
 
@@ -948,6 +971,95 @@ export class Game {
       return true;
     }
     return true;
+  }
+
+  /**
+   * 战场长按升级先保持为未认领的候选手势；明显移动时清除候选，Input 随即接管为地图拖动。
+   */
+  private startUpgradeHold(event: PointerSequenceEvent): void {
+    this.upgradeHold = null;
+    if (!this.inputSystem?.isTouchOptimized
+      || (event.pointerType !== 'touch' && event.pointerType !== 'pen')
+      || this.buildBar.isOpen
+      || this.towerSystem.isBuildMode
+      || !this.mapData.isScreenInsideMap(event.x, event.y)) return;
+
+    const tile = this.mapData.screenToTile(event.x, event.y);
+    const tower = this.towerSystem.getTowerAt(tile.tx, tile.ty);
+    if (!tower) return;
+    this.upgradeHold = {
+      pointerId: event.pointerId,
+      tower,
+      elapsedMs: 0,
+      cost: this.towerSystem.getUpgradeCost(tower),
+      result: 'charging',
+    };
+  }
+
+  private handleUpgradeHoldPointer(event: PointerSequenceEvent): boolean {
+    const hold = this.upgradeHold;
+    if (!hold || hold.pointerId !== event.pointerId) return false;
+
+    if (event.phase === 'cancel') {
+      const consumed = hold.result !== 'charging';
+      this.upgradeHold = null;
+      return consumed;
+    }
+
+    if (event.phase === 'move') {
+      if (hold.result !== 'charging') return true;
+      if (event.cssDistance >= TAP_MOVE_THRESHOLD_CSS) {
+        this.upgradeHold = null;
+        return false;
+      }
+      hold.elapsedMs = Math.max(hold.elapsedMs, event.durationMs);
+      if (hold.elapsedMs >= LONG_PRESS_THRESHOLD_MS) {
+        this.commitUpgradeHold(hold);
+        return true;
+      }
+      return false;
+    }
+
+    if (event.phase === 'up') {
+      hold.elapsedMs = Math.max(hold.elapsedMs, event.durationMs);
+      if (hold.result === 'charging'
+        && event.cssDistance < TAP_MOVE_THRESHOLD_CSS
+        && hold.elapsedMs >= LONG_PRESS_THRESHOLD_MS) {
+        this.commitUpgradeHold(hold);
+      }
+      const consumed = hold.result !== 'charging';
+      this.upgradeHold = null;
+      return consumed;
+    }
+    return hold.result !== 'charging';
+  }
+
+  private updateUpgradeHold(elapsedMs: number): void {
+    const hold = this.upgradeHold;
+    if (!hold || hold.result !== 'charging' || elapsedMs <= 0) return;
+    if (!this.towerSystem.getTowers().includes(hold.tower)) {
+      this.upgradeHold = null;
+      return;
+    }
+    hold.elapsedMs += elapsedMs;
+    if (hold.elapsedMs >= LONG_PRESS_THRESHOLD_MS) this.commitUpgradeHold(hold);
+  }
+
+  private commitUpgradeHold(hold: ActiveUpgradeHold): void {
+    if (hold.result !== 'charging') return;
+    hold.elapsedMs = LONG_PRESS_THRESHOLD_MS;
+    if (!this.towerSystem.getTowers().includes(hold.tower)) {
+      hold.result = 'failure';
+      this.uiSystem.showMessage('建筑已被摧毁，升级取消', 75);
+    } else {
+      hold.result = this.tryUpgradeTower(hold.tower) ? 'success' : 'failure';
+      if (hold.result === 'success') {
+        this.mapData.setBuildingBox(hold.tower.x, hold.tower.y, false);
+      }
+    }
+    if (typeof navigator !== 'undefined') {
+      navigator.vibrate?.(hold.result === 'success' ? 18 : [24, 36, 24]);
+    }
   }
 
   private isPointerOnBuildPreview(x: number, y: number): boolean {
@@ -2769,7 +2881,12 @@ export class Game {
     this.uiSystem.update(elapsedMs);
 
     const playingActive = this.state === GameState.PLAYING && !this.uiSystem.isPaused();
-    if (playingActive) this.updatePlacementEdgeScroll(elapsedMs);
+    if (playingActive) {
+      this.updatePlacementEdgeScroll(elapsedMs);
+      this.updateUpgradeHold(elapsedMs);
+    } else if (this.upgradeHold) {
+      this.upgradeHold = null;
+    }
     const animationCadence = animationCadenceForState(this.state);
     if (playingActive) {
       this.originalUiClock.reset();
@@ -3908,6 +4025,9 @@ export class Game {
       }
     }
 
+    // 长按升级属于战场悬浮反馈：压在单位之上，但不遮挡顶栏和底部操作栏。
+    this.renderUpgradeHold();
+
     // 渲染UI
     this.renderTopBar();
     // 原版底部: J() 底条常驻 (aw=0时亦为米色条, 行7866-7908)
@@ -3926,6 +4046,60 @@ export class Game {
       this.enemySystem.currentWave, this.enemySystem.totalWaves);
     this.renderEnhancementHud();
     this.renderDragBuildTutorial();
+  }
+
+  private renderUpgradeHold(): void {
+    const hold = this.upgradeHold;
+    if (!hold || (hold.result === 'charging' && hold.elapsedMs < UPGRADE_HOLD_REVEAL_MS)) return;
+    if (!this.towerSystem.getTowers().includes(hold.tower)) return;
+
+    const tower = hold.tower;
+    const type = tower.type === 19 ? 0 : tower.type;
+    const footprint = TOWER_FOOTPRINT_O1098[type] ?? 1;
+    const screen = this.mapData.tileToScreen(tower.x, tower.y);
+    const centerX = screen.x + footprint * TILE_SIZE / 2;
+    const barWidth = 54;
+    const barHeight = 7;
+    const barX = Math.round(Math.max(3, Math.min(LOGICAL_WIDTH - barWidth - 3, centerX - barWidth / 2)));
+    let labelY = Math.round(screen.y - 21);
+    let barY = Math.round(screen.y - 10);
+    if (labelY < MAP_TOP_BAR_H + 2) {
+      barY = Math.round(screen.y + footprint * TILE_SIZE + 4);
+      labelY = barY + 9;
+    }
+
+    const progress = hold.result === 'charging'
+      ? Math.max(0, Math.min(1,
+        (hold.elapsedMs - UPGRADE_HOLD_REVEAL_MS)
+          / (LONG_PRESS_THRESHOLD_MS - UPGRADE_HOLD_REVEAL_MS)))
+      : 1;
+    const color = hold.result === 'success'
+      ? 0x62AD70
+      : hold.result === 'failure'
+        ? 0xB23A48
+        : 0xD6A94D;
+    const label = hold.result === 'success'
+      ? `升级成功 Lv.${tower.level}`
+      : hold.result === 'failure'
+        ? '升级未完成'
+        : hold.cost == null
+          ? '长按升级'
+          : `升级 ${hold.cost}金`;
+
+    const vctx = this.renderer.virtualContext;
+    vctx.save();
+    vctx.globalAlpha = 0.88;
+    this.renderer.setColor(0x1B1A18);
+    this.renderer.fillRect(barX, barY, barWidth, barHeight);
+    this.renderer.setColor(color);
+    this.renderer.fillRect(barX + 2, barY + 2, Math.round((barWidth - 4) * progress), barHeight - 4);
+    this.renderer.setColor(0xFCFFCD);
+    this.renderer.drawRect(barX, barY, barWidth, barHeight);
+    vctx.restore();
+
+    const labelWidth = this.renderer.measureText(label, 8).width;
+    const labelX = Math.max(2, Math.min(LOGICAL_WIDTH - labelWidth - 2, centerX - labelWidth / 2));
+    this.renderer.drawText(label, labelX, labelY, color, 8);
   }
 
   private renderEnhancementHud(): void {

@@ -8,6 +8,7 @@ import {
 } from '../src/core/BuildBar';
 import { CastleRenderer } from '../src/core/Castle';
 import { Game, GameState } from '../src/core/Game';
+import { LONG_PRESS_THRESHOLD_MS } from '../src/core/Input';
 import type { PointerSequenceEvent, PointerSequencePhase } from '../src/core/Input';
 import {
   PLACEMENT_EDGE_MAX_SPEED,
@@ -139,6 +140,7 @@ function pointer(
   cssDistance: number,
   startX = 60,
   startY = 230,
+  durationMs = 40,
 ): PointerSequenceEvent {
   return {
     phase,
@@ -151,7 +153,7 @@ function pointer(
     clientX: x,
     clientY: y,
     cssDistance,
-    durationMs: 40,
+    durationMs,
     cancelReason: phase === 'cancel' ? 'pointercancel' : undefined,
   };
 }
@@ -159,6 +161,11 @@ function pointer(
 interface GestureHarness {
   buildGesture: unknown;
   handleBuildPointerSequence(event: PointerSequenceEvent): boolean;
+}
+
+interface UpgradeHoldHarness extends GestureHarness {
+  upgradeHold: { result: string } | null;
+  updateUpgradeHold(elapsedMs: number): void;
 }
 
 interface GameOverHarness {
@@ -236,6 +243,40 @@ function placementTapHarness(pointerOnPreview: boolean) {
   return { game, commits: () => commits };
 }
 
+function upgradeHoldHarness(upgradeSucceeds = true) {
+  let upgrades = 0;
+  let selections = 0;
+  const tower = { x: 4, y: 5, type: 1, level: 1 };
+  const game = Object.create(Game.prototype) as UpgradeHoldHarness & Record<string, unknown>;
+  Object.assign(game, {
+    state: GameState.PLAYING,
+    inputSystem: { isTouchOptimized: true },
+    uiSystem: { isPaused: () => false, showMessage() {} },
+    buildBar: { isOpen: false, hitTestItemStrip: () => false },
+    towerSystem: {
+      isBuildMode: false,
+      getTowerAt: () => tower,
+      getTowers: () => [tower],
+      getUpgradeCost: () => 40,
+    },
+    mapData: {
+      isScreenInsideMap: () => true,
+      screenToTile: () => ({ tx: tower.x, ty: tower.y }),
+      setBuildingBox: () => { selections++; },
+    },
+    tryUpgradeTower: () => {
+      upgrades++;
+      if (upgradeSucceeds) tower.level++;
+      return upgradeSucceeds;
+    },
+  });
+  return {
+    game,
+    tower,
+    values: () => ({ upgrades, selections }),
+  };
+}
+
 test('建筑卡横拖只滚列表，向上拖出栏才交接塔影并在松手时提交一次', () => {
   const horizontal = gestureHarness();
   horizontal.game.handleBuildPointerSequence(pointer('down', 60, 230, 0));
@@ -274,6 +315,90 @@ test('建筑卡明显向下拖动后松手不会误触卡片', () => {
   assert.deepEqual(gesture.values(), {
     directStarts: 0, scrollStarts: 0, scrollUpdates: 0, scrollEnds: 0, taps: 0, commits: 0,
   });
+});
+
+test('建筑长按在阈值前松手仍交给普通点击流程，不提前升级', () => {
+  const hold = upgradeHoldHarness();
+  assert.equal(hold.game.handleBuildPointerSequence(pointer('down', 72, 96, 0, 72, 96, 0)), false);
+  hold.game.updateUpgradeHold(LONG_PRESS_THRESHOLD_MS - 1);
+  assert.deepEqual(hold.values(), { upgrades: 0, selections: 0 });
+  assert.equal(hold.game.handleBuildPointerSequence(pointer(
+    'up', 72, 96, 0, 72, 96, LONG_PRESS_THRESHOLD_MS - 1,
+  )), false);
+  assert.equal(hold.game.upgradeHold, null);
+});
+
+test('建筑长按达到阈值只升级一次，持续按住和抬手都不会重复提交', () => {
+  const hold = upgradeHoldHarness();
+  hold.game.handleBuildPointerSequence(pointer('down', 72, 96, 0, 72, 96, 0));
+  hold.game.updateUpgradeHold(LONG_PRESS_THRESHOLD_MS);
+  assert.deepEqual(hold.values(), { upgrades: 1, selections: 1 });
+  assert.equal(hold.tower.level, 2);
+  assert.equal(hold.game.upgradeHold?.result, 'success');
+
+  hold.game.updateUpgradeHold(LONG_PRESS_THRESHOLD_MS * 3);
+  assert.deepEqual(hold.values(), { upgrades: 1, selections: 1 });
+  assert.equal(hold.game.handleBuildPointerSequence(pointer(
+    'up', 72, 96, 0, 72, 96, LONG_PRESS_THRESHOLD_MS * 4,
+  )), true);
+  assert.equal(hold.game.upgradeHold, null);
+});
+
+test('建筑长按即使两帧之间直接抬手，也会按事件时长完成一次升级', () => {
+  const hold = upgradeHoldHarness();
+  hold.game.handleBuildPointerSequence(pointer('down', 72, 96, 0, 72, 96, 0));
+  assert.equal(hold.game.handleBuildPointerSequence(pointer(
+    'up', 72, 96, 0, 72, 96, LONG_PRESS_THRESHOLD_MS,
+  )), true);
+  assert.deepEqual(hold.values(), { upgrades: 1, selections: 1 });
+});
+
+test('建筑长按发生明显移动或 pointercancel 时取消，不阻止地图拖动', () => {
+  const moved = upgradeHoldHarness();
+  moved.game.handleBuildPointerSequence(pointer('down', 72, 96, 0, 72, 96, 0));
+  assert.equal(moved.game.handleBuildPointerSequence(pointer('move', 82, 96, 10, 72, 96, 200)), false);
+  moved.game.updateUpgradeHold(LONG_PRESS_THRESHOLD_MS);
+  assert.deepEqual(moved.values(), { upgrades: 0, selections: 0 });
+  assert.equal(moved.game.upgradeHold, null);
+
+  const cancelled = upgradeHoldHarness();
+  cancelled.game.handleBuildPointerSequence(pointer('down', 72, 96, 0, 72, 96, 0));
+  assert.equal(cancelled.game.handleBuildPointerSequence(pointer('cancel', 72, 96, 0, 72, 96, 200)), false);
+  cancelled.game.updateUpgradeHold(LONG_PRESS_THRESHOLD_MS);
+  assert.deepEqual(cancelled.values(), { upgrades: 0, selections: 0 });
+});
+
+test('建筑长按升级失败也只尝试一次，并消费长按后的抬手事件', () => {
+  const hold = upgradeHoldHarness(false);
+  hold.game.handleBuildPointerSequence(pointer('down', 72, 96, 0, 72, 96, 0));
+  hold.game.updateUpgradeHold(LONG_PRESS_THRESHOLD_MS);
+  assert.deepEqual(hold.values(), { upgrades: 1, selections: 0 });
+  assert.equal(hold.game.upgradeHold?.result, 'failure');
+  hold.game.updateUpgradeHold(LONG_PRESS_THRESHOLD_MS);
+  assert.deepEqual(hold.values(), { upgrades: 1, selections: 0 });
+  assert.equal(hold.game.handleBuildPointerSequence(pointer(
+    'up', 72, 96, 0, 72, 96, LONG_PRESS_THRESHOLD_MS * 2,
+  )), true);
+});
+
+test('共享升级入口阻止断龙闸动作期间通过快捷手势升级', () => {
+  let upgradeCalls = 0;
+  let message = '';
+  const game = Object.create(Game.prototype) as {
+    tryUpgradeTower(tower: unknown): boolean;
+  } & Record<string, unknown>;
+  Object.assign(game, {
+    uiSystem: { showMessage: (value: string) => { message = value; } },
+    towerSystem: {
+      upgradeTower: () => { upgradeCalls++; return true; },
+      getUpgradeFailureMessage: () => '',
+    },
+    syncGold() {},
+  });
+  const upgraded = game.tryUpgradeTower({ type: 10, gateState: 1 });
+  assert.equal(upgraded, false);
+  assert.equal(upgradeCalls, 0);
+  assert.match(message, /动作尚未结束/);
 });
 
 test('失败页载入期间锁定返回输入，按钮命中范围与绘制区域一致', () => {
