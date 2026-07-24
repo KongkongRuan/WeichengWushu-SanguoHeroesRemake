@@ -3205,6 +3205,8 @@ export class Game {
       paused: this.uiSystem.isPaused(),
       waveReady: this.enemySystem.canStartNextWave,
       comboCountdownSeconds: countdownMs == null ? null : Math.ceil(countdownMs / 100) / 10,
+      comboFastEligible: countdownMs != null && this.waveReadyElapsedMs <= DEPLOYMENT_CONFIG.fastMs,
+      combo: this.deployment.state.combo,
       battleIntel: mobileIntel,
       context: this.buildBar.isOpen
         ? 'bar'
