@@ -12,7 +12,7 @@
  *   打开入口 战斗确认键处理 行14538-14607 (塔→j(2..7), 可建格→j(0), 我城格→j(1))
  *
  * H5触屏适配 (注释标注的简化点):
- *   - 触屏升级/科技/塔操作第一次点选、第二次确认；建造卡片单击进入选位；点地图关栏
+ *   - 触屏建筑/升级/科技/塔操作第一次点选、第二次确认；建筑卡片可上拖快速建造；点地图关栏
  *   - 未解锁塔图标置灰 (原版不置灰, 仅选中时提示 b1015[115]; 按任务要求置灰)
  *   - 科技面板保留原版的建筑解锁和城堡部件状态
  *   - 明细区通过 TowerSystem 合成完整塔模型，与原版 a(type,level,...) 一致
@@ -644,12 +644,8 @@ export class BuildBarSystem {
             if (item === ACTION_CANCEL) {
               // 取消没有付费或破坏性，单击立即关闭。
               this.close();
-            } else if (this.aC === BAR_CAT_BUILD) {
-              // 建造卡片采用快速流程：点卡片后立即进入放置预览。
-              this.touchArmedIndex = null;
-              this.confirm();
             } else if (alreadyArmed) {
-              // 升级、科技与塔操作：第一次点选，第二次点击同一项才执行。
+              // 建筑、升级、科技与塔操作：第一次点选看详情，第二次点击同一项才执行。
               this.confirm();
             } else {
               this.touchArmedIndex = idx;
@@ -933,7 +929,11 @@ export class BuildBarSystem {
     const confirmationArmed = (this.touchOptimized && this.touchArmedIndex === this.aD)
       || this.demolishArmedIndex === this.aD;
     if (confirmationArmed && this.o < 0 && !this.actionNotice) {
-      const confirmation = item === ACTION_DEMOLISH ? '再次点击拆除' : '再次点击确认';
+      const confirmation = item === ACTION_DEMOLISH
+        ? '再次点击拆除'
+        : this.aC === BAR_CAT_BUILD
+          ? '再次点击进入选位 · 上拖图标可快速建造'
+          : '再次点击确认';
       const prompt = !this.touchOptimized && item === ACTION_DEMOLISH ? '再次按确认拆除' : confirmation;
       desc = desc ? `${prompt} · ${desc}` : prompt;
     }
